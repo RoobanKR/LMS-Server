@@ -23,13 +23,12 @@ const compilerRoutes = require("./routes/compilerRoutes");
 
 // Connect Database
 connectDB();
-app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
 
 // Init Middleware
 app.use(express.json({ extended: false }));
 app.use(
   cors({
-    origin: ["http://localhost:3000"],
+    origin: ["https://lms-client-self.vercel.app"],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
     exposedHeaders: ["Content-Length", "Authorization"],
