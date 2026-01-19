@@ -8,6 +8,7 @@ const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 
 
+
 exports.submitAnswer = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -140,15 +141,7 @@ if (category === 'We_Do' || category === 'You_Do') {
     nodeType: nodeType,
     // Always set subcategory for both We_Do and You_Do
     subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
-    screenRecord: screenRecordData,
-    recordingSessions: screenRecordData ? [{
-      sessionId: `session_${Date.now()}`,
-      startedAt: new Date(Date.now() - (recordingMetadata.duration || 0)),
-      endedAt: new Date(),
-      duration: recordingMetadata.duration || 0,
-      public_id: screenRecordData.public_id,
-      isMain: true
-    }] : [],
+   
     createdAt: new Date(),
     updatedAt: new Date()
   };
@@ -176,25 +169,7 @@ if (category === 'We_Do' || category === 'You_Do') {
     };
   }
   
-  // UPDATE THE SCREEN RECORDING IN CLOUDINARY
-  if (screenRecordData) {
-    existingExercise.screenRecord = screenRecordData;
-    
-    // Add recording session
-    if (!existingExercise.recordingSessions) {
-      existingExercise.recordingSessions = [];
-    }
-    
-    existingExercise.recordingSessions.push({
-      sessionId: `session_${Date.now()}`,
-      startedAt: new Date(Date.now() - (recordingMetadata.duration || 0)),
-      endedAt: new Date(),
-      duration: recordingMetadata.duration || 0,
-      public_id: screenRecordData.public_id,
-      isMain: true
-    });
-  }
-  
+
   // Update exercise metadata
   existingExercise.updatedAt = new Date();
   if (nodeId) existingExercise.nodeId = nodeId;
@@ -243,6 +218,7 @@ if (category === 'We_Do' || category === 'You_Do') {
     });
   }
 };
+
 
 
 
