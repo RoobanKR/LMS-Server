@@ -26,9 +26,9 @@
 // };
 
 // module.exports = { sendEmail };
-
-
+// utils/sendEmail.js
 const nodemailer = require("nodemailer");
+const validator = require("validator");
 require("dotenv").config();
 
 const transporter = nodemailer.createTransport({
@@ -39,8 +39,32 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const sendEmail = async (receiverEmails, emailSubject, emailBody, ccEmails = []) => {
+const sendEmail = async (...args) => {
   try {
+    let receiverEmails, emailSubject, emailBody, ccEmails;
+    
+    // Handle both object and parameter formats
+    if (args.length === 1 && typeof args[0] === 'object') {
+      // Object format
+      const emailData = args[0];
+      receiverEmails = emailData.receiverEmails;
+      emailSubject = emailData.subject || emailData.emailSubject;
+      emailBody = emailData.body || emailData.emailBody;
+      ccEmails = emailData.ccEmails || [];
+    } else {
+      // Parameter format
+      [receiverEmails, emailSubject, emailBody, ccEmails = []] = args;
+    }
+
+    // Validate receiverEmails
+    if (!receiverEmails) {
+      console.error("Error: No recipients defined");
+      return {
+        success: false,
+        error: "No recipients defined"
+      };
+    }
+
     const mailOptions = {
       from: process.env.NODEMAILER_FORM_EMAIL,
       to: receiverEmails,
@@ -49,22 +73,31 @@ const sendEmail = async (receiverEmails, emailSubject, emailBody, ccEmails = [])
       html: emailBody,
     };
 
-
     await transporter.sendMail(mailOptions);
     console.log("Email sent successfully to:", receiverEmails);
 
-    return true;
+    return {
+      success: true,
+      message: "Email sent successfully"
+    };
   } catch (error) {
-    console.error("Error sending email to:", receiverEmails, error);
-    return false;
+    console.error("Error sending email:", error);
+    return {
+      success: false,
+      error: error.message || "Failed to send email"
+    };
   }
 };
 
-module.exports = { sendEmail };
+// Email validation function
+const isValidEmail = (email) => {
+  return validator.isEmail(email);
+};
 
-
-
-
+module.exports = { 
+  sendEmail, 
+  isValidEmail
+};
 
 // const nodemailer = require("nodemailer");
 // const NotificationCount = require("../models/NotificationCountModal");

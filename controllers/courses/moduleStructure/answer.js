@@ -8,21 +8,14 @@ const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 
 
-const modelMap = {
-  modules: { model: Module1, path: "modules" },
-  submodules: { model: SubModule1, path: "submodules" },
-  topics: { model: Topic1, path: "topics" },
-  subtopics: { model: SubTopic1, path: "subtopics" },
-};
-
-exports.submitWeAnswer = async (req, res) => {
+exports.submitAnswer = async (req, res) => {
   try {
     const userId = req.user._id;
     const {
       courseId,
       exerciseId,
       questionId,
-      category = "We_Do",
+      category,
       subcategory,
       nodeId = "",
       nodeName = "",
@@ -115,13 +108,15 @@ exports.submitWeAnswer = async (req, res) => {
       user.courses[courseIndex].answers[category] = new Map();
     }
 
-    // Determine the exercise key based on category
-    let exerciseKey;
-    if (category === 'We_Do') {
-      exerciseKey = subcategory;
-    } else {
-      exerciseKey = exerciseId.toString();
-    }
+ // Determine the exercise key based on category
+let exerciseKey;
+if (category === 'We_Do' || category === 'You_Do') {
+  // For both We_Do and You_Do, use subcategory as the key
+  exerciseKey = subcategory;
+} else {
+  // For I_Do, use exerciseId as the key
+  exerciseKey = exerciseId.toString();
+}
 
     // Get or create the exercise array for this key
     let exerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey);
@@ -135,51 +130,81 @@ exports.submitWeAnswer = async (req, res) => {
       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
     );
 
-    if (exerciseIndex === -1) {
-      // Create new exercise entry
-      const newExercise = {
-        exerciseId: new mongoose.Types.ObjectId(exerciseId),
-        questions: [questionAnswer],
-        nodeId: nodeId,
-        nodeName: nodeName,
-        nodeType: nodeType,
-        subcategory: category === 'We_Do' ? subcategory : undefined,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
-      exerciseArray.push(newExercise);
-    } else {
-      // Update existing exercise
-      const existingExercise = exerciseArray[exerciseIndex];
-      
-      // Find existing question in this exercise
-      const existingQuestionIndex = existingExercise.questions.findIndex(
-        q => q.questionId && q.questionId.toString() === questionId
-      );
-      
-      if (existingQuestionIndex === -1) {
-        // Add new question to this exercise
-        existingExercise.questions.push(questionAnswer);
-      } else {
-        // Update existing question in this exercise
-        const existingQuestion = existingExercise.questions[existingQuestionIndex];
-        existingExercise.questions[existingQuestionIndex] = {
-          ...questionAnswer,
-          attempts: (existingQuestion.attempts || 0) + 1,
-          createdAt: existingQuestion.createdAt || new Date(),
-          updatedAt: new Date()
-        };
-      }
-      
-      // Update exercise metadata
-      existingExercise.updatedAt = new Date();
-      if (nodeId) existingExercise.nodeId = nodeId;
-      if (nodeName) existingExercise.nodeName = nodeName;
-      if (nodeType) existingExercise.nodeType = nodeType;
-      if (category === 'We_Do' && subcategory) {
-        existingExercise.subcategory = subcategory;
-      }
+ if (exerciseIndex === -1) {
+  // Create new exercise entry
+  const newExercise = {
+    exerciseId: new mongoose.Types.ObjectId(exerciseId),
+    questions: [questionAnswer],
+    nodeId: nodeId,
+    nodeName: nodeName,
+    nodeType: nodeType,
+    // Always set subcategory for both We_Do and You_Do
+    subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
+    screenRecord: screenRecordData,
+    recordingSessions: screenRecordData ? [{
+      sessionId: `session_${Date.now()}`,
+      startedAt: new Date(Date.now() - (recordingMetadata.duration || 0)),
+      endedAt: new Date(),
+      duration: recordingMetadata.duration || 0,
+      public_id: screenRecordData.public_id,
+      isMain: true
+    }] : [],
+    createdAt: new Date(),
+    updatedAt: new Date()
+  };
+  exerciseArray.push(newExercise);
+} else {
+  // Update existing exercise
+  const existingExercise = exerciseArray[exerciseIndex];
+  
+  // Find existing question in this exercise
+  const existingQuestionIndex = existingExercise.questions.findIndex(
+    q => q.questionId && q.questionId.toString() === questionId
+  );
+  
+  if (existingQuestionIndex === -1) {
+    // Add new question to this exercise
+    existingExercise.questions.push(questionAnswer);
+  } else {
+    // Update existing question in this exercise
+    const existingQuestion = existingExercise.questions[existingQuestionIndex];
+    existingExercise.questions[existingQuestionIndex] = {
+      ...questionAnswer,
+      attempts: (existingQuestion.attempts || 0) + 1,
+      createdAt: existingQuestion.createdAt || new Date(),
+      updatedAt: new Date()
+    };
+  }
+  
+  // UPDATE THE SCREEN RECORDING IN CLOUDINARY
+  if (screenRecordData) {
+    existingExercise.screenRecord = screenRecordData;
+    
+    // Add recording session
+    if (!existingExercise.recordingSessions) {
+      existingExercise.recordingSessions = [];
     }
+    
+    existingExercise.recordingSessions.push({
+      sessionId: `session_${Date.now()}`,
+      startedAt: new Date(Date.now() - (recordingMetadata.duration || 0)),
+      endedAt: new Date(),
+      duration: recordingMetadata.duration || 0,
+      public_id: screenRecordData.public_id,
+      isMain: true
+    });
+  }
+  
+  // Update exercise metadata
+  existingExercise.updatedAt = new Date();
+  if (nodeId) existingExercise.nodeId = nodeId;
+  if (nodeName) existingExercise.nodeName = nodeName;
+  if (nodeType) existingExercise.nodeType = nodeType;
+  // Always update subcategory for both We_Do and You_Do
+  if ((category === 'We_Do' || category === 'You_Do') && subcategory) {
+    existingExercise.subcategory = subcategory;
+  }
+}
 
     // Update the Map with modified array
     user.courses[courseIndex].answers[category].set(exerciseKey, exerciseArray);

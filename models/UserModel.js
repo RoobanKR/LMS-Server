@@ -47,20 +47,33 @@ const questionAnswerSchema = new mongoose.Schema({
   submittedAt: {
     type: Date,
     default: Date.now
-  }
+  },
+
 }, {
   timestamps: true
 });
 
-// Exercise Progress Schema - Organized by subcategory for We_Do
+// Exercise Progress Schema with Cloudinary support
 const exerciseProgressSchema = new mongoose.Schema({
   exerciseId: {
     type: mongoose.Schema.Types.ObjectId,
   },
-    exerciseName: {
+  exerciseName: {
     type: String,
   },
   questions: [questionAnswerSchema],
+   
+  status: {
+    type: String,
+    enum: ['in-progress', 'completed', 'terminated'],
+    default: 'in-progress'
+  },
+  isLocked: {
+    type: Boolean,
+    default: false,
+    description: "If true, user cannot re-enter this exercise"
+  },
+ 
   // Context information
   nodeId: {
     type: String,
@@ -77,8 +90,87 @@ const exerciseProgressSchema = new mongoose.Schema({
   subcategory: {
     type: String,
     trim: true,
-    default: "practical" // Default to practical for We_Do
-  }
+  },
+  // Cloudinary screen recording for entire exercise
+  screenRecord: {
+    public_id: {
+      type: String,
+      default: ""
+    },
+    url: {
+      type: String,
+      default: ""
+    },
+    secure_url: {
+      type: String,
+      default: ""
+    },
+    format: {
+      type: String,
+      default: ""
+    },
+    resource_type: {
+      type: String,
+    
+    },
+    duration: {
+      type: Number,
+      default: 0
+    },
+    bytes: {
+      type: Number,
+      default: 0
+    },
+    width: {
+      type: Number,
+      default: 0
+    },
+    height: {
+      type: Number,
+      default: 0
+    },
+    created_at: {
+      type: Date,
+      default: Date.now
+    },
+    tags: [{
+      type: String,
+      trim: true
+    }],
+    folder: {
+      type: String,
+      default: "screen-recordings"
+    },
+    version: {
+      type: Number,
+      default: 1
+    },
+    isProcessed: {
+      type: Boolean,
+      default: false
+    },
+    metadata: {
+      recordingType: {
+        type: String,
+     
+      },
+      deviceInfo: String,
+      screenResolution: String,
+      frameRate: Number,
+      codec: String
+    }
+  },
+  recordingSessions: [{
+    sessionId: String,
+    startedAt: Date,
+    endedAt: Date,
+    duration: Number,
+    public_id: String,
+    isMain: {
+      type: Boolean,
+      default: false
+    }
+  }]
 }, {
   timestamps: true
 });

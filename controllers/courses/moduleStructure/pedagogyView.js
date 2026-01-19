@@ -3687,7 +3687,148 @@ exports.getSubcategories = async (req, res) => {
 };
 
 
-
+exports.lockExercise = async (req, res) => {
+  try {
+    const userId = req.body.targetUserId || req.user._id;
+    const {
+      courseId,
+      exerciseId,
+      category = 'We_Do',
+      subcategory,
+      status,
+      isLocked,
+      reason
+    } = req.body;
+ 
+    console.log(`🔒 LOCK REQ: User: ${userId} | Ex: ${exerciseId} | Locked: ${isLocked}`);
+ 
+    if (!courseId || !exerciseId || !subcategory) {
+      return res.status(400).json({ message: [{ key: "error", value: "Missing required fields" }] });
+    }
+ 
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
+ 
+    // 1. Find Course Index (Important for markModified)
+    const courseIndex = user.courses.findIndex(c => c.courseId && c.courseId.toString() === courseId);
+   
+    if (courseIndex === -1) {
+      return res.status(404).json({ message: [{ key: "error", value: "Course not enrolled" }] });
+    }
+ 
+    const userCourse = user.courses[courseIndex];
+ 
+    // 2. Ensure Path Exists
+    if (!userCourse.answers) userCourse.answers = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
+   
+    const categoryKey = category || 'We_Do';
+    if (!userCourse.answers[categoryKey]) userCourse.answers[categoryKey] = new Map();
+   
+    const categoryMap = userCourse.answers[categoryKey];
+   
+    // 3. Get Exercises Array (Clone it to ensure Mongoose detects change on set)
+    let exercisesArray = categoryMap.get(subcategory) || [];
+    // If it's a Mongoose Array, convert to JS array to edit, then reset
+    if (exercisesArray.toObject) exercisesArray = exercisesArray.toObject();
+ 
+    // 4. Update or Push
+    const exerciseIndex = exercisesArray.findIndex(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
+ 
+    if (exerciseIndex > -1) {
+      // Update Existing
+      if (status) exercisesArray[exerciseIndex].status = status;
+      if (isLocked !== undefined) exercisesArray[exerciseIndex].isLocked = isLocked;
+      // If terminated and no specific lock status sent, force lock
+      else if (status === 'terminated') exercisesArray[exerciseIndex].isLocked = true;
+     
+      console.log("✅ Updated Existing Entry:", exercisesArray[exerciseIndex]);
+    } else {
+      // Create New
+      const newEntry = {
+        exerciseId: new mongoose.Types.ObjectId(exerciseId),
+        status: status || 'in-progress',
+        isLocked: isLocked !== undefined ? isLocked : (status === 'terminated'),
+        questions: []
+      };
+      exercisesArray.push(newEntry);
+      console.log("✅ Created New Entry:", newEntry);
+    }
+ 
+    // 5. CRITICAL: Save and Mark Modified explicitly
+    categoryMap.set(subcategory, exercisesArray);
+   
+    // Mark the SPECIFIC path modified.
+    // Mongoose Maps need this to know data changed inside the Map.
+    user.markModified(`courses.${courseIndex}.answers.${categoryKey}`);
+   
+    await user.save();
+ 
+    return res.status(200).json({
+      message: [{ key: "success", value: "Exercise status updated successfully" }]
+    });
+ 
+  } catch (error) {
+    console.error("Lock Exercise Error:", error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
+  }
+};
+ 
+// 2. Get Exercise Status (Debugged)
+exports.getExerciseStatus = async (req, res) => {
+  try {
+    const userId = req.query.targetUserId || req.user._id;
+    const { courseId, exerciseId, category = 'We_Do', subcategory } = req.query;
+ 
+    // console.log(`🔍 STATUS REQ: User: ${userId} | Ex: ${exerciseId}`);
+ 
+    if (!courseId || !exerciseId || !subcategory) {
+      return res.status(400).json({ message: [{ key: "error", value: "Missing parameters" }] });
+    }
+ 
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
+ 
+    const userCourse = user.courses ? user.courses.find(c => c.courseId && c.courseId.toString() === courseId) : null;
+   
+    if (!userCourse || !userCourse.answers) {
+      return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
+    }
+ 
+    const categoryKey = category || 'We_Do';
+    const categoryMap = userCourse.answers[categoryKey];
+   
+    if (!categoryMap) {
+        return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
+    }
+ 
+    const exercisesArray = categoryMap.get(subcategory) || [];
+   
+    // Find the exercise
+    const exercise = exercisesArray.find(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
+ 
+    if (exercise) {
+      // console.log("👉 Found Status:", exercise.isLocked, exercise.status);
+      return res.status(200).json({
+        success: true,
+        data: {
+          isLocked: exercise.isLocked || false,
+          status: exercise.status || 'in-progress'
+        }
+      });
+    }
+ 
+    // console.log("👉 Exercise Not Found in Array, returning unlocked");
+    return res.status(200).json({
+      success: true,
+      data: { isLocked: false, status: 'new' }
+    });
+ 
+  } catch (error) {
+    console.error("Get Status Error:", error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
+  }
+};
+ 
 
 // Add question to exercise based on exerciseId
 exports.addQuestion = async (req, res) => {
@@ -5069,3 +5210,7 @@ exports.deleteQuestion = async (req, res) => {
     });
   }
 };
+
+
+
+

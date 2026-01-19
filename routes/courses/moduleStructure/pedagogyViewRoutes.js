@@ -23,6 +23,8 @@ const {
   deleteQuestion,
   getAllCoursesDataWithoutAINotes,
   studentDashboardAnalyticsOptimized,
+  lockExercise,
+  getExerciseStatus,
 } = require("../../../controllers/courses/moduleStructure/pedagogyView");
 
 // Routes
@@ -91,4 +93,9 @@ router.delete(
   "/question-delete/:type/:id/:exerciseId/:questionId",
   deleteQuestion
 );
+
+router.post("/exercise/lock", userAuth, lockExercise);
+ 
+// 2. Check Exercise Status
+router.get("/exercise/status", userAuth, getExerciseStatus)
 module.exports = router;

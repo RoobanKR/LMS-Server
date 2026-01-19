@@ -19,7 +19,7 @@ const xlsx = require("xlsx");
 const { createClient } = require("@supabase/supabase-js");
 const BulkSendMail = require("../models/BulkSendMailCount");
 const InstitutionModal = require("../models/InstitutionModal");
-const roleModel = require("../models/RoleModel");
+const roleModel = require("../models/roleModel");
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 
@@ -39,14 +39,19 @@ exports.Addusers = async (req, res) => {
       status,
       course,
       degree,
-      department, year, semester,
+      department, 
+      year, 
+      semester,
       batch,
     } = req.body;
+    
     if (!email || !firstName || !lastName || !password) {
       return res.status(400).json({
         message: [{ key: "error", value: "Missing required fields" }],
       });
     }
+    
+    // Validate email format
     if (!emailUtil.isValidEmail(email)) {
       return res.status(400).json({
         message: [{ key: "error", value: "Invalid email format" }],
@@ -111,7 +116,9 @@ exports.Addusers = async (req, res) => {
       course,
       batch,
       degree,
-      department, year, semester,
+      department, 
+      year, 
+      semester,
       status,
       institution: req.user.institution,
       permission: permission,
@@ -148,24 +155,18 @@ exports.Addusers = async (req, res) => {
       </div>
     `;
 
+    // Send email - using the updated format
     const emailResult = await emailUtil.sendEmail({
-      fromEmail: process.env.NODEMAILER_FORM_EMAIL,
       receiverEmails: email,
       subject: emailSubject,
       body: emailBody,
-      institutionId: req.user.institution,
-      users: [{
-        email: email,
-        firstName: firstName,
-        lastName: lastName,
-        role: role,
-      }],
-      sendType: "USER_REGISTRATION"
+      // Optional: ccEmails if needed
+      // ccEmails: ['admin@example.com']
     });
 
     if (emailResult.success) {
       res.status(201).json({
-        message: [{ key: "success", value: "User registered successfully" }],
+        message: [{ key: "success", value: "User registered successfully with welcome email" }],
         user: {
           _id: newUser._id,
           email: newUser.email,
@@ -173,6 +174,7 @@ exports.Addusers = async (req, res) => {
           lastName: newUser.lastName,
           institution: newUser.institution,
           permission: newUser.permission,
+          profile: newUser.profile,
         },
         token: token,
       });
@@ -192,6 +194,7 @@ exports.Addusers = async (req, res) => {
           lastName: newUser.lastName,
           institution: newUser.institution,
           permission: newUser.permission,
+          profile: newUser.profile,
         },
         token: token,
       });
