@@ -38,7 +38,7 @@ app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Ba
 app.use(express.json({ extended: false }));
 app.use(
   cors({
-    origin: ["http://localhost:3000","http://localhost:3001","http://localhost:3002"],
+    origin: ["http://localhost:3000","https://lms-client-jade-three.vercel.app"],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
     exposedHeaders: ["Content-Length", "Authorization"],
