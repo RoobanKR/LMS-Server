@@ -1,8 +1,4 @@
 {
   "JWT_TOKEN_KEY": "KJ9BK0DF098353NF09E230RH2039RH",
-  "BASE_URL": "http://localhost:3000",
-  "emailConfig": {
-    "user": "roobankr6@gmail.com",
-    "pass": "jvjkdwuhtmgvlldf"
-  }
+  "BASE_URL": "http://localhost:3000"
 }

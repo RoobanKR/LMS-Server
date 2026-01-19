@@ -98,12 +98,7 @@ exports.createPrintSetting = async (req, res) => {
 
     const saved = await newSetting.save();
 
-    // Log the data being saved for debugging
-    console.log('Saving logoSettings:', {
-      ...logoSettings,
-      leftLogoUrl,
-      rightLogoUrl,
-    });
+
 
     return res.status(201).json({
       message: [

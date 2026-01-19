@@ -4,29 +4,32 @@ const mongoose = require("mongoose");
 const institutionSchema = new mongoose.Schema({
     inst_id: {
         type: String,
-        required: [true, "createdBy is required"] 
+        required: [true, "inst_id is required"] 
     },
     inst_name: {
         type: String,
-        required: [true, "createdBy is required"] 
+        required: [true, "inst_name is required"] 
     },
 
     inst_owner: {
         type: String,
-        required: [true, "createdBy is required"] 
+        required: [true, "owner name is required"] 
 
     },
     
     phone: {
         type: String,
-        required: [true, "createdBy is required"] 
+        required: [true, "phone is required"] 
 
     },
     address: {
         type: String,
-        required: [true, "createdBy is required"] 
+        required: [true, "address is required"] 
     },
-   
+   basedOn: {
+        type: String,
+        required: [true, "basedOn is required"] 
+    },
     createdAt: {
         type: Date,
         default: new Date(),

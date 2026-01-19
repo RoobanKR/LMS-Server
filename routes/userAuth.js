@@ -15,6 +15,12 @@ const {
   getAllTokens,
   toggleUserStatus,
   bulkToggleUserStatus,
+  bulkUploadUsers,
+  UpdateUserWithPermission,
+  GetMyPermission,
+  GetUserPermission,
+  bulkUpdatePermissions,
+
 
 } = require('../controllers/userAuth.js')
 
@@ -43,6 +49,18 @@ router.delete('/delete/users/:userId',userAuth, DeleteUser)
 router.put("/user/status/:userId",userAuth,  toggleUserStatus);
 
 router.put("/user/bulk-status",userAuth,  bulkToggleUserStatus);
+
+
+router.post('/user/bulk-upload-users',userAuth, bulkUploadUsers)
+
+
+router.put("/user-permission/update/:userId",userAuth, UpdateUserWithPermission);
+router.put("/user-permission/bulk-update",userAuth, bulkUpdatePermissions);
+
+router.get("/my-permission",userAuth, GetMyPermission);
+
+router.get("/user/get-permission/:userId", userAuth, GetUserPermission);
+
 
 
 module.exports = router

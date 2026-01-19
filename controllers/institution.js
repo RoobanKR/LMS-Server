@@ -7,7 +7,7 @@ const Institution = require("../models/InstitutionModal");
 
 exports.createInstitution = async (req, res) => {
   try {
-      const { inst_name, inst_owner, phone, address, createdBy } = req.body;
+      const { inst_name, inst_owner, phone, address,basedOn, createdBy } = req.body;
 
       const existingInstitution = await Institution.findOne({ inst_name });
       if (existingInstitution) {
@@ -37,6 +37,7 @@ exports.createInstitution = async (req, res) => {
           phone,
           inst_owner,
           address,
+          basedOn,
           createdBy: req?.user?.email || "roobankr5@gmail.com", // Uncomment and modify as needed for actual user context
       });
 
@@ -89,7 +90,7 @@ exports.getAllInstitution= async (req, res) => {
 
   exports.updateInstitution = async (req, res) => {
     const { id } = req.params;
-    const { inst_name, inst_owner, phone, address } = req.body;
+    const { inst_name, inst_owner, phone, address,basedOn } = req.body;
 
     try {
         const institution = await Institution.findById(id);
@@ -101,6 +102,7 @@ exports.getAllInstitution= async (req, res) => {
         institution.inst_owner = inst_owner || institution.inst_owner;
         institution.phone = phone || institution.phone;
         institution.address = address || institution.address;
+        institution.basedOn = basedOn || institution.basedOn;
         // institution.lastModifiedBy = req.user.email; // Optional: Track who modified the record
         // institution.lastModifiedOn = Date.now(); // Optional: Track when the record was modified
 

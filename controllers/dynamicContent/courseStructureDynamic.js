@@ -801,7 +801,6 @@ addClient: async (req, res) => {
   addService: async (req, res) => {
     try {
       const institutionId = req.user.institution
-      console.log(institutionId);
      
       if (!institutionId) {
         return res.status(400).json({

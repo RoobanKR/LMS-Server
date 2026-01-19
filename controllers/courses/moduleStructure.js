@@ -26,7 +26,6 @@ exports.addElementToModuleStructure = async (req, res) => {
         updatedBy: req.user?.id || 'system'
       });
      
-      console.log(`Creating new ModuleStructure for course: ${queryValue}`);
     }
  
     switch (action) {

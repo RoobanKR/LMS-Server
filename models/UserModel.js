@@ -2,15 +2,172 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const validator = require("validator");
 
-const subPermissionsSchema = new mongoose.Schema({
-  subPermissions: { type: String },
-  subPermissionsFunctionality: [{ type: String }],
+// Question Answer Schema
+const questionAnswerSchema = new mongoose.Schema({
+  questionId: {
+    type: mongoose.Schema.Types.ObjectId,
+  },
+    questionTitle: {
+    type: String,
+  },
+  codeAnswer: {
+    type: String,
+    trim: true
+  },
+  language: {
+    type: String,
+   
+  },
+  isCorrect: {
+    type: Boolean,
+    default: false
+  },
+    totalScore: {
+    type: Number,
+   
+    default: 0
+  },
+  score: {
+    type: Number,
+   
+    default: 0
+  },
+   feedback: {
+    type: String
+  },
+  status: {
+    type: String,
+    enum: ['solved', 'attempted', 'skipped', 'submitted','evaluated'],
+    default: 'attempted'
+  },
+  attempts: {
+    type: Number,
+    default: 0
+  },
+  submittedAt: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  timestamps: true
 });
 
-const PermissionSchema = new mongoose.Schema({
-  permissions: { type: String },
-  permissionFunctionality: { type: [String], default: [] },
-  subPermission: { type: [subPermissionsSchema], default: [] },
+// Exercise Progress Schema - Organized by subcategory for We_Do
+const exerciseProgressSchema = new mongoose.Schema({
+  exerciseId: {
+    type: mongoose.Schema.Types.ObjectId,
+  },
+    exerciseName: {
+    type: String,
+  },
+  questions: [questionAnswerSchema],
+  // Context information
+  nodeId: {
+    type: String,
+    trim: true
+  },
+  nodeName: {
+    type: String,
+    trim: true
+  },
+  nodeType: {
+    type: String,
+    trim: true
+  },
+  subcategory: {
+    type: String,
+    trim: true,
+    default: "practical" // Default to practical for We_Do
+  }
+}, {
+  timestamps: true
+});
+
+// Updated Answer Schema with Map structure
+const answerSchema = new mongoose.Schema({
+  I_Do: { 
+    type: Map,
+    of: [exerciseProgressSchema],
+    default: new Map()
+  },
+  We_Do: { 
+    type: Map,
+    of: [exerciseProgressSchema],
+    default: new Map()
+  },
+  You_Do: { 
+    type: Map,
+    of: [exerciseProgressSchema],
+    default: new Map()
+  },
+});
+
+// Individual Course Schema
+const userCourseSchema = new mongoose.Schema({
+  courseId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Course-Structure",
+  },
+  answers: {
+    type: answerSchema,
+    default: () => ({
+      I_Do: new Map(),
+      We_Do: new Map(),
+      You_Do: new Map()
+    })
+  },
+  lastAccessed: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  timestamps: true
+});
+
+// Update User Schema to use userCourseSchema directly
+const permissionItemSchema = new mongoose.Schema({
+  permissionName: { 
+    type: String, 
+    required: [true, "Permission name is required"],
+    trim: true
+  },
+  permissionKey: { 
+    type: String, 
+    required: [true, "Permission key is required"],
+    trim: true,
+    unique: true
+  },
+  permissionFunctionality: [{ 
+    type: String, 
+    trim: true 
+  }],
+  icon: {
+    type: String,
+    required: [true, "Icon name is required"],
+    trim: true,
+    default: "Shield"
+  },
+  color: {
+    type: String,
+    required: [true, "Color is required"],
+    trim: true,
+    default: "blue"
+  },
+  description: {
+    type: String,
+    trim: true,
+    default: ""
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  order: {
+    type: Number,
+    default: 0
+  }
+}, {
+  timestamps: true
 });
 
 const tokenSchema = new mongoose.Schema({
@@ -22,8 +179,143 @@ const tokenSchema = new mongoose.Schema({
   },
 });
 
-tokenSchema.index({ createdAt: 1 }, { expireAfterSeconds: 86400 });
+const noteSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: [true, "Note title is required"],
+    trim: true,
+    maxlength: 200,
+    default: "Untitled Note"
+  },
+  content: {
+    type: String,
+    default: ""
+  },
+  tags: [{
+    type: String,
+    trim: true
+  }],
+  isPinned: {
+    type: Boolean,
+    default: false
+  },
+  color: {
+    type: String,
+    default: "#ffffff"
+  },
+  lastEdited: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  timestamps: true
+});
+const aiHistorySchema = new mongoose.Schema({
+  sessionId: {
+    type: String,
+    required: true,
+    default: () => `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  },
+  title: {
+    type: String,
+    default: "New Chat",
+    trim: true,
+    maxlength: 100
+  },
+  messages: [{
+    content: {
+      type: String,
+      required: true
+    },
+    role: {
+      type: String,
+      enum: ["user", "assistant"],
+      required: true
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now
+    },
+    metadata: {
+      context: {
+        topicTitle: String,
+        fileName: String,
+        fileType: String,
+        isDocumentView: Boolean
+      }
+    }
+  }],
+  context: {
+    topicTitle: String,
+    fileName: String,
+    fileType: String,
+    isDocumentView: Boolean
+  },
+  isArchived: {
+    type: Boolean,
+    default: false
+  },
+  lastMessageAt: {
+    type: Date,
+    default: Date.now
+  },
+  messageCount: {
+    type: Number,
+    default: 0
+  }
+}, {
+  timestamps: true
+});
 
+const notificationSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    trim: true
+  },
+  message: {
+    type: String,
+  },
+  type: {
+    type: String,
+    enum: ['info', 'success', 'warning', 'error', 'enrollment'],
+    default: 'info'
+  },
+  relatedEntity: {
+    type: String,
+    enum: ['course', 'assignment', 'announcement', 'enrollment', 'system',],
+    default: 'enrollment'
+  },
+  relatedEntityId: {
+    type: mongoose.Schema.Types.ObjectId
+  },
+  isRead: {
+    type: Boolean,
+    default: false
+  },
+  metadata: {
+    type: Map,
+    of: mongoose.Schema.Types.Mixed,
+    default: new Map()
+  },
+  // Add enrolledBy as a separate reference
+  enrolledBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'LMS-User',
+    default: null
+  },
+  isFavorite: {
+    type: Boolean,
+    default: false
+  },
+  expiresAt: {
+    type: Date,
+    default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days from now
+  }
+}, {
+  timestamps: true
+});
+
+// Updated User Schema - Remove firstSchema and secondSchema
 const userSchema = new mongoose.Schema({
   institution: {
     type: mongoose.Schema.Types.ObjectId,
@@ -44,7 +336,6 @@ const userSchema = new mongoose.Schema({
   },
   lastName: {
     type: String,
-    // required: true,
   },
   phone: {
     type: String,
@@ -61,25 +352,50 @@ const userSchema = new mongoose.Schema({
     type: String,
   },
   role: {
-    type: String,
-    required: true,
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Role",
+    default: null,
   },
-  permission: PermissionSchema,
+  degree: {
+    type: String,
+  },
+  department: {
+    type: String,
+  },
+  year: {
+    type: String,
+  },
+  semester: {
+    type: String,
+  },
+  batch: {
+    type: String,
+  },
+  permissions: [permissionItemSchema],
   status: {
     type: String,
     enum: ["active", "inactive"],
   },
+  notes: [noteSchema],
+    ai_history: [aiHistorySchema],
+
+      notifications: [notificationSchema],
+
   createdAt: {
     type: Date,
     default: new Date(),
   },
   createdBy: {
     type: String,
-    // required: [true, "createdBy is required"],
   },
+  // Simple courses array with userCourseSchema
+  courses: [userCourseSchema],
   tokens: [tokenSchema],
+}, {
+  timestamps: true
 });
 
+// Pre-save hook for password hashing
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
 
@@ -89,6 +405,67 @@ userSchema.pre("save", async function (next) {
   } catch (error) {
     next(error);
   }
+});
+userSchema.methods.addNotification = async function(notificationData) {
+  try {
+    const notification = {
+      ...notificationData,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    this.notifications.unshift(notification); // Add to beginning for newest first
+    this.unreadNotificationCount = this.notifications.filter(n => !n.isRead).length;
+    
+    await this.save();
+    return notification;
+  } catch (error) {
+    console.error('Error adding notification:', error);
+    throw error;
+  }
+};
+
+// Method to mark notification as read
+userSchema.methods.markNotificationAsRead = async function(notificationId) {
+  const notification = this.notifications.id(notificationId);
+  if (notification && !notification.isRead) {
+    notification.isRead = true;
+    notification.updatedAt = new Date();
+    this.unreadNotificationCount = Math.max(0, this.unreadNotificationCount - 1);
+    await this.save();
+  }
+  return notification;
+};
+
+// Method to mark all notifications as read
+userSchema.methods.markAllNotificationsAsRead = async function() {
+  this.notifications.forEach(notification => {
+    if (!notification.isRead) {
+      notification.isRead = true;
+      notification.updatedAt = new Date();
+    }
+  });
+  this.unreadNotificationCount = 0;
+  await this.save();
+};
+
+// Pre-save hook to update unread notification count
+userSchema.pre('save', function(next) {
+  if (this.isModified('notifications')) {
+    this.unreadNotificationCount = this.notifications.filter(n => !n.isRead).length;
+  }
+  next();
+});
+// Update lastEdited timestamp before saving notes
+userSchema.pre('save', function(next) {
+  if (this.isModified('notes')) {
+    this.notes.forEach(note => {
+      if (note.isModified()) {
+        note.lastEdited = new Date();
+      }
+    });
+  }
+  next();
 });
 
 module.exports = mongoose.model("LMS-User", userSchema);

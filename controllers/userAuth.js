@@ -3,17 +3,23 @@ const Otp = require("../models/OTPModel");
 const { createSecretToken } = require("../config/secretToken");
 const config = require("config");
 const BASE_URL = config.get("BASE_URL");
+const mongoose = require("mongoose");
+
 const bcrypt = require("bcryptjs");
 const emailUtil = require("../utils/sendEmail");
+const EmailService = require("../utils/sendEmail");
 const jwt = require("jsonwebtoken");
 const JWT_TOKEN_KEY = config.get("JWT_TOKEN_KEY");
-const otpGenerator = require("otp-generator");
 const nodemailer = require("nodemailer");
 const path = require("path");
 const fs = require("fs");
 const tokenModal = require("../models/tokenModal");
+const xlsx = require("xlsx");
 
 const { createClient } = require("@supabase/supabase-js");
+const BulkSendMail = require("../models/BulkSendMailCount");
+const InstitutionModal = require("../models/InstitutionModal");
+const roleModel = require("../models/roleModel");
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 
@@ -31,7 +37,21 @@ exports.Addusers = async (req, res) => {
       permission,
       password,
       status,
+      course,
+      degree,
+      department, year, semester,
+      batch,
     } = req.body;
+    if (!email || !firstName || !lastName || !password) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Missing required fields" }],
+      });
+    }
+    if (!emailUtil.isValidEmail(email)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid email format" }],
+      });
+    }
 
     const existingEmployee = await User.findOne({ email });
     if (existingEmployee) {
@@ -57,7 +77,7 @@ exports.Addusers = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${uniqueFileName}`;
     } else {
       const currentDate = new Date();
       const defaultFileName = `default_profile_image_${currentDate.getTime()}.jpg`;
@@ -76,7 +96,7 @@ exports.Addusers = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${defaultFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${defaultFileName}`;
     }
 
     const newUser = await User.create({
@@ -88,6 +108,10 @@ exports.Addusers = async (req, res) => {
       password,
       profile: imageUrl,
       role,
+      course,
+      batch,
+      degree,
+      department, year, semester,
       status,
       institution: req.user.institution,
       permission: permission,
@@ -96,8 +120,7 @@ exports.Addusers = async (req, res) => {
 
     const token = createSecretToken(newUser._id);
 
-    // Send welcome email
-    const emailSubject = "Welcome to smartlms HUB - Your Account Details";
+    const emailSubject = "Welcome to smartlms LMS - Your Account Details";
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #333;">Welcome to the smartlms Dashboard</h2>
@@ -107,14 +130,13 @@ exports.Addusers = async (req, res) => {
           <h3 style="color: #495057;">Your Account Details:</h3>
           <p><strong>Name:</strong> ${firstName} ${lastName}</p>
           <p><strong>Email:</strong> ${email}</p>
-          <p><strong>Role:</strong> ${role}</p>
           <p><strong>Temporary Password:</strong> ${password}</p>
         </div>
         
         <p><strong>Important:</strong> Please change your password after your first login for security purposes.</p>
         
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${process.env.BASE_URL || "http://localhost:3000"}/signin" 
+          <a href="${process.env.BASE_URL || "http://localhost:3000"}/login" 
              style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
              Login to Your Account
           </a>
@@ -126,9 +148,22 @@ exports.Addusers = async (req, res) => {
       </div>
     `;
 
-    const emailSent = await emailUtil.sendEmail(email, emailSubject, emailBody);
+    const emailResult = await emailUtil.sendEmail({
+      fromEmail: process.env.NODEMAILER_FORM_EMAIL,
+      receiverEmails: email,
+      subject: emailSubject,
+      body: emailBody,
+      institutionId: req.user.institution,
+      users: [{
+        email: email,
+        firstName: firstName,
+        lastName: lastName,
+        role: role,
+      }],
+      sendType: "USER_REGISTRATION"
+    });
 
-    if (emailSent) {
+    if (emailResult.success) {
       res.status(201).json({
         message: [{ key: "success", value: "User registered successfully" }],
         user: {
@@ -136,7 +171,6 @@ exports.Addusers = async (req, res) => {
           email: newUser.email,
           firstName: newUser.firstName,
           lastName: newUser.lastName,
-          role: newUser.role,
           institution: newUser.institution,
           permission: newUser.permission,
         },
@@ -148,7 +182,7 @@ exports.Addusers = async (req, res) => {
           { key: "success", value: "User registered successfully" },
           {
             key: "warning",
-            value: "Email sending failed - please inform user manually",
+            value: `Welcome email failed to send: ${emailResult.error || 'Unknown error'}`,
           },
         ],
         user: {
@@ -156,8 +190,8 @@ exports.Addusers = async (req, res) => {
           email: newUser.email,
           firstName: newUser.firstName,
           lastName: newUser.lastName,
-          role: newUser.role,
           institution: newUser.institution,
+          permission: newUser.permission,
         },
         token: token,
       });
@@ -189,7 +223,7 @@ exports.Addusers = async (req, res) => {
   }
 };
 
-// Updated UserSignIn function
+
 module.exports.UserSignIn = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -200,7 +234,7 @@ module.exports.UserSignIn = async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email }).populate('institution');
+    const user = await User.findOne({ email }).populate('institution').populate('role'); // Make sure to populate role
 
     if (!user) {
       return res.status(400).json({
@@ -208,8 +242,6 @@ module.exports.UserSignIn = async (req, res) => {
       });
     }
 
-
-    // Check user status - only allow active users to login
     if (user.status !== 'active') {
       let errorMessage = "Account is not active";
       
@@ -224,7 +256,6 @@ module.exports.UserSignIn = async (req, res) => {
       });
     }
 
-    // Compare passwords
     const auth = await bcrypt.compare(password, user.password);
     if (!auth) {
       return res.status(400).json({
@@ -240,21 +271,21 @@ module.exports.UserSignIn = async (req, res) => {
 
     const token = createSecretToken(user._id, "2d");
 
-    // Store token in separate Token collection
     const newToken = new tokenModal({
       token: token,
     });
     await newToken.save();
 
     const sanitizedUser = {
+      _id: user._id,
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
       role: user.role,
       firstTimeLoginDone: isFirstTimeLogin,
-      institution_id: user.institution._id,
-      userId: user._id,
-      institutionName: user.institution.inst_name,
+      institution: user.institution._id,
+      status: user.status,
+      permissions:user.permissions,
     };
 
     res.cookie("token", token, {
@@ -266,12 +297,14 @@ module.exports.UserSignIn = async (req, res) => {
 
     return res.status(201).json({
       message: [
-        { key: "success", value: `${user.role} logged in successfully` },
+        { key: "success", value: `${user.role.originalRole} logged in successfully` },
       ],
       user: sanitizedUser,
       token: token,
       institution: user.institution._id,
       institutionName: user.institution.inst_name,
+            basedOn: user.institution.basedOn,
+
       userId: user._id,
     });
   } catch (error) {
@@ -284,18 +317,15 @@ module.exports.UserSignIn = async (req, res) => {
 
 module.exports.verifyToken = async (req, res, next) => {
   try {
-    // Check both cookie and Authorization header
     const token = req.cookies.token || req.headers.authorization?.split(" ")[1];
-
+    
     if (!token) {
       return res.status(401).json({ message: "Authentication required" });
     }
 
-    // Verify token
     const decoded = jwt.verify(token, JWT_TOKEN_KEY);
 
-    // Find user (modify this based on your token storage)
-    const user = await User.findOne({ _id: decoded.id });
+    const user = await User.findOne({ _id: decoded.id }).populate('role');
 
     if (!user) {
       return res.status(401).json({ message: "Invalid token" });
@@ -400,7 +430,7 @@ module.exports.UserVerify = async (req, res) => {
       phone: user.phone,
       address: user.address,
       profile: user.profile,
-      role: user.role,
+      role: user.role.originalRole,
       designation: user.designation,
       institution: user.institution,
       permission: user.permission,
@@ -410,7 +440,6 @@ module.exports.UserVerify = async (req, res) => {
       user: sanitizedUser,
     });
   } catch (error) {
-    console.log(error);
     return res.status(500).json({
       message: [
         { key: "error", value: "Internal Server Error", detail: error.message },
@@ -421,16 +450,14 @@ module.exports.UserVerify = async (req, res) => {
 
 exports.getUserAccess = async (req, res) => {
   try {
-    const { instutionId } = req.params; // Get institutionId from path parameters
+    const { instutionId } = req.params; 
     
-    // Build filter object
     let filter = {};
     if (instutionId && instutionId !== 'all') {
       filter.institution = instutionId;
     }
     
-    // Find users based on filter
-    const Users = await User.find(filter).populate('institution');
+    const Users = await User.find(filter).populate('institution').populate('role');
     
     if (!Users || Users.length === 0) {
       const message = instutionId && instutionId !== 'all'
@@ -488,10 +515,13 @@ exports.UpdateUser = async (req, res) => {
       firstName,
       lastName,
       phone,
-      role,
+      role, 
       gender,
       permission,
       status,
+      batch,
+      degree,
+      department, year, semester,
     } = req.body;
 
     const existingUser = await User.findById(userId);
@@ -545,7 +575,7 @@ exports.UpdateUser = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${uniqueFileName}`;
     }
 
     const updateData = {
@@ -554,6 +584,11 @@ exports.UpdateUser = async (req, res) => {
       ...(lastName && { lastName }),
       ...(phone && { phone }),
       ...(gender && { gender }),
+      ...(batch && { batch }),
+      ...(degree && { degree }),
+      ...(department && { department }),
+      ...(year && { year }),
+      ...(semester && { semester }),
       ...(role && { role }),
       ...(status && { status }),
       ...(permission && { permission }),
@@ -687,28 +722,23 @@ exports.DeleteUser = async (req, res) => {
 };
 
 
-
-// Toggle user status between active and inactive
 exports.toggleUserStatus = async (req, res) => {
   try {
     const { userId } = req.params;
     const { status } = req.body;
 
-    // Validate userId
     if (!userId) {
       return res.status(400).json({
         message: [{ key: "error", value: "User ID is required" }],
       });
     }
 
-    // Validate status if provided
     if (status && !["active", "inactive"].includes(status)) {
       return res.status(400).json({
         message: [{ key: "error", value: "Status must be either 'active' or 'inactive'" }],
       });
     }
 
-    // Find the user
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -716,10 +746,8 @@ exports.toggleUserStatus = async (req, res) => {
       });
     }
 
-    // Toggle status or set to provided status
     const newStatus = status || (user.status === "active" ? "inactive" : "active");
     
-    // Update user status
     const updatedUser = await User.findByIdAndUpdate(
       userId,
       { 
@@ -733,7 +761,6 @@ exports.toggleUserStatus = async (req, res) => {
       }
     ).select("-password -tokens");
 
-    // Send notification email for both activation and deactivation
     const emailSubject = "Account Status Update - smartlms HUB";
     let emailBody;
 
@@ -778,7 +805,6 @@ exports.toggleUserStatus = async (req, res) => {
       `;
     }
 
-    // Send email (don't block the response if email fails)
     emailUtil.sendEmail(updatedUser.email, emailSubject, emailBody)
       .catch(error => console.error("Failed to send status update email:", error));
 
@@ -813,12 +839,10 @@ exports.toggleUserStatus = async (req, res) => {
   }
 };
 
-// Bulk status update for multiple users
 exports.bulkToggleUserStatus = async (req, res) => {
   try {
     const { userIds, status } = req.body;
 
-    // Validate input
     if (!Array.isArray(userIds) || userIds.length === 0) {
       return res.status(400).json({
         message: [{ key: "error", value: "User IDs array is required" }],
@@ -831,7 +855,6 @@ exports.bulkToggleUserStatus = async (req, res) => {
       });
     }
 
-    // Update multiple users
     const result = await User.updateMany(
       { _id: { $in: userIds } },
       { 
@@ -841,12 +864,10 @@ exports.bulkToggleUserStatus = async (req, res) => {
       }
     );
 
-    // Get updated users for response
     const updatedUsers = await User.find(
       { _id: { $in: userIds } }
     ).select("-password -tokens");
 
-    // Send notification emails to all updated users
     const emailSubject = "Account Status Update - smartlms HUB";
     
     const emailPromises = updatedUsers.map(user => {
@@ -897,7 +918,6 @@ exports.bulkToggleUserStatus = async (req, res) => {
         .catch(error => console.error(`Failed to send status update email to ${user.email}:`, error));
     });
 
-    // Send all emails (don't block the response if emails fail)
     Promise.all(emailPromises)
       .catch(error => console.error("Some emails failed to send:", error));
 
@@ -925,4 +945,810 @@ exports.bulkToggleUserStatus = async (req, res) => {
     });
   }
 };
+
+
+
+exports.bulkUploadUsers = async (req, res) => {
+  let filePath = null;
+
+  try {
+    const { notificationMethod, batch } = req.body;
+    let courses = req.body.courses;
+    const institutionId = req.user.institution;
+
+    if (!institutionId) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Institution is required" }],
+      });
+    }
+
+    if (!req.files || !req.files.file) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "File is required" }],
+      });
+    }
+
+    const institutionDoc = await InstitutionModal.findById(institutionId);
+    if (!institutionDoc) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Institution not found" }],
+      });
+    }
+
+    const file = req.files.file;
+    const uniqueFileName = `${Date.now()}_${file.name}`;
+    filePath = path.join(__dirname, "..", "uploads", uniqueFileName);
+
+    // Move file to uploads directory
+    await file.mv(filePath);
+
+    // Process the Excel file
+    const workbook = xlsx.readFile(filePath);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const results = xlsx.utils.sheet_to_json(worksheet);
+    if (results.length > 78) {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+      return res.status(400).json({
+        message: [{ key: "error", value: "Cannot upload more than 70 users" }],
+      });
+    }
+
+    // Handle courses - ensure it's an array
+    if (courses) {
+      if (typeof courses === 'string') {
+        courses = [courses];
+      } else if (!Array.isArray(courses)) {
+        courses = [];
+      }
+    } else {
+      courses = [];
+    }
+
+    // Validate course IDs if provided
+    const validCourses = [];
+    if (courses.length > 0) {
+      for (const courseId of courses) {
+        try {
+          // Check if course exists - adjust model name as needed
+          const course = await CourseStructureModal.findById(courseId);
+          if (course) {
+            validCourses.push(courseId);
+          } else {
+            console.warn(`Course not found: ${courseId}`);
+          }
+        } catch (error) {
+          console.warn(`Invalid course ID: ${courseId}`, error);
+        }
+      }
+    }
+
+    const users = [];
+    const existingUsers = [];
+    const sentEmails = [];
+    const notSentEmails = [];
+    const totalEmail = [];
+    const validationErrors = [];
+    let creditExceeded = false;
+
+    const existingRoles = await roleModel.find({ institution: institutionId });
+    
+    const findOrCreateRole = async (roleName) => {
+      if (!roleName) return null;
+      
+      let role = existingRoles.find(r => 
+        r.originalRole?.toLowerCase() === roleName.toLowerCase() ||
+        r.renameRole?.toLowerCase() === roleName.toLowerCase()
+      );
+      
+      if (role) {
+        return role._id;
+      }
+      
+      try {
+        const newRole = new roleModel({
+          institution: institutionId,
+          originalRole: roleName,
+          renameRole: roleName,
+          roleValue: roleName.toLowerCase().replace(/\s+/g, '_'),
+          createdBy: req.user.email || "system"
+        });
+        
+        await newRole.save();
+        existingRoles.push(newRole);
+        return newRole._id;
+      } catch (error) {
+        console.error(`Error creating role ${roleName}:`, error);
+        return null;
+      }
+    };
+
+    // Process each user
+    for (const userData of results) {
+      const { email, firstName, lastName, phone, role, gender, password } = userData;
+
+      if (!email) {
+        validationErrors.push({
+          user: userData,
+          error: "Email is required"
+        });
+        continue;
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        validationErrors.push({
+          user: userData,
+          error: "Invalid email format"
+        });
+        notSentEmails.push({ email, firstName, lastName, role });
+        continue;
+      }
+      
+      const roleId = await findOrCreateRole(role);
+      
+      if (!roleId) {
+        validationErrors.push({
+          user: userData,
+          error: `Invalid role: ${role}`
+        });
+        notSentEmails.push({ email, firstName, lastName, role });
+        continue;
+      }
+
+      totalEmail.push({ email, firstName, phone, lastName, role, gender });
+      const existingUser = await User.findOne({ email, institution: institutionId });
+      if (existingUser) {
+        existingUsers.push({ ...userData, error: "User already exists" });
+        notSentEmails.push({ email, firstName, lastName, role });
+        continue;
+      }
+
+      try {
+        // Prepare user data
+        const userDataToSave = {
+          email,
+          firstName,
+          lastName,
+          password, 
+          role: roleId, 
+          phone,
+          institution: institutionId, 
+          createdBy: req.user.email || "system",
+          gender,
+        };
+
+        // Add batch if provided
+        if (batch && batch.trim()) {
+          userDataToSave.batch = batch.trim();
+        }
+
+        // Add enrolled courses if provided
+        if (validCourses.length > 0) {
+          userDataToSave.enrolledCourses = validCourses;
+        }
+
+        const newUser = new User(userDataToSave);
+        await newUser.save();
+        users.push(newUser);
+
+        // Create course enrollments if you have a separate model
+        // if (validCourses.length > 0) {
+        //   for (const courseId of validCourses) {
+        //     await UserCourseEnrollment.create({
+        //       user: newUser._id,
+        //       course: courseId,
+        //       institution: institutionId,
+        //       enrolledBy: req.user.email || "system"
+        //     });
+        //   }
+        // }
+
+        const emailSubject = "Welcome to SmartLMS - Your Account Details";
+        const emailBody = `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #333;">Welcome to SmartLMS Dashboard</h2>
+            <p>You have been successfully added as a user to our system.</p>
+            
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
+              <h3 style="color: #495057;">Your Account Details:</h3>
+              <p><strong>Name:</strong> ${firstName} ${lastName}</p>
+              <p><strong>Email:</strong> ${email}</p>
+              <p><strong>Role:</strong> ${role}</p>
+              ${batch ? `<p><strong>Batch:</strong> ${batch}</p>` : ''}
+              <p><strong>Password:</strong> ${password}</p>
+            </div>
+            
+            <p><strong>Important:</strong> Please change your password after your first login for security purposes.</p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${process.env.BASE_URL || "http://localhost:3000"}/login" 
+                 style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
+                 Login to Your Account
+              </a>
+            </div>
+            
+            <p style="color: #6c757d; font-size: 14px;">
+              If you have any questions, please contact your administrator.
+            </p>
+          </div>
+        `;
+
+        const emailResponse = await EmailService.sendEmail({
+          fromEmail: process.env.NODEMAILER_FORM_EMAIL,
+          receiverEmails: email,
+          subject: emailSubject,
+          body: emailBody,
+          institutionId: institutionId,
+          users: [{ 
+            email: email, 
+            firstName: firstName, 
+            lastName: lastName, 
+            role: role, 
+            phone: phone || "" 
+          }],
+          sendType: "BULK_USER_CREATION",
+        });
+
+        if (emailResponse.success) {
+          sentEmails.push({ email, firstName, lastName, role });
+          console.log(`✅ Email sent successfully to: ${email}`);
+        } else {
+          notSentEmails.push({ email, firstName, lastName, role });
+          console.log(`❌ Email failed for: ${email}`, emailResponse.error);
+          if (emailResponse.creditExceeded) creditExceeded = true;
+        }
+      } catch (userError) {
+        console.error("Error creating user:", userError);
+        validationErrors.push({
+          user: userData,
+          error: userError.message || "Unknown processing error",
+        });
+        notSentEmails.push({ email, firstName, lastName, role });
+      }
+    }
+
+    // Save bulk upload data
+    let bulkSendMail = await BulkSendMail.findOne({ institution: institutionId });
+    if (!bulkSendMail) {
+      bulkSendMail = new BulkSendMail({
+        institution: institutionId,
+        emailBulkUploadCounts: [],
+        overAllCount: {
+          overAllEmailSuccessCount: 0,
+          overAllEmailFailedCount: 0,
+        },
+      });
+    }
+
+    bulkSendMail.overAllCount.overAllEmailSuccessCount += sentEmails.length;
+    bulkSendMail.overAllCount.overAllEmailFailedCount += notSentEmails.length;
+
+    const uploadRecord = {
+      totalEmail,
+      notSendmail: notSentEmails,
+      sendmail: sentEmails,
+      fileName: uniqueFileName,
+      sendBy: req.user.email || "system",
+    };
+
+    // Add batch and courses to record if provided
+    if (batch && batch.trim()) {
+      uploadRecord.batch = batch.trim();
+    }
+    if (validCourses.length > 0) {
+      uploadRecord.courses = validCourses;
+      uploadRecord.courseCount = validCourses.length;
+    }
+
+    bulkSendMail.emailBulkUploadCounts.push(uploadRecord);
+
+    // Update institution email details
+    if (!institutionDoc.emailDetails) {
+      institutionDoc.emailDetails = {
+        recharged: 0,
+        remaining: 0,
+        used: { bulkUpload: 0, individual: 0 }
+      };
+    }
+    if (!institutionDoc.emailDetails.used) {
+      institutionDoc.emailDetails.used = { bulkUpload: 0, individual: 0 };
+    }
+
+    institutionDoc.emailDetails.used.bulkUpload += sentEmails.length;
+    const totalUsed =
+      (institutionDoc.emailDetails.used.bulkUpload || 0) +
+      (institutionDoc.emailDetails.used.individual || 0);
+
+    institutionDoc.emailDetails.remaining = Math.max(
+      0,
+      (institutionDoc.emailDetails.recharged || 0) - totalUsed
+    );
+    
+    if (!institutionDoc.alerts) institutionDoc.alerts = {};
+    institutionDoc.alerts.emailLowBalance = institutionDoc.emailDetails.remaining < 50;
+
+    await bulkSendMail.save();
+    await institutionDoc.save();
+
+    // Create logs if functions exist
+    if (typeof createAddUserBulkLog === 'function') {
+      const logData = { batch, courses: validCourses };
+      await createAddUserBulkLog(req, users, "email", logData);
+    }
+    if (typeof createBulkUploadLog === 'function') {
+      await createBulkUploadLog(req, {
+        users,
+        notificationMethod: "email",
+        fileName: uniqueFileName,
+        totalUsers: results.length,
+        sentEmails: sentEmails.length,
+        notSentEmails: notSentEmails.length,
+        existingUsers: existingUsers.length,
+        batch: batch && batch.trim() ? batch.trim() : undefined,
+        courses: validCourses.length > 0 ? validCourses : undefined,
+      });
+    }
+
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    // Prepare response message
+    let successMessage = `Successfully registered ${users.length} users`;
+    if (batch && batch.trim()) {
+      successMessage += ` to batch "${batch.trim()}"`;
+    }
+    if (sentEmails.length > 0) {
+      successMessage += ` and sent ${sentEmails.length} welcome emails`;
+    }
+    
+    if (creditExceeded) {
+      successMessage += ". Some emails failed due to insufficient credits.";
+    } else {
+      successMessage += ".";
+    }
+
+    // Send response
+    const response = {
+      message: [
+        {
+          key: "success",
+          value: successMessage,
+        },
+      ],
+      summary: {
+        totalProcessed: results.length,
+        successfullyCreated: users.length,
+        emailsSent: sentEmails.length,
+        emailsFailed: notSentEmails.length,
+        existingUsers: existingUsers.length,
+        validationErrors: validationErrors.length
+      },
+      users: users.map(user => {
+        const userResponse = {
+          _id: user._id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          role: user.role
+        };
+        
+        // Add batch if exists
+        if (user.batch) {
+          userResponse.batch = user.batch;
+        }
+        
+        // Add courses if exist
+        if (user.enrolledCourses && user.enrolledCourses.length > 0) {
+          userResponse.enrolledCourses = user.enrolledCourses;
+        }
+        
+        return userResponse;
+      }),
+      creditExceeded,
+    };
+
+    // Add batch and courses to response if provided
+    if (batch && batch.trim()) {
+      response.summary.batch = batch.trim();
+    }
+    if (validCourses.length > 0) {
+      response.summary.courses = validCourses;
+      response.summary.courseCount = validCourses.length;
+    }
+
+    res.status(201).json(response);
+
+  } catch (error) {
+    console.error("Error uploading users:", error);
+    
+    // Clean up file in case of error
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+    
+    res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
+
+
+
+
+
+exports.UpdateUserWithPermission = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { permissions } = req.body;
+
+    // Find existing user
+    const existingUser = await User.findById(userId);
+    if (!existingUser) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+
+    // Validate permissions input
+    if (!permissions || !Array.isArray(permissions)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Permissions array is required" }],
+      });
+    }
+
+    // Validate and transform permissions structure
+    const validPermissions = permissions.map((perm, index) => {
+      // Check required fields
+      if (!perm.permissionName || !perm.permissionKey) {
+        throw new Error(`Permission at index ${index} must have permissionName and permissionKey`);
+      }
+
+      return {
+        permissionName: perm.permissionName,
+        permissionKey: perm.permissionKey,
+        permissionFunctionality: Array.isArray(perm.permissionFunctionality) 
+          ? perm.permissionFunctionality 
+          : [],
+        icon: perm.icon || "Shield", // Default icon if not provided
+        color: perm.color || "blue", // Default color if not provided
+        description: perm.description || "",
+        isActive: perm.isActive !== undefined ? Boolean(perm.isActive) : true,
+        order: typeof perm.order === 'number' ? perm.order : index
+      };
+    });
+
+    // Check for duplicate permission keys
+    const permissionKeys = validPermissions.map(p => p.permissionKey);
+    const uniqueKeys = new Set(permissionKeys);
+    if (uniqueKeys.size !== permissionKeys.length) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Duplicate permission keys found" }],
+      });
+    }
+
+    // Update ONLY permissions field
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { 
+        $set: { permissions: validPermissions },
+        updatedAt: new Date()
+      },
+      {
+        new: true,
+        runValidators: true,
+        select: 'firstName lastName email role permissions createdAt updatedAt'
+      }
+    )
+    .populate("role", "originalRole renameRole roleValue");
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found during update" }],
+      });
+    }
+
+    res.status(200).json({
+      message: [{ key: "success", value: "User permissions updated successfully" }],
+      data: {
+        user: {
+          _id: updatedUser._id,
+          email: updatedUser.email,
+          firstName: updatedUser.firstName,
+          lastName: updatedUser.lastName,
+          role: updatedUser.role,
+        },
+        permissions: updatedUser.permissions,
+        updatedAt: updatedUser.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error("Error updating user permissions:", error);
+
+    if (error.name === "ValidationError") {
+      const errors = Object.keys(error.errors).map((key) => ({
+        key,
+        value: error.errors[key].message,
+      }));
+      return res.status(400).json({ message: errors });
+    }
+
+    if (error.message.includes('Permission at index')) {
+      return res.status(400).json({
+        message: [{ key: "error", value: error.message }],
+      });
+    }
+
+    res.status(500).json({
+      message: [
+        { key: "error", value: "Internal server error while updating permissions" },
+      ],
+    });
+  }
+};
+
+
+exports.bulkUpdatePermissions = async (req, res) => {
+  try {
+    const { userPermissions } = req.body;
+
+    // Validate input
+    if (!userPermissions || !Array.isArray(userPermissions)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "userPermissions array is required" }],
+      });
+    }
+
+    if (userPermissions.length === 0) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "No user permissions provided" }],
+      });
+    }
+
+    const results = [];
+    const errors = [];
+    let successCount = 0; // Changed from const to let
+
+    // Process each user's permissions
+    for (const item of userPermissions) {
+      try {
+        const { userId, permissions } = item;
+
+        // Validate required fields
+        if (!userId) {
+          errors.push({ userId: 'unknown', error: "User ID is required" });
+          continue;
+        }
+
+        if (!permissions || !Array.isArray(permissions)) {
+          errors.push({ userId, error: "Permissions array is required" });
+          continue;
+        }
+
+        // Find user
+        const user = await User.findById(userId);
+        if (!user) {
+          errors.push({ userId, error: "User not found" });
+          continue;
+        }
+
+        // Validate and transform permissions
+        const validPermissions = permissions.map((perm, index) => {
+          // Basic validation
+          if (!perm.permissionName || !perm.permissionKey) {
+            throw new Error(`Permission at index ${index} must have permissionName and permissionKey`);
+          }
+
+          return {
+            permissionName: perm.permissionName,
+            permissionKey: perm.permissionKey,
+            permissionFunctionality: Array.isArray(perm.permissionFunctionality) 
+              ? perm.permissionFunctionality 
+              : [],
+            icon: perm.icon || "Shield",
+            color: perm.color || "blue",
+            description: perm.description || "",
+            isActive: perm.isActive !== undefined ? Boolean(perm.isActive) : true,
+            order: typeof perm.order === 'number' ? perm.order : index
+          };
+        });
+
+        // Check for duplicate permission keys
+        const permissionKeys = validPermissions.map(p => p.permissionKey);
+        const uniqueKeys = new Set(permissionKeys);
+        if (uniqueKeys.size !== permissionKeys.length) {
+          errors.push({ userId, error: "Duplicate permission keys found" });
+          continue;
+        }
+
+        // Update user permissions
+        user.permissions = validPermissions;
+        user.updatedAt = new Date();
+
+        await user.save();
+
+        results.push({
+          userId,
+          success: true,
+          user: {
+            _id: user._id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            role: user.role
+          },
+          permissionsCount: validPermissions.length
+        });
+
+        successCount++; // This line was causing the error
+
+      } catch (error) {
+        console.error(`Error processing user ${item.userId}:`, error);
+        errors.push({
+          userId: item.userId || 'unknown',
+          error: error.message || "Internal server error"
+        });
+      }
+    }
+
+    // Prepare response
+    const response = {
+      message: [
+        { 
+          key: "success", 
+          value: `Bulk update completed. Success: ${successCount}, Failed: ${errors.length}` 
+        }
+      ],
+      data: {
+        summary: {
+          total: userPermissions.length,
+          successful: successCount,
+          failed: errors.length
+        },
+        results,
+        errors: errors.length > 0 ? errors : undefined
+      }
+    };
+
+    res.status(200).json(response);
+
+  } catch (error) {
+    console.error("Error in bulk permission update:", error);
+    
+    if (error.name === "ValidationError") {
+      const errors = Object.keys(error.errors).map((key) => ({
+        key,
+        value: error.errors[key].message,
+      }));
+      return res.status(400).json({ message: errors });
+    }
+
+    res.status(500).json({
+      message: [
+        { key: "error", value: "Internal server error during bulk update" },
+      ],
+    });
+  }
+};
+
+
+
+exports.GetUserPermission = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const user = await User.findById(userId)
+      .populate("role", "originalRole renameRole roleValue")
+      .select("firstName lastName email permissions role");
+
+    if (!user) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+
+    res.status(200).json({
+      message: [{ key: "success", value: "User permission retrieved successfully" }],
+      data: {
+        user: {
+          _id: user._id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          role: user.role,
+        },
+        permissions: user.permissions || []
+      },
+    });
+  } catch (error) {
+    console.error("Error getting user permission:", error);
+    res.status(500).json({
+      message: [
+        { key: "error", value: "Internal server error while getting user permission" },
+      ],
+    });
+  }
+};
+
+
+exports.GetMyPermission = async (req, res) => {
+  try {
+    // Get user ID from authenticated request (from your auth middleware)
+    const userId = req.user._id;
+
+    if (!userId) {
+      return res.status(401).json({
+        message: [{ key: "error", value: "User not authenticated" }],
+      });
+    }
+
+    // Get user with permission and role details
+    const user = await User.findById(userId)
+      .populate("role", "originalRole renameRole roleValue permissions")
+      .populate("institution", "institutionName")
+      .select("firstName lastName email permission role institution status createdAt");
+
+    if (!user) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+
+    // Format permission data
+    const permissionData = user.permission || {};
+    
+    // Combine role permissions and user permissions if needed
+    const combinedPermissions = {
+      userPermission: permissionData,
+      rolePermission: user.role?.permissions || {},
+      roleDetails: {
+        originalRole: user.role?.originalRole,
+        renameRole: user.role?.renameRole,
+        roleValue: user.role?.roleValue,
+      },
+      institution: user.institution,
+    };
+
+    // Check if user has any permission access
+    const hasPermissionAccess = permissionData.permissions || user.role?.permissions;
+
+    res.status(200).json({
+      message: [{ key: "success", value: "User permission retrieved successfully" }],
+      data: {
+        user: {
+          _id: user._id,
+          email: user.email,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          fullName: `${user.firstName} ${user.lastName}`,
+          status: user.status,
+          createdAt: user.createdAt,
+        },
+        permissions: combinedPermissions,
+        hasPermissionAccess: !!hasPermissionAccess,
+        permissionSummary: {
+          mainPermission: permissionData.permissions || "No main permission set",
+          functionalities: permissionData.permissionFunctionality || [],
+          subPermissionsCount: permissionData.subPermission?.length || 0,
+          role: user.role?.originalRole || user.role?.renameRole || "No role assigned",
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error getting user permission:", error);
+    res.status(500).json({
+      message: [
+        { key: "error", value: "Internal server error while getting user permission" },
+      ],
+    });
+  }
+};
+
+
+
 

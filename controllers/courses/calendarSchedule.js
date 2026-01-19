@@ -536,7 +536,6 @@ exports.updateScheduleItemStatus = async (req, res) => {
 exports.deleteSchedule = async (req, res) => {
   try {
     const { scheduleId } = req.params;
-    console.log("scheduleId", scheduleId);
     const schedule = await CalendarSchedule.findByIdAndDelete(scheduleId);
 
     if (!schedule) {
