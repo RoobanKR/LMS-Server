@@ -19,7 +19,7 @@ const xlsx = require("xlsx");
 const { createClient } = require("@supabase/supabase-js");
 const BulkSendMail = require("../models/BulkSendMailCount");
 const InstitutionModal = require("../models/InstitutionModal");
-const roleModel = require("../models/roleModel");
+const roleModel = require("../models/RoleModel");
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 
