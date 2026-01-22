@@ -42,7 +42,7 @@ router.delete("/delete/:model/:id", deleteDocument);
 // common data fetch for course related data
 router.get("/getAll/courses-data/:courseId", getAllCoursesData);
 router.get(
-  "/getAll/courses-data/without-ai-notes/:courseId",
+  "/getAll/courses-data/without-ai-notes/:courseId/:exerciseId",
   getAllCoursesDataWithoutAINotes
 );
 
@@ -94,8 +94,10 @@ router.delete(
   deleteQuestion
 );
 
-router.post("/exercise/lock", userAuth, lockExercise);
- 
+router.post('/exercise/lock', 
+  userAuth,
+  lockExercise
+); 
 // 2. Check Exercise Status
 router.get("/exercise/status", userAuth, getExerciseStatus)
 module.exports = router;

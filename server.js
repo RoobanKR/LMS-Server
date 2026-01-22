@@ -47,7 +47,14 @@ app.use(
 
 app.use(cookieParser());
 app.use(express.json());
-app.use(fileUpload());
+app.use(fileUpload({
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+  abortOnLimit: true,
+  createParentPath: true,
+  useTempFiles: false, // Store in memory (better for Cloudinary)
+  safeFileNames: true,
+  preserveExtension: true
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 const server = http.createServer(app);

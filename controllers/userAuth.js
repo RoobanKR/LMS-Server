@@ -19,7 +19,7 @@ const xlsx = require("xlsx");
 const { createClient } = require("@supabase/supabase-js");
 const BulkSendMail = require("../models/BulkSendMailCount");
 const InstitutionModal = require("../models/InstitutionModal");
-const roleModel = require("../models/RoleModel");
+const roleModel = require("../models/roleModel");
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabaseUrl = process.env.SUPABASE_URL;
 
@@ -82,7 +82,7 @@ exports.Addusers = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
     } else {
       const currentDate = new Date();
       const defaultFileName = `default_profile_image_${currentDate.getTime()}.jpg`;
@@ -101,7 +101,7 @@ exports.Addusers = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${defaultFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${defaultFileName}`;
     }
 
     const newUser = await User.create({
@@ -578,7 +578,7 @@ exports.UpdateUser = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/s3/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
     }
 
     const updateData = {

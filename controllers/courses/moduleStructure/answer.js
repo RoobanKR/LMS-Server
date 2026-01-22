@@ -8,7 +8,6 @@ const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 
 
-
 exports.submitAnswer = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -21,6 +20,7 @@ exports.submitAnswer = async (req, res) => {
       nodeId = "",
       nodeName = "",
       nodeType = "",
+      screenRecord,
       code = "",
       score = 0,
       language = "",
@@ -218,7 +218,6 @@ if (category === 'We_Do' || category === 'You_Do') {
     });
   }
 };
-
 
 
 

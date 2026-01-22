@@ -53,7 +53,7 @@ const questionAnswerSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Exercise Progress Schema with Cloudinary support
+// In your schema file - exerciseProgressSchema
 const exerciseProgressSchema = new mongoose.Schema({
   exerciseId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -79,6 +79,7 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+ 
   nodeName: {
     type: String,
     trim: true
@@ -91,90 +92,14 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
-  // Cloudinary screen recording for entire exercise
-  screenRecord: {
-    public_id: {
-      type: String,
-      default: ""
-    },
-    url: {
-      type: String,
-      default: ""
-    },
-    secure_url: {
-      type: String,
-      default: ""
-    },
-    format: {
-      type: String,
-      default: ""
-    },
-    resource_type: {
-      type: String,
-    
-    },
-    duration: {
-      type: Number,
-      default: 0
-    },
-    bytes: {
-      type: Number,
-      default: 0
-    },
-    width: {
-      type: Number,
-      default: 0
-    },
-    height: {
-      type: Number,
-      default: 0
-    },
-    created_at: {
-      type: Date,
-      default: Date.now
-    },
-    tags: [{
-      type: String,
-      trim: true
-    }],
-    folder: {
-      type: String,
-      default: "screen-recordings"
-    },
-    version: {
-      type: Number,
-      default: 1
-    },
-    isProcessed: {
-      type: Boolean,
-      default: false
-    },
-    metadata: {
-      recordingType: {
-        type: String,
-     
-      },
-      deviceInfo: String,
-      screenResolution: String,
-      frameRate: Number,
-      codec: String
-    }
+    screenRecording: {
+    type: String,
   },
-  recordingSessions: [{
-    sessionId: String,
-    startedAt: Date,
-    endedAt: Date,
-    duration: Number,
-    public_id: String,
-    isMain: {
-      type: Boolean,
-      default: false
-    }
-  }]
+
+
 }, {
   timestamps: true
 });
-
 // Updated Answer Schema with Map structure
 const answerSchema = new mongoose.Schema({
   I_Do: { 

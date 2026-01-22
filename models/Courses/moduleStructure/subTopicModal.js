@@ -291,6 +291,10 @@ const securitySettingsSchema = new mongoose.Schema({
     type: Boolean, 
     default: false 
   },
+   screenRecordingEnabled: {
+    type: Boolean,
+    default: false  // Default to false for normal exercises
+  },
   tabSwitchAllowed: { 
     type: Boolean, 
     default: true 

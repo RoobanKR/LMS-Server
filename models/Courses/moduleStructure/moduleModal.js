@@ -291,6 +291,10 @@ const securitySettingsSchema = new mongoose.Schema({
     type: Boolean, 
     default: false 
   },
+   screenRecordingEnabled: {
+    type: Boolean,
+    default: false  // Default to false for normal exercises
+  },
   tabSwitchAllowed: { 
     type: Boolean, 
     default: true 
@@ -445,6 +449,7 @@ const pedagogySchema = new mongoose.Schema({
     default: {}  
   },
 });
+
 // Module Structure Schema
 const moduleStructureSchema = new mongoose.Schema(
   {
