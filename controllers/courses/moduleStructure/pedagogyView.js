@@ -4042,20 +4042,20 @@ exports.getExerciseStatus = async (req, res) => {
     if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
  
     const userCourse = user.courses ? user.courses.find(c => c.courseId && c.courseId.toString() === courseId) : null;
-   
+ 
     if (!userCourse || !userCourse.answers) {
       return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
     }
  
     const categoryKey = category || 'We_Do';
     const categoryMap = userCourse.answers[categoryKey];
-   
+ 
     if (!categoryMap) {
-        return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
+      return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
     }
  
     const exercisesArray = categoryMap.get(subcategory) || [];
-   
+ 
     // Find the exercise
     const exercise = exercisesArray.find(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
  
@@ -4065,7 +4065,9 @@ exports.getExerciseStatus = async (req, res) => {
         success: true,
         data: {
           isLocked: exercise.isLocked || false,
-          status: exercise.status || 'in-progress'
+          status: exercise.status || 'in-progress',
+          screenRecording: exercise.screenRecording || 'empty'
+ 
         }
       });
     }
