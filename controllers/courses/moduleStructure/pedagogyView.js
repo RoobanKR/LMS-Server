@@ -7,6 +7,7 @@ const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 const LevelView = require('../../../models/Courses/moduleStructure/levelModel');
 const User = require("../../../models/UserModel");
+const Role = require('../../../models/RoleModel'); 
 
 
 const { createClient } = require("@supabase/supabase-js");
@@ -21,15 +22,6 @@ const path = require('path');
 const fs = require('fs');
 
 
-const cloudinary = require('cloudinary').v2;
-const stream = require('stream');
-
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
 // Configure ffmpeg paths
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
@@ -1073,7 +1065,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
 };
 
 exports.studentDashboardAnalyticsOptimized = async (req, res) => {
-  try {
+  try { 
     const { institution } = req.user;
 
     // Get all courses with ALL basic info
@@ -1290,6 +1282,549 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
 
   } catch (error) {
     console.error("Error fetching courses analytics:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
+// staffAnalyticsController.js
+
+
+exports.staffStudentAnalytics = async (req, res) => {
+  try {
+    const { institution } = req.user;
+    const staffId = req.user._id;
+
+    // Get all courses with participants
+    const courses = await CourseStructure.find({ institution })
+      .select('courseName courseCode courseLevel serviceType courseImage')
+      .populate({
+        path: 'singleParticipants.user',
+        select: 'firstName lastName email department role',
+        populate: {
+          path: 'role',
+          select: 'renameRole originalRole roleValue',
+          model: 'Role'
+        }
+      })
+      .lean();
+
+    if (!courses || courses.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        message: "No courses found"
+      });
+    }
+
+    // Filter courses to only those with students
+    const coursesWithStudents = courses.filter(course => 
+      course.singleParticipants && 
+      course.singleParticipants.length > 0
+    );
+
+    const allCourseIds = coursesWithStudents.map(course => course._id.toString());
+
+    // Get user answers for all courses WITH role populated
+    const allUsers = await User.find({ 
+      institution, 
+      'courses.courseId': { $in: allCourseIds }
+    })
+    .select('firstName lastName email department courses role')
+    .populate({
+      path: 'role',
+      select: 'renameRole originalRole roleValue',
+      model: 'Role'
+    })
+    .lean();
+
+    // Filter only students based on role value
+    const studentUsers = allUsers.filter(user => {
+      const roleValue = user.role?.roleValue || user.role?.renameRole || '';
+      return roleValue.toLowerCase() === 'student';
+    });
+
+    // Get all modules for these courses
+    const allModules = await Module1.find({ courses: { $in: allCourseIds } })
+      .select('title courses')
+      .lean();
+
+    // Organize modules by course
+    const modulesByCourse = {};
+    allModules.forEach(module => {
+      const moduleCourses = Array.isArray(module.courses) ? module.courses : [module.courses];
+      moduleCourses.forEach(courseId => {
+        const courseIdStr = courseId.toString();
+        if (!modulesByCourse[courseIdStr]) {
+          modulesByCourse[courseIdStr] = [];
+        }
+        modulesByCourse[courseIdStr].push(module);
+      });
+    });
+
+    // Process analytics for each course
+    const coursesAnalytics = coursesWithStudents.map(course => {
+      const courseIdStr = course._id.toString();
+      const courseStudents = course.singleParticipants || [];
+      
+      // Filter only students (roleValue = 'Student')
+      const studentParticipants = courseStudents.filter(participant => {
+        const student = participant.user;
+        if (!student || !student.role) return false;
+        
+        const roleValue = student.role.roleValue || student.role.renameRole || '';
+        return roleValue.toLowerCase() === 'student';
+      });
+      
+      // Process each student's progress
+      const studentsAnalytics = studentParticipants.map(participant => {
+        const student = participant.user;
+        if (!student) return null;
+
+        // Find user from studentUsers for their answers
+        const userData = studentUsers.find(u => u._id.toString() === student._id.toString());
+        if (!userData) return null;
+
+        // Get student's course data
+        const studentCourse = userData.courses?.find(c => 
+          c.courseId && c.courseId.toString() === courseIdStr
+        );
+
+        if (!studentCourse?.answers) {
+          return {
+            student: {
+              _id: student._id,
+              firstName: student.firstName,
+              lastName: student.lastName,
+              email: student.email,
+              department: student.department,
+              role: {
+                renameRole: student.role?.renameRole,
+                originalRole: student.role?.originalRole,
+                roleValue: student.role?.roleValue
+              }
+            },
+            progress: {
+              overall: 0,
+              weDo: {
+                practical: { completed: 0, total: 0, percentage: 0 },
+                project_development: { completed: 0, total: 0, percentage: 0 },
+                others: { completed: 0, total: 0, percentage: 0 }
+              },
+              youDo: {
+                assessments: { completed: 0, total: 0, percentage: 0 }
+              }
+            }
+          };
+        }
+
+        // Calculate We_Do progress
+        const weDoPractical = studentCourse.answers.We_Do?.practical || [];
+        const weDoProject = studentCourse.answers.We_Do?.project_development || [];
+        const weDoOthers = studentCourse.answers.We_Do?.others || [];
+
+        // Calculate You_Do progress
+        const youDoAssessments = studentCourse.answers.You_Do?.assessments || [];
+
+        // Helper function to calculate completion
+        const calculateCompletion = (exercises) => {
+          if (!exercises || exercises.length === 0) return { completed: 0, total: 0, percentage: 0 };
+          
+          let completed = 0;
+          let totalQuestions = 0;
+          let attemptedQuestions = 0;
+
+          exercises.forEach(exercise => {
+            if (exercise.questions && exercise.questions.length > 0) {
+              totalQuestions += exercise.questions.length;
+              const attempted = exercise.questions.filter(q => 
+                q.status === 'attempted' || q.status === 'evaluated' || q.submittedAt
+              ).length;
+              attemptedQuestions += attempted;
+              
+              if (attempted > 0) {
+                completed++;
+              }
+            }
+          });
+
+          return {
+            completed,
+            total: exercises.length,
+            percentage: exercises.length > 0 ? Math.round((completed / exercises.length) * 100) : 0,
+            questionProgress: totalQuestions > 0 ? Math.round((attemptedQuestions / totalQuestions) * 100) : 0
+          };
+        };
+
+        const practicalProgress = calculateCompletion(weDoPractical);
+        const projectProgress = calculateCompletion(weDoProject);
+        const othersProgress = calculateCompletion(weDoOthers);
+        const assessmentsProgress = calculateCompletion(youDoAssessments);
+
+        // Calculate overall progress (weighted average)
+        const weDoTotal = practicalProgress.total + projectProgress.total + othersProgress.total;
+        const weDoWeighted = 
+          (practicalProgress.percentage * practicalProgress.total +
+           projectProgress.percentage * projectProgress.total +
+           othersProgress.percentage * othersProgress.total) / 
+          (weDoTotal || 1);
+
+        const overallProgress = Math.round(
+          (weDoWeighted * 0.7) + (assessmentsProgress.percentage * 0.3)
+        );
+
+        return {
+          student: {
+            _id: student._id,
+            firstName: student.firstName,
+            lastName: student.lastName,
+            email: student.email,
+            department: student.department,
+            role: {
+              renameRole: student.role?.renameRole,
+              originalRole: student.role?.originalRole,
+              roleValue: student.role?.roleValue
+            },
+            enrolledAt: participant.createdAt
+          },
+          progress: {
+            overall: overallProgress,
+            weDo: {
+              practical: practicalProgress,
+              project_development: projectProgress,
+              others: othersProgress
+            },
+            youDo: {
+              assessments: assessmentsProgress
+            }
+          },
+          lastActivity: studentCourse.lastAccessed || null
+        };
+      }).filter(student => student !== null);
+
+      // Calculate course-level statistics
+      const courseStats = {
+        totalStudents: studentsAnalytics.length,
+        averageProgress: studentsAnalytics.length > 0 
+          ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.overall, 0) / studentsAnalytics.length)
+          : 0,
+        completedStudents: studentsAnalytics.filter(s => s.progress.overall >= 80).length,
+        inProgressStudents: studentsAnalytics.filter(s => s.progress.overall > 0 && s.progress.overall < 80).length,
+        notStartedStudents: studentsAnalytics.filter(s => s.progress.overall === 0).length,
+        
+        weDoStats: {
+          practical: {
+            averageCompletion: studentsAnalytics.length > 0
+              ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.weDo.practical.percentage, 0) / studentsAnalytics.length)
+              : 0
+          },
+          project_development: {
+            averageCompletion: studentsAnalytics.length > 0
+              ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.weDo.project_development.percentage, 0) / studentsAnalytics.length)
+              : 0
+          }
+        }
+      };
+
+      return {
+        course: {
+          _id: course._id,
+          courseName: course.courseName,
+          courseCode: course.courseCode,
+          courseLevel: course.courseLevel,
+          serviceType: course.serviceType,
+          courseImage: course.courseImage,
+          totalModules: modulesByCourse[courseIdStr]?.length || 0,
+          totalParticipants: course.singleParticipants?.length || 0,
+          totalStudents: studentParticipants.length
+        },
+        stats: courseStats,
+        students: studentsAnalytics
+      };
+    });
+
+    // Calculate overall institution statistics
+    const overallStats = {
+      totalCourses: coursesAnalytics.length,
+      totalStudents: coursesAnalytics.reduce((sum, course) => sum + course.stats.totalStudents, 0),
+      averageCourseProgress: coursesAnalytics.length > 0
+        ? Math.round(coursesAnalytics.reduce((sum, course) => sum + course.stats.averageProgress, 0) / coursesAnalytics.length)
+        : 0,
+      
+      performanceDistribution: {
+        excellent: coursesAnalytics.filter(course => course.stats.averageProgress >= 80).length,
+        good: coursesAnalytics.filter(course => course.stats.averageProgress >= 50 && course.stats.averageProgress < 80).length,
+        average: coursesAnalytics.filter(course => course.stats.averageProgress >= 30 && course.stats.averageProgress < 50).length,
+        poor: coursesAnalytics.filter(course => course.stats.averageProgress < 30).length
+      },
+      
+      weDoEngagement: {
+        practical: Math.round(coursesAnalytics.reduce((sum, course) => 
+          sum + course.stats.weDoStats.practical.averageCompletion, 0) / coursesAnalytics.length || 0),
+        project: Math.round(coursesAnalytics.reduce((sum, course) => 
+          sum + course.stats.weDoStats.project_development.averageCompletion, 0) / coursesAnalytics.length || 0)
+      }
+    };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        courses: coursesAnalytics,
+        overall: overallStats
+      },
+      message: "Staff analytics fetched successfully"
+    });
+
+  } catch (error) {
+    console.error("Error fetching staff analytics:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
+// Get detailed student progress for a specific course
+exports.getStudentCourseProgress = async (req, res) => {
+  try {
+    const { courseId, studentId } = req.params;
+    const { institution } = req.user;
+
+    // Get course details
+    const course = await CourseStructure.findOne({ 
+      _id: courseId, 
+      institution 
+    }).select('courseName courseCode courseLevel').lean();
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: "Course not found"
+      });
+    }
+
+    // First, find the Student role document
+    const studentRole = await Role.findOne({
+      institution,
+      $or: [
+        { roleValue: 'Student' },
+        { renameRole: 'Student' },
+        { originalRole: 'Student' }
+      ]
+    }).select('_id').lean();
+
+    if (!studentRole) {
+      return res.status(404).json({
+        success: false,
+        message: "Student role not found"
+      });
+    }
+
+    // Get student details with role populated
+    const student = await User.findOne({
+      _id: studentId,
+      institution,
+      role: studentRole._id  // Use the ObjectId of the Student role
+    })
+    .select('firstName lastName email department phone role')
+    .populate({
+      path: 'role',
+      select: 'renameRole originalRole roleValue',
+      model: 'Role'
+    })
+    .lean();
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: "Student not found"
+      });
+    }
+
+    // Get student's course data with answers
+    const studentCourse = await User.findOne({
+      _id: studentId,
+      'courses.courseId': courseId
+    }).select('courses.$').lean();
+
+    if (!studentCourse?.courses?.[0]) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          course,
+          student: {
+            _id: student._id,
+            firstName: student.firstName,
+            lastName: student.lastName,
+            email: student.email,
+            department: student.department,
+            phone: student.phone,
+            role: {
+              renameRole: student.role?.renameRole,
+              originalRole: student.role?.originalRole,
+              roleValue: student.role?.roleValue
+            }
+          },
+          progress: {
+            overall: 0,
+            exercises: []
+          }
+        }
+      });
+    }
+
+    const courseData = studentCourse.courses[0];
+    const answers = courseData.answers || {};
+
+    // Get all modules and their exercises for this course
+    const modules = await Module1.find({ courses: courseId })
+      .select('title')
+      .lean();
+
+    // Get all submodules and topics to map exercises
+    const subModules = await SubModule1.find({ 
+      moduleId: { $in: modules.map(m => m._id) } 
+    }).select('title moduleId').lean();
+
+    const topics = await Topic1.find({
+      $or: [
+        { moduleId: { $in: modules.map(m => m._id) } },
+        { subModuleId: { $in: subModules.map(sm => sm._id) } }
+      ]
+    }).select('title moduleId subModuleId').lean();
+
+    // Process We_Do exercises
+    const weDoExercises = [];
+    
+    // Process practical exercises
+    if (answers.We_Do?.practical) {
+      answers.We_Do.practical.forEach((exercise, index) => {
+        weDoExercises.push({
+          type: 'We_Do',
+          category: 'practical',
+          exerciseId: exercise.exerciseId || `PRAC-${index + 1}`,
+          exerciseName: exercise.exerciseInformation?.exerciseName || `Practical Exercise ${index + 1}`,
+          status: exercise.questions?.some(q => q.status === 'evaluated') ? 'evaluated' :
+                 exercise.questions?.some(q => q.status === 'attempted') ? 'attempted' : 'not_started',
+          completedQuestions: exercise.questions?.filter(q => 
+            q.status === 'attempted' || q.status === 'evaluated'
+          ).length || 0,
+          totalQuestions: exercise.questions?.length || 0,
+          score: exercise.score || 0,
+          maxScore: exercise.maxScore || 0,
+          lastAttempt: exercise.lastAttempt,
+          attempts: exercise.attempts || 0
+        });
+      });
+    }
+
+    // Process project development exercises
+    if (answers.We_Do?.project_development) {
+      answers.We_Do.project_development.forEach((exercise, index) => {
+        weDoExercises.push({
+          type: 'We_Do',
+          category: 'project_development',
+          exerciseId: exercise.exerciseId || `PROJ-${index + 1}`,
+          exerciseName: exercise.exerciseInformation?.exerciseName || `Project Exercise ${index + 1}`,
+          status: exercise.questions?.some(q => q.status === 'evaluated') ? 'evaluated' :
+                 exercise.questions?.some(q => q.status === 'attempted') ? 'attempted' : 'not_started',
+          completedQuestions: exercise.questions?.filter(q => 
+            q.status === 'attempted' || q.status === 'evaluated'
+          ).length || 0,
+          totalQuestions: exercise.questions?.length || 0,
+          score: exercise.score || 0,
+          maxScore: exercise.maxScore || 0,
+          lastAttempt: exercise.lastAttempt,
+          attempts: exercise.attempts || 0
+        });
+      });
+    }
+
+    // Process You_Do assessments
+    const youDoExercises = [];
+    if (answers.You_Do?.assessments) {
+      answers.You_Do.assessments.forEach((assessment, index) => {
+        youDoExercises.push({
+          type: 'You_Do',
+          category: 'assessment',
+          exerciseId: assessment.exerciseId || `ASSESS-${index + 1}`,
+          exerciseName: assessment.exerciseInformation?.exerciseName || `Assessment ${index + 1}`,
+          status: assessment.status || 'not_started',
+          completedQuestions: assessment.questions?.filter(q => 
+            q.status === 'attempted' || q.status === 'evaluated'
+          ).length || 0,
+          totalQuestions: assessment.questions?.length || 0,
+          score: assessment.score || 0,
+          maxScore: assessment.maxScore || 0,
+          lastAttempt: assessment.lastAttempt,
+          attempts: assessment.attempts || 0,
+          submissionDate: assessment.submittedAt,
+          evaluated: assessment.evaluated || false
+        });
+      });
+    }
+
+    const allExercises = [...weDoExercises, ...youDoExercises];
+    
+    // Calculate overall progress
+    const totalExercises = allExercises.length;
+    const completedExercises = allExercises.filter(e => 
+      e.status === 'evaluated' || e.completedQuestions > 0
+    ).length;
+    
+    const overallProgress = totalExercises > 0 
+      ? Math.round((completedExercises / totalExercises) * 100) 
+      : 0;
+
+    // Calculate average score
+    const scoredExercises = allExercises.filter(e => e.score > 0);
+    const averageScore = scoredExercises.length > 0
+      ? Math.round(scoredExercises.reduce((sum, e) => sum + e.score, 0) / scoredExercises.length)
+      : 0;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        course,
+        student: {
+          _id: student._id,
+          firstName: student.firstName,
+          lastName: student.lastName,
+          email: student.email,
+          department: student.department,
+          phone: student.phone,
+          role: {
+            renameRole: student.role?.renameRole,
+            originalRole: student.role?.originalRole,
+            roleValue: student.role?.roleValue
+          }
+        },
+        progress: {
+          overall: overallProgress,
+          averageScore,
+          totalExercises,
+          completedExercises,
+          pendingExercises: totalExercises - completedExercises,
+          exercises: allExercises
+        },
+        summary: {
+          weDo: {
+            practical: weDoExercises.filter(e => e.category === 'practical'),
+            project_development: weDoExercises.filter(e => e.category === 'project_development')
+          },
+          youDo: {
+            assessments: youDoExercises
+          }
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error("Error fetching student course progress:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -2050,6 +2585,8 @@ exports.updateEntity = async (req, res) => {
       showToStudents,
       allowDownload,
       selectedFileType,
+            fileDescription, // NEW: Add file description
+      tags, // NEW: Add tags
     } = req.body;
 
     // Update simple fields
@@ -2095,7 +2632,8 @@ exports.updateEntity = async (req, res) => {
       // Get showToStudents and allowDownload from req.body
       const showToStudentsValue = req.body.showToStudents === 'true' || req.body.showToStudents === true;
       const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
-      
+  const fileDescriptionValue = req.body.fileDescription || ""; // Get file description
+  const tagsValue = req.body.tags || []; // Get tags
       const fileResult = findFileById(pedagogyElement, updateFileId);
       
       if (!fileResult) {
@@ -2103,6 +2641,24 @@ exports.updateEntity = async (req, res) => {
           message: [{ key: "error", value: "File not found" }] 
         });
       }
+   if (fileDescriptionValue !== undefined) {
+    fileResult.file.fileDescription = fileDescriptionValue;
+  }
+
+  // Update tags
+  if (tagsValue) {
+    try {
+      const parsedTags = typeof tagsValue === 'string' ? JSON.parse(tagsValue) : tagsValue;
+      if (Array.isArray(parsedTags)) {
+        fileResult.file.tags = parsedTags.map(tag => ({
+          tagName: tag.tagName || tag.name || '',
+          tagColor: tag.tagColor || tag.color || '#3B82F6'
+        }));
+      }
+    } catch (error) {
+      console.error("Error parsing tags:", error);
+    }
+  }
 
       // Ensure fileSettings object exists
       if (!fileResult.file.fileSettings) {
@@ -2312,15 +2868,26 @@ exports.updateEntity = async (req, res) => {
     if (req.files && req.files.files) {
       const files = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
       const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
-      
+            const fileDescriptionValue = req.body.fileDescription || ""; // NEW: Get file description
+
       // Get file settings from request
       const showToStudentsValue = req.body.showToStudents === 'true' || req.body.showToStudents === true;
       const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
-      
+        let parsedTags = [];
+      if (req.body.tags) {
+        try {
+          parsedTags = typeof req.body.tags === 'string' ? JSON.parse(req.body.tags) : req.body.tags;
+        } catch (error) {
+          console.error("Error parsing tags:", error);
+        }
+      }
+
       console.log('📋 File settings from request:', {
         showToStudents: showToStudentsValue,
         allowDownload: allowDownloadValue,
-        hasSettings: !!req.body.showToStudents
+        hasSettings: !!req.body.showToStudents,
+         fileDescription: fileDescriptionValue, // NEW: Log file description
+        tags: parsedTags, // NEW: Log tags
       });
 
       const isReferenceUpload = selectedFileType === "reference" || req.body.fileType === "reference";
@@ -2444,6 +3011,12 @@ exports.updateEntity = async (req, res) => {
                 const order = {'2160p': 7, '1440p': 6, '1080p': 5, '720p': 4, '480p': 3, '360p': 2,'240p':1, 'base': 0};
                 return (order[b] || 0) - (order[a] || 0);
               }),
+               fileDescription: fileDescriptionValue,
+              // ✅ TAGS ADDED HERE
+              tags: parsedTags.map(tag => ({
+                tagName: tag.tagName || tag.name || '',
+                tagColor: tag.tagColor || tag.color || '#3B82F6'
+              })),
               // ✅ FILE SETTINGS ADDED HERE
               fileSettings: {
                 showToStudents: showToStudentsValue,
@@ -2472,6 +3045,11 @@ exports.updateEntity = async (req, res) => {
                   ...fileResult.parent[fileResult.index],
                   ...newFile,
                   updatedAt: new Date(),
+                   fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
+                  tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
+                    tagName: tag.tagName || tag.name || '',
+                    tagColor: tag.tagColor || tag.color || '#3B82F6'
+                  })) : fileResult.file.tags || [],
                   fileSettings: {
                     showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
                     allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
@@ -2523,6 +3101,12 @@ exports.updateEntity = async (req, res) => {
             size: file.size.toString(),
             uploadedAt: new Date(),
             isVideo: false,
+             fileDescription: fileDescriptionValue,
+            // ✅ TAGS ADDED HERE
+            tags: parsedTags.map(tag => ({
+              tagName: tag.tagName || tag.name || '',
+              tagColor: tag.tagColor || tag.color || '#3B82F6'
+            })),
             isArchive,
             isReference: isReferenceUpload,
             availableResolutions: [],
@@ -2542,6 +3126,11 @@ exports.updateEntity = async (req, res) => {
                 ...fileResult.parent[fileResult.index],
                 ...newFile,
                 updatedAt: new Date(),
+                 fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
+                tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
+                  tagName: tag.tagName || tag.name || '',
+                  tagColor: tag.tagColor || tag.color || '#3B82F6'
+                })) : fileResult.file.tags || [],
                 fileSettings: {
                   showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
                   allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
@@ -2577,7 +3166,18 @@ exports.updateEntity = async (req, res) => {
       const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
 
       const isReferenceUpload = selectedFileType === "reference" || req.body.selectedFileType === "reference";
+     const fileDescriptionValue = req.body.fileDescription || ""; // NEW: Get file description
+  const tagsValue = req.body.tags || []; // FIXED: Get tags
 
+      // NEW: Parse tags from request
+    let parsedTags = [];
+  if (tagsValue) {
+    try {
+      parsedTags = typeof tagsValue === 'string' ? JSON.parse(tagsValue) : tagsValue;
+    } catch (error) {
+      console.error("Error parsing tags:", error);
+    }
+  }
       const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
       let currentFolders = pedagogyElement.folders;
       let targetFolder = pedagogyElement;
@@ -2627,6 +3227,12 @@ exports.updateEntity = async (req, res) => {
         isVideo: false,
         isReference: isReferenceUpload,
         availableResolutions: [],
+         fileDescription: fileDescriptionValue, // ✅ FIXED: Add file description
+    // ✅ TAGS ADDED HERE - ensure proper format
+    tags: parsedTags.map(tag => ({
+      tagName: tag.tagName || tag.name || '',
+      tagColor: tag.tagColor || tag.color || '#3B82F6'
+    })),
         // ✅ FILE SETTINGS ADDED HERE
         fileSettings: {
           showToStudents: showToStudentsValue,
@@ -2643,6 +3249,11 @@ exports.updateEntity = async (req, res) => {
             ...fileResult.parent[fileResult.index],
             ...newFile,
             updatedAt: new Date(),
+              fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
+            tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
+              tagName: tag.tagName || tag.name || '',
+              tagColor: tag.tagColor || tag.color || '#3B82F6'
+            })) : fileResult.file.tags || [],
             fileSettings: {
               showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
               allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
@@ -2829,2643 +3440,6 @@ exports.updateFileSettings = async (req, res) => {
     res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
   }
 };
-
-
-
-
-
-
- 
-exports.addExercise = async (req, res) => {
-  try {
-    const { type, id } = req.params;
-    const {
-      tabType,
-      subcategory,
-      exerciseInformation,
-      programmingSettings,
-      compilerSettings,
-      availabilityPeriod,
-      questionBehavior,
-      evaluationSettings,
-      groupSettings,
-      scoreSettings,
-      securitySettings // ← ADD THIS LINE
-    } = req.body;
- 
-    // Validate entity type
-    if (!modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
- 
-    if (!subcategory) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Subcategory is required. Valid values: 'Practical', 'Project Development', or other subcategory" }]
-      });
-    }
- 
-    // Parse JSON strings if they're strings
-    const parseIfNeeded = (data) => {
-      if (typeof data === 'string') {
-        try {
-          return JSON.parse(data);
-        } catch (error) {
-          return data;
-        }
-      }
-      return data;
-    };
- 
-    const exerciseInfo = parseIfNeeded(exerciseInformation);
-    const progSettings = programmingSettings ? parseIfNeeded(programmingSettings) : {};
-    const compSettings = compilerSettings ? parseIfNeeded(compilerSettings) : {};
-    const availPeriod = availabilityPeriod ? parseIfNeeded(availabilityPeriod) : {};
-    const qBehavior = questionBehavior ? parseIfNeeded(questionBehavior) : {};
-    const evalSettings = evaluationSettings ? parseIfNeeded(evaluationSettings) : {};
-    const grpSettings = groupSettings ? parseIfNeeded(groupSettings) : {};
-    const scrSettings = scoreSettings ? parseIfNeeded(scoreSettings) : {
-      scoreType: 'evenMarks',
-      evenMarks: 0,
-      separateMarks: {
-        general: [],
-        levelBased: {
-          easy: [],
-          medium: [],
-          hard: []
-        }
-      },
-      levelBasedMarks: {
-        easy: 0,
-        medium: 0,
-        hard: 0
-      },
-      totalMarks: 0
-    };
-   
-    // ADD THIS SECTION for securitySettings parsing
-    const secSettings = securitySettings ? parseIfNeeded(securitySettings) : {
-      timerEnabled: false,
-      timerType: 'exercise',
-      timerDuration: 60,
-      cameraMicEnabled: false,
-      restrictMinimize: false,
-      fullScreenMode: false,
-      tabSwitchAllowed: true,
-      maxTabSwitches: 3,
-      disableClipboard: false,
-      screenRecordingEnabled: false,
- 
-    };
- 
-    // Validate required fields
-    if (!exerciseInfo || !exerciseInfo.exerciseName) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Exercise information with exerciseName is required" }]
-      });
-    }
- 
-    const { model } = modelMap[type];
-    const entity = await model.findById(id);
-   
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
- 
-    // Initialize pedagogy if not exists
-    if (!entity.pedagogy) {
-      entity.pedagogy = {
-        I_Do: new Map(),
-        We_Do: new Map(),
-        You_Do: new Map()
-      };
-    }
- 
-    if (!entity.pedagogy[tabType]) {
-      entity.pedagogy[tabType] = new Map();
-    }
- 
-    // Get or create exercise array for the subcategory
-    let exercises = [];
-    if (entity.pedagogy[tabType].has(subcategory)) {
-      exercises = entity.pedagogy[tabType].get(subcategory);
-    }
- 
-    const generateExerciseId = () => {
-      const nextNumber = (exercises.length + 1).toString().padStart(3, '0');
-      return `EX${nextNumber}`;
-    };
- 
-    // Use provided exerciseId or generate a new one
-    const exerciseId = exerciseInfo.exerciseId || generateExerciseId();
- 
-    // Process level configuration
-    let levelConfig = progSettings?.levelConfiguration || {
-      levelType: 'levelBased',
-      levelBased: { easy: 0, medium: 0, hard: 0 },
-      general: 0
-    };
- 
-    // Calculate total questions based on level configuration
-    let totalQuestions = 0;
-    if (levelConfig.levelType === 'levelBased') {
-      totalQuestions = (levelConfig.levelBased?.easy || 0) +
-                       (levelConfig.levelBased?.medium || 0) +
-                       (levelConfig.levelBased?.hard || 0);
-    } else {
-      totalQuestions = levelConfig.general || 0;
-    }
- 
-    // Calculate total marks based on configuration
-    const calculateTotalMarks = (scoreConfig, levelConfig) => {
-      const { scoreType, evenMarks, separateMarks, levelBasedMarks } = scoreConfig;
-     
-      if (scoreType === 'evenMarks') {
-        if (levelConfig.levelType === 'general') {
-          return levelConfig.general * evenMarks;
-        } else {
-          const { easy, medium, hard } = levelConfig.levelBased;
-          return (easy + medium + hard) * evenMarks;
-        }
-      }
-      else if (scoreType === 'levelBasedMarks') {
-        const { easy, medium, hard } = levelConfig.levelBased;
-        return (easy * levelBasedMarks.easy) +
-               (medium * levelBasedMarks.medium) +
-               (hard * levelBasedMarks.hard);
-      }
-      else if (scoreType === 'separateMarks') {
-        if (levelConfig.levelType === 'general') {
-          return separateMarks.general.reduce((sum, mark) => sum + mark, 0);
-        } else {
-          const easyMarks = separateMarks.levelBased.easy.reduce((sum, mark) => sum + mark, 0);
-          const mediumMarks = separateMarks.levelBased.medium.reduce((sum, mark) => sum + mark, 0);
-          const hardMarks = separateMarks.levelBased.hard.reduce((sum, mark) => sum + mark, 0);
-          return easyMarks + mediumMarks + hardMarks;
-        }
-      }
-      return 0;
-    };
- 
-    // Update the score settings with calculated total marks
-    scrSettings.totalMarks = calculateTotalMarks(scrSettings, levelConfig);
- 
-    // Create new exercise object
-    const newExercise = {
-      _id: new mongoose.Types.ObjectId(),
-      exerciseInformation: {
-        exerciseId: exerciseId,
-        exerciseName: exerciseInfo.exerciseName || "",
-        description: exerciseInfo.description || "",
-        exerciseLevel: exerciseInfo.exerciseLevel || 'beginner',
-        totalQuestions: totalQuestions,
-        totalPoints: scrSettings.totalMarks || 0
-      },
-      programmingSettings: {
-        selectedModule: progSettings?.selectedModule || 'Core Programming',
-        selectedLanguages: progSettings?.selectedLanguages || [],
-        levelConfiguration: {
-          levelType: levelConfig.levelType,
-          levelBased: {
-            easy: levelConfig.levelBased?.easy || 0,
-            medium: levelConfig.levelBased?.medium || 0,
-            hard: levelConfig.levelBased?.hard || 0
-          },
-          general: levelConfig.general || 0
-        }
-      },
-      compilerSettings: {
-        allowCopyPaste: compSettings?.allowCopyPaste ?? true,
-        autoSuggestion: compSettings?.autoSuggestion ?? true,
-        autoCloseBrackets: compSettings?.autoCloseBrackets ?? true,
-        theme: compSettings?.theme || 'light',
-        fontSize: compSettings?.fontSize || 14,
-        tabSize: compSettings?.tabSize || 2
-      },
-      availabilityPeriod: {
-        startDate: availPeriod?.startDate ? new Date(availPeriod.startDate) : null,
-        endDate: availPeriod?.endDate ? new Date(availPeriod.endDate) : null,
-        gracePeriodAllowed: availPeriod?.gracePeriodAllowed ?? false,
-        gracePeriodDate: availPeriod?.gracePeriodDate ? new Date(availPeriod.gracePeriodDate) : null,
-        extendedDays: availPeriod?.extendedDays || 0
-      },
-      questionBehavior: {
-        shuffleQuestions: qBehavior?.shuffleQuestions ?? false,
-        allowNext: qBehavior?.allowNext ?? true,
-        allowSkip: qBehavior?.allowSkip ?? false,
-        attemptLimitEnabled: qBehavior?.attemptLimitEnabled ?? false,
-        maxAttempts: qBehavior?.maxAttempts ?? 3,
-        showPoints: qBehavior?.showPoints ?? true,
-        showDifficulty: qBehavior?.showDifficulty ?? true,
-        allowHintUsage: qBehavior?.allowHintUsage ?? true,
-        allowTestRun: qBehavior?.allowTestRun ?? true
-      },
-      evaluationSettings: {
-        practiceMode: evalSettings?.practiceMode ?? true,
-        manualEvaluation: {
-          enabled: evalSettings?.manualEvaluation?.enabled ?? false,
-          submissionNeeded: evalSettings?.manualEvaluation?.submissionNeeded ?? false
-        },
-        aiEvaluation: evalSettings?.aiEvaluation ?? false,
-        automationEvaluation: evalSettings?.automationEvaluation ?? false,
-        passingScore: evalSettings?.passingScore || 70,
-        showResultsImmediately: evalSettings?.showResultsImmediately ?? false,
-        allowReview: evalSettings?.allowReview ?? true
-      },
-      groupSettings: {
-        groupSettingsEnabled: grpSettings?.groupSettingsEnabled ?? false,
-        showExistingUsers: grpSettings?.showExistingUsers ?? true,
-        selectedGroups: grpSettings?.selectedGroups || [],
-        chatEnabled: grpSettings?.chatEnabled ?? false,
-        collaborationEnabled: grpSettings?.collaborationEnabled ?? false
-      },
-      scoreSettings: scrSettings,
-     
-      // ADD THIS SECTION for securitySettings
-      securitySettings: {
-        timerEnabled: secSettings?.timerEnabled ?? false,
-        timerType: secSettings?.timerType || 'exercise',
-        timerDuration: secSettings?.timerDuration || 60,
-        cameraMicEnabled: secSettings?.cameraMicEnabled ?? false,
-        restrictMinimize: secSettings?.restrictMinimize ?? false,
-        fullScreenMode: secSettings?.fullScreenMode ?? false,
-        tabSwitchAllowed: secSettings?.tabSwitchAllowed ?? true,
-        maxTabSwitches: secSettings?.maxTabSwitches || 3,
-        disableClipboard: secSettings?.disableClipboard ?? false,
-        screenRecordingEnabled: secSettings?.screenRecordingEnabled ?? false // <--- ADD THIS
- 
-      },
- 
-      createdAt: new Date(),
-      createdBy: req.user?.email || "roobankr5@gmail.com",
-      version: 1
-    };
- 
-    // Add exercise to array
-    exercises.push(newExercise);
- 
-    // Save back to map
-    entity.pedagogy[tabType].set(subcategory, exercises);
- 
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
- 
-    // Update timestamps
-    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
-    entity.updatedAt = new Date();
- 
-    // Save entity
-    await entity.save();
-   
-    return res.status(201).json({
-      message: [{ key: "success", value: `Exercise added successfully to ${subcategory}` }],
-      data: {
-        exercise: newExercise,
-        subcategory: subcategory,
-        tabType: tabType,
-        entityType: type,
-        entityId: id,
-        totalExercises: exercises.length,
-        generatedExerciseId: exerciseId,
-        location: {
-          section: tabType,
-          subcategory: subcategory,
-          index: exercises.length - 1
-        }
-      }
-    });
- 
-  } catch (err) {
-    console.error("❌ Add exercise error:", err);
-    res.status(500).json({
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }]
-    });
-  }
-};
- 
-
-// Get Exercises by Subcategory
-exports.getExercises = async (req, res) => {
-  try {
-    const { type, id } = req.params;
-    const { 
-      section , 
-      subcategory 
-    } = req.query;
-
-
-    if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: `Invalid entity type: ${type}` }] 
-      });
-    }
-
-    const { model } = modelMap[type];
-    const entity = await model.findById(id);
-    
-    if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} not found` }] 
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy || !entity.pedagogy[section]) {
-      return res.json({
-        message: [{ key: "success", value: "No exercises found" }],
-        data: { 
-          exercises: [],
-          section: section,
-          subcategory: subcategory,
-          total: 0
-        }
-      });
-    }
-
-    // Get exercises for specific subcategory or all in section
-    let exercises = [];
-    if (subcategory) {
-      exercises = entity.pedagogy[section].get(subcategory) || [];
-    } else {
-      // Return all exercises from all subcategories in section
-      const allExercises = [];
-      entity.pedagogy[section].forEach((exArray, subcat) => {
-        if (Array.isArray(exArray)) {
-          exArray.forEach(ex => {
-            allExercises.push({
-              ...ex._doc,
-              subcategory: subcat
-            });
-          });
-        }
-      });
-      exercises = allExercises;
-    }
-
-    return res.json({
-      message: [{ key: "success", value: "Exercises retrieved successfully" }],
-      data: { 
-        exercises,
-        section: section,
-        subcategory: subcategory,
-        total: exercises.length,
-        entityType: type,
-        entityId: id
-      }
-    });
-
-  } catch (err) {
-    console.error("❌ Get exercises error:", err);
-    res.status(500).json({ 
-      message: [{ key: "error", value: "Internal server error" }] 
-    });
-  }
-};
-
-// Update Exercise
-exports.updateExercise = async (req, res) => {
-  try {
-    const { type, id, exerciseId } = req.params;
-    const {
-      tabType,
-      subcategory,
-      exerciseInformation,
-      programmingSettings,
-      compilerSettings,
-      availabilityPeriod,
-      questionBehavior,
-      evaluationSettings,
-      groupSettings,
-      scoreSettings,
-      securitySettings // ← ADDED THIS LINE
-    } = req.body;
- 
-    // Validate entity type
-    if (!modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
- 
-    // Validate required parameters
-    if (!subcategory) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Subcategory is required. Valid values: 'exercises', 'practical', 'Project Development', etc." }]
-      });
-    }
- 
-    // Parse JSON strings if they're strings
-    const parseIfNeeded = (data) => {
-      if (typeof data === 'string') {
-        try {
-          return JSON.parse(data);
-        } catch (error) {
-          return data;
-        }
-      }
-      return data;
-    };
- 
-    const exerciseInfo = exerciseInformation ? parseIfNeeded(exerciseInformation) : null;
-    const progSettings = programmingSettings ? parseIfNeeded(programmingSettings) : null;
-    const compSettings = compilerSettings ? parseIfNeeded(compilerSettings) : null;
-    const availPeriod = availabilityPeriod ? parseIfNeeded(availabilityPeriod) : null;
-    const qBehavior = questionBehavior ? parseIfNeeded(questionBehavior) : null;
-    const evalSettings = evaluationSettings ? parseIfNeeded(evaluationSettings) : null;
-    const grpSettings = groupSettings ? parseIfNeeded(groupSettings) : null;
-    const scrSettings = scoreSettings ? parseIfNeeded(scoreSettings) : null;
-    const secSettings = securitySettings ? parseIfNeeded(securitySettings) : null; // ← ADDED THIS LINE
- 
-    const { model } = modelMap[type];
-    const entity = await model.findById(id);
-   
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
- 
-    // Check if pedagogy exists
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "Pedagogy structure not found for this entity" }]
-      });
-    }
- 
-    // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Pedagogy tab '${tabType}' not found` }]
-      });
-    }
- 
-    // Convert Map to object if needed
-    let tabData = entity.pedagogy[tabType];
-    if (tabData instanceof Map) {
-      tabData = Object.fromEntries(tabData);
-    }
- 
-    // Check if subcategory exists
-    if (!tabData[subcategory] || !Array.isArray(tabData[subcategory])) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Subcategory '${subcategory}' not found in ${tabType}` }]
-      });
-    }
- 
-    // Find exercise index
-    const exerciseIndex = tabData[subcategory].findIndex(
-      exercise => exercise._id.toString() === exerciseId
-    );
- 
-    if (exerciseIndex === -1) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Exercise with ID ${exerciseId} not found in subcategory '${subcategory}'` }]
-      });
-    }
- 
-    // Get existing exercise
-    const existingExercise = tabData[subcategory][exerciseIndex];
- 
-    // Convert Mongoose subdocument to plain object if needed
-    const convertToPlainObject = (obj) => {
-      if (obj && obj.toObject) {
-        return obj.toObject();
-      }
-      if (obj && obj._doc) {
-        return { ...obj._doc };
-      }
-      return obj;
-    };
- 
-    // Get existing level config as plain object
-    let levelConfig = existingExercise.programmingSettings?.levelConfiguration
-      ? convertToPlainObject(existingExercise.programmingSettings.levelConfiguration)
-      : {
-          levelType: 'levelBased',
-          levelBased: { easy: 0, medium: 0, hard: 0 },
-          general: 0
-        };
- 
-    // Ensure levelBased exists with proper structure
-    if (!levelConfig.levelBased) {
-      levelConfig.levelBased = { easy: 0, medium: 0, hard: 0 };
-    }
- 
-    // Handle level configuration updates if programmingSettings is provided
-    if (progSettings?.levelConfiguration) {
-      const newLevelConfig = progSettings.levelConfiguration;
-     
-      // Create a clean levelConfig object
-      levelConfig = {
-        levelType: newLevelConfig.levelType || levelConfig.levelType,
-        general: newLevelConfig.general !== undefined ? newLevelConfig.general : levelConfig.general,
-        levelBased: {
-          easy: newLevelConfig.levelBased?.easy !== undefined ? newLevelConfig.levelBased.easy : (levelConfig.levelBased?.easy || 0),
-          medium: newLevelConfig.levelBased?.medium !== undefined ? newLevelConfig.levelBased.medium : (levelConfig.levelBased?.medium || 0),
-          hard: newLevelConfig.levelBased?.hard !== undefined ? newLevelConfig.levelBased.hard : (levelConfig.levelBased?.hard || 0)
-        }
-      };
-    }
- 
-    // Calculate total questions based on level configuration with safe access
-    let totalQuestions = 0;
-    if (levelConfig.levelType === 'levelBased') {
-      const easy = levelConfig.levelBased?.easy || 0;
-      const medium = levelConfig.levelBased?.medium || 0;
-      const hard = levelConfig.levelBased?.hard || 0;
-      totalQuestions = easy + medium + hard;
-    } else {
-      totalQuestions = levelConfig.general || 0;
-    }
- 
-    // First, convert existing exercise to plain object to avoid Mongoose internal properties
-    const plainExistingExercise = convertToPlainObject(existingExercise);
- 
-    // Calculate total marks if score settings are being updated
-    const calculateTotalMarks = (scoreConfig, levelConfig) => {
-      const { scoreType, evenMarks, separateMarks, levelBasedMarks } = scoreConfig;
-     
-      if (scoreType === 'evenMarks') {
-        if (levelConfig.levelType === 'general') {
-          return levelConfig.general * evenMarks;
-        } else {
-          const { easy, medium, hard } = levelConfig.levelBased;
-          return (easy + medium + hard) * evenMarks;
-        }
-      }
-      else if (scoreType === 'levelBasedMarks') {
-        const { easy, medium, hard } = levelConfig.levelBased;
-        return (easy * levelBasedMarks.easy) +
-               (medium * levelBasedMarks.medium) +
-               (hard * levelBasedMarks.hard);
-      }
-      else if (scoreType === 'separateMarks') {
-        if (levelConfig.levelType === 'general') {
-          return separateMarks.general.reduce((sum, mark) => sum + mark, 0);
-        } else {
-          const easyMarks = separateMarks.levelBased.easy.reduce((sum, mark) => sum + mark, 0);
-          const mediumMarks = separateMarks.levelBased.medium.reduce((sum, mark) => sum + mark, 0);
-          const hardMarks = separateMarks.levelBased.hard.reduce((sum, mark) => sum + mark, 0);
-          return easyMarks + mediumMarks + hardMarks;
-        }
-      }
-      return 0;
-    };
- 
-    // Get existing or default security settings
-    const existingSecuritySettings = plainExistingExercise.securitySettings || {
-      timerEnabled: false,
-      timerType: 'exercise',
-      timerDuration: 60,
-      cameraMicEnabled: false,
-      restrictMinimize: false,
-      fullScreenMode: false,
-      tabSwitchAllowed: true,
-      maxTabSwitches: 3,
-      disableClipboard: false,
-        screenRecordingEnabled: false,
- 
-    };
- 
-    // Calculate total marks for score settings
-    let totalMarks = 0;
-    if (scrSettings) {
-      // Merge existing and new score settings
-      const mergedScoreSettings = {
-        ...(plainExistingExercise.scoreSettings || {
-          scoreType: 'evenMarks',
-          evenMarks: 10,
-          separateMarks: {
-            general: [],
-            levelBased: { easy: [], medium: [], hard: [] }
-          },
-          levelBasedMarks: { easy: 10, medium: 15, hard: 20 },
-          totalMarks: 0
-        }),
-        ...scrSettings
-      };
-     
-      totalMarks = calculateTotalMarks(mergedScoreSettings, levelConfig);
-      mergedScoreSettings.totalMarks = totalMarks;
-    }
- 
-    const updateData = {
-      ...plainExistingExercise,
-      exerciseInformation: {
-        ...plainExistingExercise.exerciseInformation,
-        ...(exerciseInfo && {
-          exerciseId: exerciseInfo.exerciseId || plainExistingExercise.exerciseInformation?.exerciseId,
-          exerciseName: exerciseInfo.exerciseName || plainExistingExercise.exerciseInformation?.exerciseName,
-          description: exerciseInfo.description !== undefined ? exerciseInfo.description : plainExistingExercise.exerciseInformation?.description,
-          exerciseLevel: exerciseInfo.exerciseLevel || plainExistingExercise.exerciseInformation?.exerciseLevel,
-          totalQuestions: totalQuestions,
-          totalPoints: totalMarks || plainExistingExercise.exerciseInformation?.totalPoints || 0
-        })
-      },
-      programmingSettings: {
-        // Convert existing programming settings to plain object
-        selectedModule: plainExistingExercise.programmingSettings?.selectedModule || 'Core Programming',
-        selectedLanguages: plainExistingExercise.programmingSettings?.selectedLanguages || [],
-        levelConfiguration: plainExistingExercise.programmingSettings?.levelConfiguration || {
-          levelType: 'levelBased',
-          levelBased: { easy: 0, medium: 0, hard: 0 },
-          general: 0
-        },
-        // Apply updates from request
-        ...(progSettings && {
-          selectedModule: progSettings.selectedModule || plainExistingExercise.programmingSettings?.selectedModule || 'Core Programming',
-          selectedLanguages: progSettings.selectedLanguages || plainExistingExercise.programmingSettings?.selectedLanguages || [],
-          // Use the clean levelConfig object
-          levelConfiguration: levelConfig
-        })
-      },
-      compilerSettings: {
-        ...plainExistingExercise.compilerSettings,
-        ...(compSettings && {
-          allowCopyPaste: compSettings.allowCopyPaste !== undefined ? compSettings.allowCopyPaste : plainExistingExercise.compilerSettings?.allowCopyPaste,
-          autoSuggestion: compSettings.autoSuggestion !== undefined ? compSettings.autoSuggestion : plainExistingExercise.compilerSettings?.autoSuggestion,
-          autoCloseBrackets: compSettings.autoCloseBrackets !== undefined ? compSettings.autoCloseBrackets : plainExistingExercise.compilerSettings?.autoCloseBrackets,
-          theme: compSettings.theme !== undefined ? compSettings.theme : plainExistingExercise.compilerSettings?.theme,
-          fontSize: compSettings.fontSize !== undefined ? compSettings.fontSize : plainExistingExercise.compilerSettings?.fontSize,
-          tabSize: compSettings.tabSize !== undefined ? compSettings.tabSize : plainExistingExercise.compilerSettings?.tabSize
-        })
-      },
-      availabilityPeriod: {
-        ...plainExistingExercise.availabilityPeriod,
-        ...(availPeriod && {
-          startDate: availPeriod.startDate ? new Date(availPeriod.startDate) : plainExistingExercise.availabilityPeriod?.startDate,
-          endDate: availPeriod.endDate ? new Date(availPeriod.endDate) : plainExistingExercise.availabilityPeriod?.endDate,
-          gracePeriodAllowed: availPeriod.gracePeriodAllowed !== undefined ? availPeriod.gracePeriodAllowed : plainExistingExercise.availabilityPeriod?.gracePeriodAllowed,
-          gracePeriodDate: availPeriod.gracePeriodDate ? new Date(availPeriod.gracePeriodDate) : plainExistingExercise.availabilityPeriod?.gracePeriodDate,
-          extendedDays: availPeriod.extendedDays !== undefined ? availPeriod.extendedDays : plainExistingExercise.availabilityPeriod?.extendedDays
-        })
-      },
-      questionBehavior: {
-        ...plainExistingExercise.questionBehavior,
-        ...(qBehavior && {
-          shuffleQuestions: qBehavior.shuffleQuestions !== undefined ? qBehavior.shuffleQuestions : plainExistingExercise.questionBehavior?.shuffleQuestions,
-          allowNext: qBehavior.allowNext !== undefined ? qBehavior.allowNext : plainExistingExercise.questionBehavior?.allowNext,
-          allowSkip: qBehavior.allowSkip !== undefined ? qBehavior.allowSkip : plainExistingExercise.questionBehavior?.allowSkip,
-          attemptLimitEnabled: qBehavior.attemptLimitEnabled !== undefined ? qBehavior.attemptLimitEnabled : plainExistingExercise.questionBehavior?.attemptLimitEnabled,
-          maxAttempts: qBehavior.maxAttempts !== undefined ? qBehavior.maxAttempts : plainExistingExercise.questionBehavior?.maxAttempts,
-          showPoints: qBehavior.showPoints !== undefined ? qBehavior.showPoints : plainExistingExercise.questionBehavior?.showPoints,
-          showDifficulty: qBehavior.showDifficulty !== undefined ? qBehavior.showDifficulty : plainExistingExercise.questionBehavior?.showDifficulty,
-          allowHintUsage: qBehavior.allowHintUsage !== undefined ? qBehavior.allowHintUsage : plainExistingExercise.questionBehavior?.allowHintUsage,
-          allowTestRun: qBehavior.allowTestRun !== undefined ? qBehavior.allowTestRun : plainExistingExercise.questionBehavior?.allowTestRun
-        })
-      },
-      evaluationSettings: {
-        ...plainExistingExercise.evaluationSettings,
-        ...(evalSettings && {
-          practiceMode: evalSettings.practiceMode !== undefined ? evalSettings.practiceMode : plainExistingExercise.evaluationSettings?.practiceMode,
-          manualEvaluation: {
-            ...plainExistingExercise.evaluationSettings?.manualEvaluation,
-            ...(evalSettings.manualEvaluation && {
-              enabled: evalSettings.manualEvaluation.enabled !== undefined ? evalSettings.manualEvaluation.enabled : plainExistingExercise.evaluationSettings?.manualEvaluation?.enabled,
-              submissionNeeded: evalSettings.manualEvaluation.submissionNeeded !== undefined ? evalSettings.manualEvaluation.submissionNeeded : plainExistingExercise.evaluationSettings?.manualEvaluation?.submissionNeeded
-            })
-          },
-          aiEvaluation: evalSettings.aiEvaluation !== undefined ? evalSettings.aiEvaluation : plainExistingExercise.evaluationSettings?.aiEvaluation,
-          automationEvaluation: evalSettings.automationEvaluation !== undefined ? evalSettings.automationEvaluation : plainExistingExercise.evaluationSettings?.automationEvaluation,
-          passingScore: evalSettings.passingScore !== undefined ? evalSettings.passingScore : plainExistingExercise.evaluationSettings?.passingScore,
-          showResultsImmediately: evalSettings.showResultsImmediately !== undefined ? evalSettings.showResultsImmediately : plainExistingExercise.evaluationSettings?.showResultsImmediately,
-          allowReview: evalSettings.allowReview !== undefined ? evalSettings.allowReview : plainExistingExercise.evaluationSettings?.allowReview
-        })
-      },
-      groupSettings: {
-        ...plainExistingExercise.groupSettings,
-        ...(grpSettings && {
-          groupSettingsEnabled: grpSettings.groupSettingsEnabled !== undefined ? grpSettings.groupSettingsEnabled : plainExistingExercise.groupSettings?.groupSettingsEnabled,
-          showExistingUsers: grpSettings.showExistingUsers !== undefined ? grpSettings.showExistingUsers : plainExistingExercise.groupSettings?.showExistingUsers,
-          selectedGroups: grpSettings.selectedGroups || plainExistingExercise.groupSettings?.selectedGroups || [],
-          chatEnabled: grpSettings.chatEnabled !== undefined ? grpSettings.chatEnabled : plainExistingExercise.groupSettings?.chatEnabled,
-          collaborationEnabled: grpSettings.collaborationEnabled !== undefined ? grpSettings.collaborationEnabled : plainExistingExercise.groupSettings?.collaborationEnabled
-        })
-      },
-      scoreSettings: {
-        ...(plainExistingExercise.scoreSettings || {
-          scoreType: 'evenMarks',
-          evenMarks: 10,
-          separateMarks: {
-            general: [],
-            levelBased: {
-              easy: [],
-              medium: [],
-              hard: []
-            }
-          },
-          levelBasedMarks: {
-            easy: 10,
-            medium: 15,
-            hard: 20
-          },
-          totalMarks: 0
-        }),
-        ...(scrSettings && {
-          scoreType: scrSettings.scoreType !== undefined ? scrSettings.scoreType : (plainExistingExercise.scoreSettings?.scoreType || 'evenMarks'),
-          evenMarks: scrSettings.evenMarks !== undefined ? scrSettings.evenMarks : (plainExistingExercise.scoreSettings?.evenMarks || 10),
-          separateMarks: scrSettings.separateMarks || (plainExistingExercise.scoreSettings?.separateMarks || {
-            general: [],
-            levelBased: { easy: [], medium: [], hard: [] }
-          }),
-          levelBasedMarks: scrSettings.levelBasedMarks || (plainExistingExercise.scoreSettings?.levelBasedMarks || {
-            easy: 10,
-            medium: 15,
-            hard: 20
-          }),
-          totalMarks: scrSettings.totalMarks !== undefined ? scrSettings.totalMarks : (plainExistingExercise.scoreSettings?.totalMarks || 0)
-        })
-      },
-      // ADD THIS SECTION for securitySettings
-      securitySettings: {
-        timerEnabled: secSettings?.timerEnabled !== undefined ? secSettings.timerEnabled : existingSecuritySettings.timerEnabled,
-        timerType: secSettings?.timerType || existingSecuritySettings.timerType,
-        timerDuration: secSettings?.timerDuration !== undefined ? secSettings.timerDuration : existingSecuritySettings.timerDuration,
-        cameraMicEnabled: secSettings?.cameraMicEnabled !== undefined ? secSettings.cameraMicEnabled : existingSecuritySettings.cameraMicEnabled,
-        restrictMinimize: secSettings?.restrictMinimize !== undefined ? secSettings.restrictMinimize : existingSecuritySettings.restrictMinimize,
-        fullScreenMode: secSettings?.fullScreenMode !== undefined ? secSettings.fullScreenMode : existingSecuritySettings.fullScreenMode,
-        tabSwitchAllowed: secSettings?.tabSwitchAllowed !== undefined ? secSettings.tabSwitchAllowed : existingSecuritySettings.tabSwitchAllowed,
-        maxTabSwitches: secSettings?.maxTabSwitches !== undefined ? secSettings.maxTabSwitches : existingSecuritySettings.maxTabSwitches,
-        disableClipboard: secSettings?.disableClipboard !== undefined ? secSettings.disableClipboard : existingSecuritySettings.disableClipboard,
-        screenRecordingEnabled: secSettings?.screenRecordingEnabled !== undefined ? secSettings.screenRecordingEnabled : existingSecuritySettings.screenRecordingEnabled // <--- ADD THIS
-      },
-      updatedAt: new Date(),
-      updatedBy: req.user?.email || "roobankr5@gmail.com"
-    };
- 
-    // If score settings were updated, recalculate total marks
-    if (scrSettings) {
-      updateData.scoreSettings.totalMarks = totalMarks;
-      updateData.exerciseInformation.totalPoints = totalMarks;
-    }
- 
-    // Convert updateData to a clean object without any Mongoose properties
-    const cleanUpdateData = JSON.parse(JSON.stringify(updateData));
- 
-    // Update the exercise in the array
-    tabData[subcategory][exerciseIndex] = cleanUpdateData;
- 
-    // Convert back to Map if needed
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, tabData[subcategory]);
-    } else {
-      entity.pedagogy[tabType][subcategory] = tabData[subcategory];
-    }
- 
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
- 
-    // Update entity timestamps
-    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
-    entity.updatedAt = new Date();
- 
-    // Save entity
-    await entity.save();
-   
- 
-    return res.status(200).json({
-      message: [{ key: "success", value: `Exercise updated successfully in ${subcategory}` }],
-      data: {
-        exercise: cleanUpdateData,
-        subcategory: subcategory,
-        tabType: tabType,
-        entityType: type,
-        entityId: id,
-        exerciseId: exerciseId,
-        totalExercises: tabData[subcategory].length,
-        levelConfiguration: cleanUpdateData.programmingSettings.levelConfiguration,
-        scoreSettings: cleanUpdateData.scoreSettings,
-        securitySettings: cleanUpdateData.securitySettings, // ← ADD THIS LINE
-        totalQuestions: totalQuestions,
-        totalMarks: totalMarks,
-        location: {
-          section: tabType,
-          subcategory: subcategory,
-          index: exerciseIndex
-        }
-      }
-    });
- 
-  } catch (err) {
-    console.error("❌ Update exercise error:", err);
-    console.error("❌ Error stack:", err.stack);
-    res.status(500).json({
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }]
-    });
-  }
-};
- 
-
-// Delete Exercise
-// Delete Exercise
-exports.deleteExercise = async (req, res) => {
-  try {
-    const { type, id, exerciseId } = req.params;
-    const { 
-      tabType ,
-      subcategory
-    } = req.query;
-
-    // Validate entity type
-    if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }] 
-      });
-    }
-
-    // Validate required parameters
-    if (!subcategory) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "Subcategory is required as query parameter. Valid values: 'exercises', 'practical', 'Project Development', etc." }] 
-      });
-    }
-
-    // Validate tabType
-    if (!tabType || !['I_Do', 'We_Do', 'You_Do'].includes(tabType)) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "tabType is required and must be one of: 'I_Do', 'We_Do', 'You_Do'" }] 
-      });
-    }
-
-    const { model } = modelMap[type];
-    const entity = await model.findById(id);
-    
-    if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }] 
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: "Pedagogy structure not found for this entity" }] 
-      });
-    }
-
-    // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Pedagogy tab '${tabType}' not found` }] 
-      });
-    }
-
-    // Convert Map to object if needed
-    let tabData = entity.pedagogy[tabType];
-    if (tabData instanceof Map) {
-      tabData = Object.fromEntries(tabData);
-    }
-
-    // Check if subcategory exists
-    if (!tabData[subcategory] || !Array.isArray(tabData[subcategory])) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Subcategory '${subcategory}' not found in ${tabType}` }] 
-      });
-    }
-
-    // Find exercise index
-    const exerciseIndex = tabData[subcategory].findIndex(
-      exercise => exercise._id.toString() === exerciseId
-    );
-
-    if (exerciseIndex === -1) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Exercise with ID ${exerciseId} not found in subcategory '${subcategory}'` }] 
-      });
-    }
-
-    // Get exercise data for response message (including security settings)
-    const exerciseToDelete = tabData[subcategory][exerciseIndex];
-    const exerciseName = exerciseToDelete?.exerciseInformation?.exerciseName || 'Unknown Exercise';
-    const exerciseIdValue = exerciseToDelete?.exerciseInformation?.exerciseId || exerciseId;
-    
-    // Store deleted exercise data for response (including security settings)
-    const deletedExerciseData = {
-      exerciseId: exerciseIdValue,
-      exerciseName: exerciseName,
-      securitySettings: exerciseToDelete?.securitySettings || null,
-      deletedAt: new Date()
-    };
-    
-    // Remove exercise from array
-    tabData[subcategory].splice(exerciseIndex, 1);
-
-    // Convert back to Map if needed
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, tabData[subcategory]);
-    } else {
-      entity.pedagogy[tabType][subcategory] = tabData[subcategory];
-    }
-
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-
-    // Update entity timestamps
-    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
-    entity.updatedAt = new Date();
-
-    // Save entity
-    await entity.save();
-    
-
-    return res.status(200).json({
-      message: [{ key: "success", value: `Exercise "${exerciseName}" deleted successfully from ${subcategory}` }],
-      data: {
-        deletedExercise: deletedExerciseData,
-        subcategory: subcategory,
-        tabType: tabType,
-        entityType: type,
-        entityId: id,
-        totalExercises: tabData[subcategory].length,
-        location: {
-          section: tabType,
-          subcategory: subcategory,
-          deletedIndex: exerciseIndex
-        }
-      }
-    });
-
-  } catch (err) {
-    console.error("❌ Delete exercise error:", err);
-    console.error("❌ Error stack:", err.stack);
-    res.status(500).json({ 
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }] 
-    });
-  }
-};
-// Get All Subcategories
-exports.getSubcategories = async (req, res) => {
-  try {
-    const { type, id } = req.params;
-    const { section = 'We_Do' } = req.query;
-
-
-    if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "Invalid entity type" }] 
-      });
-    }
-
-    const { model } = modelMap[type];
-    const entity = await model.findById(id);
-    
-    if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} not found` }] 
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy || !entity.pedagogy[section]) {
-      return res.json({
-        message: [{ key: "success", value: "No subcategories found" }],
-        data: { 
-          subcategories: [],
-          section: section,
-          total: 0
-        }
-      });
-    }
-
-    // Get all subcategories
-    const subcategories = Array.from(entity.pedagogy[section].keys());
-
-    // Count exercises in each subcategory
-    const subcategoryDetails = subcategories.map(subcat => {
-      const exercises = entity.pedagogy[section].get(subcat) || [];
-      return {
-        name: subcat,
-        exerciseCount: exercises.length,
-        lastUpdated: exercises.length > 0 
-          ? exercises[exercises.length - 1].updatedAt 
-          : null
-      };
-    });
-
-    return res.json({
-      message: [{ key: "success", value: "Subcategories retrieved successfully" }],
-      data: { 
-        subcategories: subcategoryDetails,
-        section: section,
-        total: subcategories.length,
-        entityType: type,
-        entityId: id
-      }
-    });
-
-  } catch (err) {
-    console.error("❌ Get subcategories error:", err);
-    res.status(500).json({ 
-      message: [{ key: "error", value: "Internal server error" }] 
-    });
-  }
-};
-
-
-
-
-exports.lockExercise = async (req, res) => {
-  try {
-    const userId = req.body.targetUserId || req.user._id;
-    const {
-      courseId,
-      exerciseId,
-      category,
-      subcategory,
-      status,
-      isLocked,
-      reason
-    } = req.body;
-
-
-    if (!courseId || !exerciseId || !subcategory) {
-      return res.status(400).json({ message: [{ key: "error", value: "Missing required fields" }] });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
-
-    // 1. Find Course Index
-    const courseIndex = user.courses.findIndex(c => c.courseId && c.courseId.toString() === courseId);
-    
-    if (courseIndex === -1) {
-      return res.status(404).json({ message: [{ key: "error", value: "Course not enrolled" }] });
-    }
-
-    const userCourse = user.courses[courseIndex];
-
-    // 2. Ensure Path Exists
-    if (!userCourse.answers) userCourse.answers = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
-    
-    const categoryKey = category;
-    if (!userCourse.answers[categoryKey]) userCourse.answers[categoryKey] = new Map();
-    
-    const categoryMap = userCourse.answers[categoryKey];
-    
-    // 3. Get Exercises Array
-    let exercisesArray = categoryMap.get(subcategory) || [];
-    if (exercisesArray.toObject) exercisesArray = exercisesArray.toObject();
-
-    // 4. Handle Screen Recording Upload from Form-Data
-    let screenRecordingUrl = null;
-    
-    // Check if file exists in the request (for form-data uploads)
-    if (req.files && req.files.screenRecording) {
-      try {
-        const screenRecordingFile = req.files.screenRecording;
-        
-        // Upload to Cloudinary from buffer
-        const uploadResult = await new Promise((resolve, reject) => {
-          // Create upload stream to Cloudinary
-          const uploadStream = cloudinary.uploader.upload_stream(
-            {
-              resource_type: 'video',
-              folder: `lms/pedagogy/${category}/${subcategory}/screen-recordings`,
-              overwrite: true,
-              chunk_size: 6000000, // 6MB chunks
-              eager: [
-                { width: 640, height: 480, crop: "scale" }
-              ]
-            },
-            (error, result) => {
-              if (error) {
-                console.error('❌ Cloudinary upload error:', error);
-                reject(error);
-              } else {
-                resolve(result);
-              }
-            }
-          );
-          
-          // Create readable stream from buffer
-          const bufferStream = new stream.PassThrough();
-          bufferStream.end(screenRecordingFile.data);
-          
-          // Pipe buffer to Cloudinary upload stream
-          bufferStream.pipe(uploadStream);
-        });
-        
-        screenRecordingUrl = uploadResult.secure_url;
-      } catch (uploadError) {
-        console.error("❌ Error uploading screen recording to Cloudinary:", uploadError);
-        // Continue without failing the entire operation
-      }
-    }
-    // Also check if screenRecording was sent as Base64 in body (for backward compatibility)
-    else if (req.body.screenRecording && req.body.screenRecording.startsWith('data:video/')) {
-      try {
-        const base64Data = req.body.screenRecording;
-        
-        const uploadResult = await cloudinary.uploader.upload(base64Data, {
-          resource_type: 'video',
-          folder: `lms/pedagogy/${category}/${subcategory}/screen-recordings`,
-          overwrite: true,
-          chunk_size: 6000000
-        });
-        
-        screenRecordingUrl = uploadResult.secure_url;
-      } catch (uploadError) {
-        console.error("❌ Error uploading Base64 screen recording:", uploadError);
-      }
-    }
-
-    // 5. Update or Push Exercise Progress
-    const exerciseIndex = exercisesArray.findIndex(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
-    let updatedExercise = null;
-
-    if (exerciseIndex > -1) {
-      // Update Existing
-      if (status) exercisesArray[exerciseIndex].status = status;
-      if (isLocked !== undefined) exercisesArray[exerciseIndex].isLocked = isLocked;
-      else if (status === 'terminated') exercisesArray[exerciseIndex].isLocked = true;
-      
-      // Add screen recording URL if uploaded
-      if (screenRecordingUrl) {
-        exercisesArray[exerciseIndex].screenRecording = screenRecordingUrl;
-      }
-      
-      updatedExercise = exercisesArray[exerciseIndex];
-    } else {
-      // Create New
-      const newEntry = {
-        exerciseId: new mongoose.Types.ObjectId(exerciseId),
-        status: status || 'in-progress',
-        isLocked: isLocked !== undefined ? (isLocked === 'true' || isLocked === true) : (status === 'terminated'),
-        questions: [],
-        screenRecording: screenRecordingUrl || undefined
-      };
-      exercisesArray.push(newEntry);
-      updatedExercise = newEntry;
-    }
-
-    // 6. Save to Database
-    categoryMap.set(subcategory, exercisesArray);
-    
-    // Mark the SPECIFIC path modified
-    user.markModified(`courses.${courseIndex}.answers.${categoryKey}`);
-    
-    await user.save();
-    console.log("✅ Exercise status updated successfully",updatedExercise);
-    return res.status(200).json({
-      message: [{ key: "success", value: "Exercise status updated successfully" }],
-      data: updatedExercise
-    });
-
-  } catch (error) {
-    console.error("Lock Exercise Error:", error);
-    return res.status(500).json({ 
-      message: [{ key: "error", value: "Internal server error" }],
-      error: error.message 
-    });
-  }
-};
-
- 
-// 2. Get Exercise Status (Debugged)
-exports.getExerciseStatus = async (req, res) => {
-  try {
-    const userId = req.query.targetUserId || req.user._id;
-    const { courseId, exerciseId, category = 'We_Do', subcategory } = req.query;
- 
-    // console.log(`🔍 STATUS REQ: User: ${userId} | Ex: ${exerciseId}`);
- 
-    if (!courseId || !exerciseId || !subcategory) {
-      return res.status(400).json({ message: [{ key: "error", value: "Missing parameters" }] });
-    }
- 
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
- 
-    const userCourse = user.courses ? user.courses.find(c => c.courseId && c.courseId.toString() === courseId) : null;
- 
-    if (!userCourse || !userCourse.answers) {
-      return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
-    }
- 
-    const categoryKey = category || 'We_Do';
-    const categoryMap = userCourse.answers[categoryKey];
- 
-    if (!categoryMap) {
-      return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
-    }
- 
-    const exercisesArray = categoryMap.get(subcategory) || [];
- 
-    // Find the exercise
-    const exercise = exercisesArray.find(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
- 
-    if (exercise) {
-      // console.log("👉 Found Status:", exercise.isLocked, exercise.status);
-      return res.status(200).json({
-        success: true,
-        data: {
-          isLocked: exercise.isLocked || false,
-          status: exercise.status || 'in-progress',
-          screenRecording: exercise.screenRecording || 'empty'
- 
-        }
-      });
-    }
- 
-    // console.log("👉 Exercise Not Found in Array, returning unlocked");
-    return res.status(200).json({
-      success: true,
-      data: { isLocked: false, status: 'new' }
-    });
- 
-  } catch (error) {
-    console.error("Get Status Error:", error);
-    return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
-  }
-};
- 
-
-// Add question to exercise based on exerciseId
-exports.addQuestion = async (req, res) => {
-  try {
-    const { type, id, exerciseId } = req.params;
-    const {
-      tabType ,
-      subcategory,
-      title,
-      description,
-      difficulty = 'medium',
-      score = 10, // ✅ Change to 'score'
-      sampleInput = '',
-      sampleOutput = '',
-      constraints = [],
-      hints = [],
-      testCases = [],
-      solutions = {},
-      timeLimit = 2000,
-      memoryLimit = 256,
-      isActive = true,
-      sequence = 0
-    } = req.body;
-
-    if (!type || !modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
-
-    // Validate required fields
-    if (!title || !title.trim()) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Question title is required" }]
-      });
-    }
-
-    if (!description || !description.trim()) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Question description is required" }]
-      });
-    }
-
-    if (!subcategory) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Subcategory is required (e.g., 'Practical', 'Project Development')" }]
-      });
-    }
-
-    // Validate difficulty
-    const validDifficulties = ['easy', 'medium', 'hard'];
-    if (!validDifficulties.includes(difficulty)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid difficulty. Valid values: ${validDifficulties.join(', ')}` }]
-      });
-    }
-
-    // Validate points
-    // Validate score
-    // if (typeof score !== 'number' || score < 1) { // CHANGE: points -> score
-    //   return res.status(400).json({ 
-    //     message: [{ key: "error", value: "Score must be a number between 1 and 100" }] // CHANGE: Points -> Score
-    //   });
-    // }
-
-    // Validate test cases structure
-    if (testCases.length > 0) {
-      for (let i = 0; i < testCases.length; i++) {
-        const testCase = testCases[i];
-        if (!testCase.input || !testCase.expectedOutput) {
-          return res.status(400).json({
-            message: [{ key: "error", value: `Test case ${i + 1} must have input and expectedOutput` }]
-          });
-        }
-      }
-    }
-
-    // Get the model from modelMap
-    const { model } = modelMap[type];
-
-    if (!model) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Model not found for type: ${type}` }]
-      });
-    }
-
-    // Find the entity
-    const entity = await model.findById(id);
-
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
-      });
-    }
-
-    // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
-      });
-    }
-
-    // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
-
-    // Check if subcategory exists
-    if (!tabData[subcategory]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Subcategory "${subcategory}" not found in ${tabType}` }]
-      });
-    }
-
-    const exercises = tabData[subcategory];
-
-    if (!Array.isArray(exercises)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid exercises format in subcategory "${subcategory}"` }]
-      });
-    }
-    // Find the exercise by ID
-    let foundExercise = null;
-    let foundExerciseIndex = -1;
-
-    for (let i = 0; i < exercises.length; i++) {
-      const exercise = exercises[i];
-
-      // Check all possible ID fields
-      const matches = (
-        (exercise._id && exercise._id.toString() === exerciseId) ||
-        (exercise.exerciseInformation?.exerciseId === exerciseId) ||
-        (exercise.exerciseInformation?._id?.toString() === exerciseId)
-      );
-
-      if (matches) {
-        foundExercise = exercise;
-        foundExerciseIndex = i;
-   
-        break;
-      }
-    }
-
-    if (!foundExercise) {
-      console.error(`❌ Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}"`);
-
-      // Log all available exercises for debugging
-      const availableExercises = exercises.map((ex, idx) => ({
-        index: idx,
-        _id: ex._id?.toString(),
-        exerciseId: ex.exerciseInformation?.exerciseId,
-        name: ex.exerciseInformation?.exerciseName,
-        exerciseLevel: ex.exerciseInformation?.exerciseLevel,
-        questionsCount: ex.questions?.length || 0
-      }));
-
-      return res.status(404).json({
-        message: [{
-          key: "error",
-          value: `Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}". Available exercises: ${availableExercises.length}`
-        }],
-        availableExercises
-      });
-    }
-
-    // Generate question ID
-    const questionId = new mongoose.Types.ObjectId();
-
-    // Create question object
-    // Create question object
-    const newQuestion = {
-      _id: questionId,
-      title: title.trim(),
-      description: description.trim(),
-      difficulty,
-      score, // CHANGE: points -> score
-      sampleInput: sampleInput || '',
-      sampleOutput: sampleOutput || '',
-      constraints: Array.isArray(constraints) ? constraints.filter(c => c && c.trim()) : [],
-      hints: Array.isArray(hints) ? hints.map((hint, index) => ({
-        _id: new mongoose.Types.ObjectId(),
-        hintText: hint.hintText || hint,
-        pointsDeduction: hint.pointsDeduction || 0,
-        isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-        sequence: hint.sequence || index
-      })) : [],
-      testCases: Array.isArray(testCases) ? testCases.map((testCase, index) => ({
-        _id: new mongoose.Types.ObjectId(),
-        input: testCase.input,
-        expectedOutput: testCase.expectedOutput,
-        isSample: testCase.isSample !== undefined ? testCase.isSample : false,
-        isHidden: testCase.isHidden !== undefined ? testCase.isHidden : true,
-        points: testCase.points || 1, // Keep points for test cases if needed
-        explanation: testCase.explanation || `Test case ${index + 1}`,
-        sequence: testCase.sequence || index
-      })) : [],
-      solutions: solutions && typeof solutions === 'object' ? {
-        startedCode: solutions.startedCode || '',
-        functionName: solutions.functionName || '',
-        language: solutions.language || ''
-      } : {
-        startedCode: '',
-        functionName: '',
-        language: ''
-      },
-      timeLimit,
-      memoryLimit,
-      isActive,
-      sequence: sequence === 0 ? (foundExercise.questions?.length || 0) : sequence,
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    if (!foundExercise.questions) {
-      foundExercise.questions = [];
-    }
-
-    // Add question to exercise
-    foundExercise.questions.push(newQuestion);
-
-    // Update the exercise in the array
-    exercises[foundExerciseIndex] = foundExercise;
-
-    // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
-    } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
-    }
-
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
-
-    // Update timestamps
-    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
-    entity.updatedAt = new Date();
-
-    // Save entity
-    await entity.save();
-    const responseData = {
-      question: newQuestion,
-      exercise: {
-        exerciseId: foundExercise.exerciseInformation?.exerciseId || foundExercise._id.toString(),
-        exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-        exerciseLevel: foundExercise.exerciseInformation?.exerciseLevel || "medium",
-        totalQuestions: foundExercise.questions.length,
-        totalScore: foundExercise.questions.reduce((sum, q) => sum + q.score, 0) // CHANGE: points -> score
-      },
-      entity: {
-        type: type,
-        id: entity._id.toString(),
-        title: entity.title || entity.name || "Entity"
-      },
-      location: {
-        tabType: tabType,
-        subcategory: subcategory,
-        exerciseIndex: foundExerciseIndex,
-        exerciseId: foundExercise._id.toString(),
-        questionId: questionId.toString(),
-        questionIndex: foundExercise.questions.length - 1
-      }
-    };
-
-    return res.status(201).json({
-      message: [{
-        key: "success",
-        value: `Question "${title}" added successfully to "${foundExercise.exerciseInformation?.exerciseName}" in ${subcategory}`
-      }],
-      data: responseData
-    });
-
-  } catch (err) {
-    console.error("❌ Add question error:", err);
-    console.error("❌ Error stack:", err.stack);
-    console.error("❌ Error details:", {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      keyValue: err.keyValue
-    });
-
-    res.status(500).json({
-      message: [{
-        key: "error",
-        value: `Internal server error: ${err.message}`
-      }],
-      error: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  }
-};
-
-// Get all questions for an exercise
-exports.getQuestions = async (req, res) => {
-  try {
-    const { type, id, exerciseId } = req.params;
-    const { 
-      includeInactive = 'false' 
-    } = req.query; // Keep includeInactive as query parameter
-
-    // Validate entity type
-    if (!type || !modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
-
-    // Get the model from modelMap
-    const { model } = modelMap[type];
-
-    if (!model) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Model not found for type: ${type}` }]
-      });
-    }
-
-    // Find the entity
-    const entity = await model.findById(id);
-
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
-
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
-      });
-    }
-
-    const validTabTypes = ['I_Do', 'We_Do', 'You_Do'];
-    let foundExercise = null;
-    let foundTabType = null;
-    let foundSubcategory = null;
-
-    // Search through all tab types for the exercise
-    for (const tabType of validTabTypes) {
-      if (!entity.pedagogy[tabType]) continue;
-
-      // Convert Map to object if needed
-      const tabData = entity.pedagogy[tabType] instanceof Map
-        ? Object.fromEntries(entity.pedagogy[tabType])
-        : entity.pedagogy[tabType];
-
-      // Search through all subcategories in this tabType
-      for (const [subcategory, exercises] of Object.entries(tabData)) {
-        if (Array.isArray(exercises)) {
-          const exercise = exercises.find(ex => {
-            // Check both _id and exerciseInformation.exerciseId
-            return ex._id && ex._id.toString() === exerciseId ||
-              (ex.exerciseInformation && ex.exerciseInformation.exerciseId === exerciseId);
-          });
-          if (exercise) {
-            foundExercise = exercise;
-            foundTabType = tabType;
-            foundSubcategory = subcategory;
-            break;
-          }
-        }
-      }
-      if (foundExercise) break; // Stop searching if found
-    }
-
-    if (!foundExercise) {
-      console.error(`❌ Exercise with ID "${exerciseId}" not found in ${type} "${entity.title || entity.name}"`);
-
-      // Log available exercises for debugging
-      const availableExercises = [];
-      validTabTypes.forEach(tabType => {
-        if (entity.pedagogy[tabType]) {
-          const tabData = entity.pedagogy[tabType] instanceof Map
-            ? Object.fromEntries(entity.pedagogy[tabType])
-            : entity.pedagogy[tabType];
-          
-          Object.entries(tabData).forEach(([subcat, exercises]) => {
-            if (Array.isArray(exercises)) {
-              exercises.forEach((ex, idx) => {
-                availableExercises.push({
-                  tabType: tabType,
-                  subcategory: subcat,
-                  index: idx,
-                  _id: ex._id?.toString(),
-                  exerciseId: ex.exerciseInformation?.exerciseId,
-                  name: ex.exerciseInformation?.exerciseName,
-                  hasQuestions: ex.questions && Array.isArray(ex.questions) ? ex.questions.length : 0
-                });
-              });
-            }
-          });
-        }
-      });
-      
-      return res.status(404).json({
-        message: [{ key: "error", value: `No exercise found with ID ${exerciseId}` }],
-        data: {
-          questions: [],
-          exercise: {
-            exerciseId: exerciseId,
-            exerciseName: "Unknown Exercise",
-            exerciseLevel: "medium",
-            totalQuestions: 0,
-            totalPoints: 0
-          },
-          entity: {
-            type: type,
-            id: entity._id.toString(),
-            title: entity.title || entity.name || "Entity",
-            tabType: null,
-            subcategory: null
-          },
-          metadata: {
-            exerciseId: exerciseId,
-            includeInactive: includeInactive === 'true'
-          },
-          debug: {
-            availableExercises: availableExercises
-          }
-        }
-      });
-    }
-
-    // Get questions - handle cases where questions might not exist
-    let questions = [];
-    if (foundExercise.questions && Array.isArray(foundExercise.questions)) {
-      questions = foundExercise.questions;
-    } else {
-      // Initialize empty questions array if it doesn't exist
-      foundExercise.questions = [];
-    }
-
-    // Filter inactive questions if requested
-    if (includeInactive === 'false') {
-      questions = questions.filter(q => q.isActive !== false);
-    }
-
-    // Sort by sequence
-    questions.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
-    
-    // Prepare exercise data with all settings including securitySettings
-    const exerciseData = {
-      _id: foundExercise._id?.toString() || exerciseId,
-      exerciseId: foundExercise.exerciseInformation?.exerciseId || exerciseId,
-      exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-      exerciseLevel: foundExercise.exerciseInformation?.exerciseLevel || "medium",
-      description: foundExercise.exerciseInformation?.description || "",
-      totalQuestions: questions.length,
-      totalPoints: questions.reduce((sum, q) => sum + (q.score || 0), 0),
-      estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
-      // Include all settings
-      programmingSettings: foundExercise.programmingSettings || {},
-      compilerSettings: foundExercise.compilerSettings || {},
-      availabilityPeriod: foundExercise.availabilityPeriod || {},
-      questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
-      groupSettings: foundExercise.groupSettings || {},
-      scoreSettings: foundExercise.scoreSettings || {},
-      securitySettings: foundExercise.securitySettings || {}, // Include security settings
-      
-      createdAt: foundExercise.createdAt,
-      updatedAt: foundExercise.updatedAt,
-      createdBy: foundExercise.createdBy,
-      updatedBy: foundExercise.updatedBy
-    };
-
-    return res.status(200).json({
-      message: [{ key: "success", value: `Found ${questions.length} questions in ${foundTabType}` }],
-      data: {
-        questions,
-        exercise: exerciseData,
-        entity: {
-          type: type,
-          id: entity._id.toString(),
-          title: entity.title || entity.name || "Entity",
-          tabType: foundTabType,
-          subcategory: foundSubcategory
-        },
-        metadata: {
-          exerciseId: exerciseId,
-          tabType: foundTabType,
-          subcategory: foundSubcategory,
-          includeInactive: includeInactive === 'true',
-          totalQuestions: questions.length,
-          activeQuestions: questions.filter(q => q.isActive !== false).length,
-          inactiveQuestions: questions.filter(q => q.isActive === false).length
-        }
-      }
-    });
-
-  } catch (err) {
-    console.error("❌ Get questions error:", err);
-    res.status(500).json({
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }]
-    });
-  }
-};
-// Get single question by ID
-exports.getQuestionById = async (req, res) => {
-  try {
-    const { type, id, exerciseId, questionId } = req.params;
-
-    // Validate entity type
-    if (!type || !modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
-
-    // Get the model from modelMap
-    const { model } = modelMap[type];
-
-    if (!model) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Model not found for type: ${type}` }]
-      });
-    }
-
-    // Find the entity
-    const entity = await model.findById(id);
-
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
-
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
-      });
-    }
-
-    const validTabTypes = ['I_Do', 'We_Do', 'You_Do'];
-    let foundExercise = null;
-    let foundTabType = null;
-    let foundSubcategory = null;
-    let foundQuestion = null;
-    let questionIndex = -1;
-
-    // Search through all tab types for the exercise and question
-    for (const tabType of validTabTypes) {
-      if (!entity.pedagogy[tabType]) continue;
-
-      // Convert Map to object if needed
-      const tabData = entity.pedagogy[tabType] instanceof Map
-        ? Object.fromEntries(entity.pedagogy[tabType])
-        : entity.pedagogy[tabType];
-
-      // Search through all subcategories in this tabType
-      for (const [subcategory, exercises] of Object.entries(tabData)) {
-        if (Array.isArray(exercises)) {
-          const exercise = exercises.find(ex => {
-            // Check both _id and exerciseInformation.exerciseId
-            return ex._id && ex._id.toString() === exerciseId ||
-              (ex.exerciseInformation && ex.exerciseInformation.exerciseId === exerciseId);
-          });
-          
-          if (exercise) {
-            // Now search for the question within this exercise
-            if (exercise.questions && Array.isArray(exercise.questions)) {
-              const qIndex = exercise.questions.findIndex(q => 
-                q._id && q._id.toString() === questionId
-              );
-              
-              if (qIndex !== -1) {
-                foundExercise = exercise;
-                foundTabType = tabType;
-                foundSubcategory = subcategory;
-                foundQuestion = exercise.questions[qIndex];
-                questionIndex = qIndex;
-                break;
-              }
-            }
-          }
-        }
-        if (foundQuestion) break;
-      }
-      if (foundQuestion) break; // Stop searching if found
-    }
-
-    if (!foundExercise) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Exercise with ID ${exerciseId} not found` }]
-      });
-    }
-
-    if (!foundQuestion) {
-      // Log available questions for debugging
-      const availableQuestions = [];
-      if (foundExercise.questions && Array.isArray(foundExercise.questions)) {
-        foundExercise.questions.forEach((q, idx) => {
-          availableQuestions.push({
-            index: idx,
-            _id: q._id?.toString(),
-            title: q.title,
-            difficulty: q.difficulty,
-            score: q.score
-          });
-        });
-      }
-      
-      return res.status(404).json({
-        message: [{ key: "error", value: `Question with ID ${questionId} not found in exercise ${foundExercise.exerciseInformation?.exerciseName || exerciseId}` }],
-        data: {
-          exercise: {
-            exerciseId: exerciseId,
-            exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-            totalQuestions: foundExercise.questions?.length || 0
-          },
-          debug: {
-            availableQuestions: availableQuestions
-          }
-        }
-      });
-    }
-
-    // Prepare exercise data with all settings including securitySettings
-    const exerciseData = {
-      _id: foundExercise._id?.toString() || exerciseId,
-      exerciseId: foundExercise.exerciseInformation?.exerciseId || exerciseId,
-      exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-      exerciseLevel: foundExercise.exerciseInformation?.exerciseLevel || "medium",
-      description: foundExercise.exerciseInformation?.description || "",
-      totalQuestions: foundExercise.questions?.length || 0,
-      totalPoints: foundExercise.questions?.reduce((sum, q) => sum + (q.score || 0), 0) || 0,
-      estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
-      // Include all settings
-      programmingSettings: foundExercise.programmingSettings || {},
-      compilerSettings: foundExercise.compilerSettings || {},
-      availabilityPeriod: foundExercise.availabilityPeriod || {},
-      questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
-      groupSettings: foundExercise.groupSettings || {},
-      scoreSettings: foundExercise.scoreSettings || {},
-      securitySettings: foundExercise.securitySettings || {}, // Include security settings
-      
-      createdAt: foundExercise.createdAt,
-      updatedAt: foundExercise.updatedAt,
-      createdBy: foundExercise.createdBy,
-      updatedBy: foundExercise.updatedBy
-    };
-
-    // Get adjacent questions for navigation
-    let previousQuestion = null;
-    let nextQuestion = null;
-    
-    if (foundExercise.questions && Array.isArray(foundExercise.questions)) {
-      if (questionIndex > 0) {
-        previousQuestion = {
-          _id: foundExercise.questions[questionIndex - 1]._id?.toString(),
-          title: foundExercise.questions[questionIndex - 1].title,
-          sequence: foundExercise.questions[questionIndex - 1].sequence
-        };
-      }
-      
-      if (questionIndex < foundExercise.questions.length - 1) {
-        nextQuestion = {
-          _id: foundExercise.questions[questionIndex + 1]._id?.toString(),
-          title: foundExercise.questions[questionIndex + 1].title,
-          sequence: foundExercise.questions[questionIndex + 1].sequence
-        };
-      }
-    }
-
-    return res.status(200).json({
-      message: [{ key: "success", value: `Question "${foundQuestion.title}" retrieved successfully from ${foundTabType}` }],
-      data: {
-        question: foundQuestion,
-        exercise: exerciseData,
-        entity: {
-          type: type,
-          id: entity._id.toString(),
-          title: entity.title || entity.name || "Entity",
-          tabType: foundTabType,
-          subcategory: foundSubcategory
-        },
-        navigation: {
-          previous: previousQuestion,
-          next: nextQuestion,
-          currentIndex: questionIndex,
-          totalQuestions: foundExercise.questions?.length || 0
-        },
-        metadata: {
-          exerciseId: exerciseId,
-          questionId: questionId,
-          tabType: foundTabType,
-          subcategory: foundSubcategory,
-          questionSequence: foundQuestion.sequence || 0,
-          isActive: foundQuestion.isActive !== false,
-          difficulty: foundQuestion.difficulty || 'medium',
-          score: foundQuestion.score || 0
-        }
-      }
-    });
-
-  } catch (err) {
-    console.error("❌ Get question by ID error:", err);
-    res.status(500).json({
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }]
-    });
-  }
-};
-
-// Update question
-exports.updateQuestion = async (req, res) => {
-  try {
-    const { type, id, exerciseId, questionId } = req.params;
-    const {
-      tabType,
-      subcategory,
-      title,
-      description,
-      difficulty,
-      score,
-      sampleInput,
-      sampleOutput,
-      constraints,
-      hints,
-      testCases,
-      solutions,
-      timeLimit,
-      memoryLimit,
-      isActive,
-      sequence
-    } = req.body;
-
-    // Validate entity type
-    if (!type || !modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
-
-    // Validate required parameters
-    if (!tabType) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "tabType is required (I_Do, We_Do, You_Do)" }]
-      });
-    }
-
-    if (!subcategory) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Subcategory is required (e.g., 'Practical', 'Project Development')" }]
-      });
-    }
-
-    // Validate difficulty if provided
-    if (difficulty !== undefined) {
-      const validDifficulties = ['easy', 'medium', 'hard'];
-      if (!validDifficulties.includes(difficulty)) {
-        return res.status(400).json({
-          message: [{ key: "error", value: `Invalid difficulty. Valid values: ${validDifficulties.join(', ')}` }]
-        });
-      }
-    }
-
-    // Validate score if provided
-    if (score !== undefined && (typeof score !== 'number' || score < 1 || score > 100)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Score must be a number between 1 and 100" }]
-      });
-    }
-
-    // Validate test cases if provided
-    if (testCases !== undefined && Array.isArray(testCases)) {
-      for (let i = 0; i < testCases.length; i++) {
-        const testCase = testCases[i];
-        if (!testCase.input || !testCase.expectedOutput) {
-          return res.status(400).json({
-            message: [{ key: "error", value: `Test case ${i + 1} must have input and expectedOutput` }]
-          });
-        }
-      }
-    }
-
-    // Get the model from modelMap
-    const { model } = modelMap[type];
-
-    if (!model) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Model not found for type: ${type}` }]
-      });
-    }
-
-    // Find the entity
-    const entity = await model.findById(id);
-
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
-      });
-    }
-
-    // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
-      });
-    }
-
-    // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
-
-    // Check if subcategory exists
-    if (!tabData[subcategory]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Subcategory "${subcategory}" not found in ${tabType}` }]
-      });
-    }
-
-    const exercises = tabData[subcategory];
-
-    if (!Array.isArray(exercises)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid exercises format in subcategory "${subcategory}"` }]
-      });
-    }
-
-    // Find the exercise by ID
-    let foundExercise = null;
-    let foundExerciseIndex = -1;
-
-    for (let i = 0; i < exercises.length; i++) {
-      const exercise = exercises[i];
-
-      // Check all possible ID fields
-      const matches = (
-        (exercise._id && exercise._id.toString() === exerciseId) ||
-        (exercise.exerciseInformation?.exerciseId === exerciseId) ||
-        (exercise.exerciseInformation?._id?.toString() === exerciseId)
-      );
-
-      if (matches) {
-        foundExercise = exercise;
-        foundExerciseIndex = i;
-        break;
-      }
-    }
-
-    if (!foundExercise) {
-      console.error(`❌ Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}"`);
-
-      // Log all available exercises for debugging
-      const availableExercises = exercises.map((ex, idx) => ({
-        index: idx,
-        _id: ex._id?.toString(),
-        exerciseId: ex.exerciseInformation?.exerciseId,
-        name: ex.exerciseInformation?.exerciseName,
-        exerciseLevel: ex.exerciseInformation?.exerciseLevel,
-        questionsCount: ex.questions?.length || 0
-      }));
-
-      return res.status(404).json({
-        message: [{
-          key: "error",
-          value: `Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}". Available exercises: ${availableExercises.length}`
-        }],
-        availableExercises
-      });
-    }
-
-    // Check if questions array exists
-    if (!foundExercise.questions || !Array.isArray(foundExercise.questions)) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `No questions found in exercise "${foundExercise.exerciseInformation?.exerciseName}"` }]
-      });
-    }
-
-    // Find the question by ID
-    const questionIndex = foundExercise.questions.findIndex(q => 
-      q._id && q._id.toString() === questionId
-    );
-
-    if (questionIndex === -1) {
-      // Log available questions for debugging
-      const availableQuestions = foundExercise.questions.map((q, idx) => ({
-        index: idx,
-        _id: q._id?.toString(),
-        title: q.title,
-        difficulty: q.difficulty,
-        score: q.score
-      }));
-
-      return res.status(404).json({
-        message: [{
-          key: "error",
-          value: `Question with ID "${questionId}" not found in exercise "${foundExercise.exerciseInformation?.exerciseName}"`
-        }],
-        availableQuestions
-      });
-    }
-
-    const originalQuestion = foundExercise.questions[questionIndex];
-    const questionTitle = originalQuestion.title || "Question";
-
-    // Update question data
-    const updatedQuestion = {
-      ...originalQuestion,
-      updatedAt: new Date()
-    };
-
-    // Update specific fields if provided
-    if (title !== undefined) {
-      updatedQuestion.title = title.trim();
-    }
-
-    if (description !== undefined) {
-      updatedQuestion.description = description.trim();
-    }
-
-    if (difficulty !== undefined) {
-      updatedQuestion.difficulty = difficulty;
-    }
-
-    if (score !== undefined) {
-      updatedQuestion.score = score;
-    }
-
-    if (sampleInput !== undefined) {
-      updatedQuestion.sampleInput = sampleInput;
-    }
-
-    if (sampleOutput !== undefined) {
-      updatedQuestion.sampleOutput = sampleOutput;
-    }
-
-    if (constraints !== undefined) {
-      updatedQuestion.constraints = Array.isArray(constraints) ? constraints.filter(c => c && c.trim()) : [];
-    }
-
-    if (hints !== undefined) {
-      updatedQuestion.hints = Array.isArray(hints)
-        ? hints.map((hint, index) => ({
-          _id: hint._id || new mongoose.Types.ObjectId(),
-          hintText: hint.hintText || hint,
-          pointsDeduction: hint.pointsDeduction || 0,
-          isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-          sequence: hint.sequence || index
-        }))
-        : [];
-    }
-
-    if (testCases !== undefined) {
-      updatedQuestion.testCases = Array.isArray(testCases)
-        ? testCases.map((testCase, index) => ({
-          _id: testCase._id || new mongoose.Types.ObjectId(),
-          input: testCase.input,
-          expectedOutput: testCase.expectedOutput,
-          isSample: testCase.isSample !== undefined ? testCase.isSample : false,
-          isHidden: testCase.isHidden !== undefined ? testCase.isHidden : true,
-          points: testCase.points || 1,
-          explanation: testCase.explanation || `Test case ${index + 1}`,
-          sequence: testCase.sequence || index
-        }))
-        : [];
-    }
-
-    if (solutions !== undefined) {
-      updatedQuestion.solutions = solutions && typeof solutions === 'object'
-        ? {
-          startedCode: solutions.startedCode || '',
-          functionName: solutions.functionName || '',
-          language: solutions.language || ''
-        }
-        : {
-          startedCode: '',
-          functionName: '',
-          language: ''
-        };
-    }
-
-    if (timeLimit !== undefined) {
-      updatedQuestion.timeLimit = timeLimit;
-    }
-
-    if (memoryLimit !== undefined) {
-      updatedQuestion.memoryLimit = memoryLimit;
-    }
-
-    if (isActive !== undefined) {
-      updatedQuestion.isActive = isActive;
-    }
-
-    if (sequence !== undefined) {
-      updatedQuestion.sequence = sequence;
-    }
-
-    // Update the question in the array
-    foundExercise.questions[questionIndex] = updatedQuestion;
-
-    // Update the exercise in the array
-    exercises[foundExerciseIndex] = foundExercise;
-
-    // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
-    } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
-    }
-
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
-
-    // Update timestamps
-    entity.updatedBy = req.user?.email || "system";
-    entity.updatedAt = new Date();
-
-    // Save entity
-    await entity.save();
-
-    // Calculate updated totals
-    const totalQuestions = foundExercise.questions.length;
-    const totalScore = foundExercise.questions.reduce((sum, q) => sum + (q.score || 0), 0);
-
-    // Prepare exercise data with all settings including securitySettings
-    const exerciseData = {
-      _id: foundExercise._id?.toString() || exerciseId,
-      exerciseId: foundExercise.exerciseInformation?.exerciseId || exerciseId,
-      exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-      exerciseLevel: foundExercise.exerciseInformation?.exerciseLevel || "medium",
-      description: foundExercise.exerciseInformation?.description || "",
-      totalQuestions: totalQuestions,
-      totalScore: totalScore,
-      estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
-      // Include all settings
-      programmingSettings: foundExercise.programmingSettings || {},
-      compilerSettings: foundExercise.compilerSettings || {},
-      availabilityPeriod: foundExercise.availabilityPeriod || {},
-      questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
-      groupSettings: foundExercise.groupSettings || {},
-      scoreSettings: foundExercise.scoreSettings || {},
-      securitySettings: foundExercise.securitySettings || {},
-      
-      createdAt: foundExercise.createdAt,
-      updatedAt: foundExercise.updatedAt,
-      createdBy: foundExercise.createdBy,
-      updatedBy: foundExercise.updatedBy
-    };
-
-    const responseData = {
-      question: updatedQuestion,
-      exercise: exerciseData,
-      entity: {
-        type: type,
-        id: entity._id.toString(),
-        title: entity.title || entity.name || "Entity",
-        tabType: tabType,
-        subcategory: subcategory
-      },
-      location: {
-        tabType: tabType,
-        subcategory: subcategory,
-        exerciseIndex: foundExerciseIndex,
-        exerciseId: foundExercise._id.toString(),
-        questionId: questionId.toString(),
-        questionIndex: questionIndex
-      }
-    };
-
-    return res.status(200).json({
-      message: [{
-        key: "success",
-        value: `Question "${questionTitle}" updated successfully in "${foundExercise.exerciseInformation?.exerciseName}"`
-      }],
-      data: responseData
-    });
-
-  } catch (err) {
-    console.error("❌ Update question error:", err);
-    console.error("❌ Error stack:", err.stack);
-    console.error("❌ Error details:", {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      keyValue: err.keyValue
-    });
-
-    res.status(500).json({
-      message: [{
-        key: "error",
-        value: `Internal server error: ${err.message}`
-      }],
-      error: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  }
-};
-
-// Delete question
-exports.deleteQuestion = async (req, res) => {
-  try {
-    const { type, id, exerciseId, questionId } = req.params;
-    const {
-      tabType,
-      subcategory
-    } = req.body;
-
-    // Validate entity type
-    if (!type || !modelMap[type]) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
-      });
-    }
-
-    // Validate required parameters
-    if (!tabType) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "tabType is required (I_Do, We_Do, You_Do)" }]
-      });
-    }
-
-    if (!subcategory) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Subcategory is required (e.g., 'Practical', 'Project Development')" }]
-      });
-    }
-
-    // Get the model from modelMap
-    const { model } = modelMap[type];
-
-    if (!model) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Model not found for type: ${type}` }]
-      });
-    }
-
-    // Find the entity
-    const entity = await model.findById(id);
-
-    if (!entity) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
-      });
-    }
-
-    // Check if pedagogy exists
-    if (!entity.pedagogy) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
-      });
-    }
-
-    // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
-      });
-    }
-
-    // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
-
-    // Check if subcategory exists
-    if (!tabData[subcategory]) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `Subcategory "${subcategory}" not found in ${tabType}` }]
-      });
-    }
-
-    const exercises = tabData[subcategory];
-
-    if (!Array.isArray(exercises)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: `Invalid exercises format in subcategory "${subcategory}"` }]
-      });
-    }
-
-    // Find the exercise by ID
-    let foundExercise = null;
-    let foundExerciseIndex = -1;
-
-    for (let i = 0; i < exercises.length; i++) {
-      const exercise = exercises[i];
-
-      // Check all possible ID fields
-      const matches = (
-        (exercise._id && exercise._id.toString() === exerciseId) ||
-        (exercise.exerciseInformation?.exerciseId === exerciseId) ||
-        (exercise.exerciseInformation?._id?.toString() === exerciseId)
-      );
-
-      if (matches) {
-        foundExercise = exercise;
-        foundExerciseIndex = i;
-        break;
-      }
-    }
-
-    if (!foundExercise) {
-      console.error(`❌ Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}"`);
-
-      // Log all available exercises for debugging
-      const availableExercises = exercises.map((ex, idx) => ({
-        index: idx,
-        _id: ex._id?.toString(),
-        exerciseId: ex.exerciseInformation?.exerciseId,
-        name: ex.exerciseInformation?.exerciseName,
-        exerciseLevel: ex.exerciseInformation?.exerciseLevel,
-        questionsCount: ex.questions?.length || 0
-      }));
-
-      return res.status(404).json({
-        message: [{
-          key: "error",
-          value: `Exercise with ID "${exerciseId}" not found in subcategory "${subcategory}". Available exercises: ${availableExercises.length}`
-        }],
-        availableExercises
-      });
-    }
-
-    // Check if questions array exists
-    if (!foundExercise.questions || !Array.isArray(foundExercise.questions)) {
-      return res.status(404).json({
-        message: [{ key: "error", value: `No questions found in exercise "${foundExercise.exerciseInformation?.exerciseName}"` }]
-      });
-    }
-
-    // Find the question by ID
-    const questionIndex = foundExercise.questions.findIndex(q => 
-      q._id && q._id.toString() === questionId
-    );
-
-    if (questionIndex === -1) {
-      // Log available questions for debugging
-      const availableQuestions = foundExercise.questions.map((q, idx) => ({
-        index: idx,
-        _id: q._id?.toString(),
-        title: q.title,
-        difficulty: q.difficulty,
-        score: q.score
-      }));
-
-      return res.status(404).json({
-        message: [{
-          key: "error",
-          value: `Question with ID "${questionId}" not found in exercise "${foundExercise.exerciseInformation?.exerciseName}"`
-        }],
-        availableQuestions
-      });
-    }
-
-    // Get the question data before deletion for response
-    const deletedQuestion = foundExercise.questions[questionIndex];
-    const questionTitle = deletedQuestion.title || "Question";
-
-    // Remove the question from the array
-    foundExercise.questions.splice(questionIndex, 1);
-
-    // Update the exercise in the array
-    exercises[foundExerciseIndex] = foundExercise;
-
-    // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
-    } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
-    }
-
-    // Mark as modified
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
-
-    // Update timestamps
-    entity.updatedBy = req.user?.email || "system";
-    entity.updatedAt = new Date();
-
-    // Save entity
-    await entity.save();
-
-    // Calculate updated totals
-    const totalQuestions = foundExercise.questions.length;
-    const totalScore = foundExercise.questions.reduce((sum, q) => sum + (q.score || 0), 0);
-
-    // Prepare exercise data with all settings including securitySettings
-    const exerciseData = {
-      _id: foundExercise._id?.toString() || exerciseId,
-      exerciseId: foundExercise.exerciseInformation?.exerciseId || exerciseId,
-      exerciseName: foundExercise.exerciseInformation?.exerciseName || "Exercise",
-      exerciseLevel: foundExercise.exerciseInformation?.exerciseLevel || "medium",
-      description: foundExercise.exerciseInformation?.description || "",
-      totalQuestions: totalQuestions,
-      totalScore: totalScore,
-      estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
-      // Include all settings
-      programmingSettings: foundExercise.programmingSettings || {},
-      compilerSettings: foundExercise.compilerSettings || {},
-      availabilityPeriod: foundExercise.availabilityPeriod || {},
-      questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
-      groupSettings: foundExercise.groupSettings || {},
-      scoreSettings: foundExercise.scoreSettings || {},
-      securitySettings: foundExercise.securitySettings || {},
-      
-      createdAt: foundExercise.createdAt,
-      updatedAt: foundExercise.updatedAt,
-      createdBy: foundExercise.createdBy,
-      updatedBy: foundExercise.updatedBy
-    };
-
-    const responseData = {
-      deletedQuestion: {
-        _id: deletedQuestion._id?.toString(),
-        title: deletedQuestion.title,
-        description: deletedQuestion.description,
-        difficulty: deletedQuestion.difficulty,
-        score: deletedQuestion.score,
-        deletedAt: new Date()
-      },
-      exercise: exerciseData,
-      entity: {
-        type: type,
-        id: entity._id.toString(),
-        title: entity.title || entity.name || "Entity",
-        tabType: tabType,
-        subcategory: subcategory
-      },
-      location: {
-        tabType: tabType,
-        subcategory: subcategory,
-        exerciseIndex: foundExerciseIndex,
-        exerciseId: foundExercise._id.toString(),
-        deletedQuestionId: questionId.toString(),
-        deletedQuestionIndex: questionIndex
-      },
-      metadata: {
-        totalQuestionsAfterDeletion: totalQuestions,
-        questionsDeleted: 1,
-        remainingQuestions: totalQuestions
-      }
-    };
-
-    return res.status(200).json({
-      message: [{
-        key: "success",
-        value: `Question "${questionTitle}" deleted successfully from "${foundExercise.exerciseInformation?.exerciseName}"`
-      }],
-      data: responseData
-    });
-
-  } catch (err) {
-    console.error("❌ Delete question error:", err);
-    console.error("❌ Error stack:", err.stack);
-    console.error("❌ Error details:", {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      keyValue: err.keyValue
-    });
-
-    res.status(500).json({
-      message: [{
-        key: "error",
-        value: `Internal server error: ${err.message}`
-      }],
-      error: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  }
-};
-
 
 
 

@@ -30,6 +30,8 @@ const chatHistoryRoutes = require('./routes/chatHistoryRoutes');
 const GroupParticipantsRoutes = require("./routes/courses/groupParticipantsRoutes");
 const AnswerRoutes = require("./routes/courses/moduleStructure/answerRoutes");
 const notificationRoutes = require('./routes/notificationRoutes');
+const exceriseandQuestionRoutes = require('./routes/courses/moduleStructure/exerciseAndQuestionRoutes');
+
 // Connect Database
 connectDB();
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
@@ -38,7 +40,7 @@ app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Ba
 app.use(express.json({ extended: false }));
 app.use(
   cors({
-    origin: ["http://localhost:3000","https://lms-client-jade-three.vercel.app"],
+    origin: ["http://localhost:3000","http://localhost:3001","http://localhost:3002"],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
     exposedHeaders: ["Content-Length", "Authorization"],
@@ -171,6 +173,8 @@ app.use('/',NoteRoutes)
 app.use('/',GroupParticipantsRoutes)
 app.use('/',AnswerRoutes)
 app.use('/', notificationRoutes);
+app.use('/', exceriseandQuestionRoutes);
+
 
 // Add this to your server.js imports
 

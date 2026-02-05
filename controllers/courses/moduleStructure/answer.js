@@ -17,6 +17,7 @@ exports.submitAnswer = async (req, res) => {
       questionId,
       category,
       subcategory,
+      selectedProgrammingLanguage,
       nodeId = "",
       nodeName = "",
       nodeType = "",
@@ -139,6 +140,7 @@ if (category === 'We_Do' || category === 'You_Do') {
     nodeId: nodeId,
     nodeName: nodeName,
     nodeType: nodeType,
+    selectedProgrammingLanguage:selectedProgrammingLanguage,
     // Always set subcategory for both We_Do and You_Do
     subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
    
@@ -175,6 +177,7 @@ if (category === 'We_Do' || category === 'You_Do') {
   if (nodeId) existingExercise.nodeId = nodeId;
   if (nodeName) existingExercise.nodeName = nodeName;
   if (nodeType) existingExercise.nodeType = nodeType;
+  if (selectedProgrammingLanguage) existingExercise.selectedProgrammingLanguage = selectedProgrammingLanguage;
   // Always update subcategory for both We_Do and You_Do
   if ((category === 'We_Do' || category === 'You_Do') && subcategory) {
     existingExercise.subcategory = subcategory;
@@ -379,6 +382,7 @@ exports.getAllUsers = async (req, res) => {
                 nodeId: practice.nodeId,
                 nodeName: practice.nodeName,
                 nodeType: practice.nodeType,
+                selectedProgrammingLanguage: practice.selectedProgrammingLanguage,
                 subcategory: practice.subcategory || 'practical',
                 createdAt: practice.createdAt,
                 updatedAt: practice.updatedAt,
@@ -1114,3 +1118,933 @@ exports.getAnswerByQuestionId = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+
+exports.submitMultipleFiles = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const {
+      courseId,
+      exerciseId,
+      questionId,
+      category,
+      subcategory,
+      selectedProgrammingLanguage,
+      nodeId = "",
+      nodeName = "",
+      nodeType = "",
+      screenRecord,
+      // Files array with folder paths
+      files = [],
+      // Folder hierarchy
+      folders = [],
+      folderHierarchy = [],
+      projectStructure = {},
+      entryPoints = [],
+      hasFolders = false,
+      folderCount = 0,
+      totalFiles = 0,
+      status = "submitted",
+      totalScore = 0,
+      score = 0,
+      feedback = "",
+      language = "multi-file",
+      isMultiFile = true
+    } = req.body;
+ 
+    // Validate required fields
+    if (!courseId || !exerciseId || !questionId) {
+      return res.status(400).json({
+        success: false,
+        message: "courseId, exerciseId, and questionId are required"
+      });
+    }
+ 
+    // Validate category
+    const validCategories = ['I_Do', 'We_Do', 'You_Do'];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({
+        success: false,
+        message: "Category must be one of: I_Do, We_Do, You_Do"
+      });
+    }
+ 
+    // Validate files array
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "At least one file is required"
+      });
+    }
+ 
+    // Validate each file
+    for (const file of files) {
+      if (!file.filename || !file.content || !file.language) {
+        return res.status(400).json({
+          success: false,
+          message: "Each file must have filename, content, and language properties"
+        });
+      }
+     
+      // Validate file extension matches language
+      const ext = file.filename.split('.').pop().toLowerCase();
+      const langExtMap = {
+        'html': ['html', 'htm'],
+        'css': ['css'],
+        'javascript': ['js', 'javascript'],
+        'json': ['json'],
+        'text': ['txt', 'md'],
+        'markdown': ['md', 'markdown'],
+        'xml': ['xml'],
+        'sql': ['sql']
+      };
+     
+      if (langExtMap[file.language] && !langExtMap[file.language].includes(ext)) {
+        return res.status(400).json({
+          success: false,
+          message: `File ${file.filename} extension does not match language ${file.language}`
+        });
+      }
+    }
+ 
+    // Find user
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
+ 
+    // Generate unique IDs for files and folders if not provided
+    const processedFiles = files.map(file => ({
+      id: file.id || `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      filename: file.filename,
+      content: file.content,
+      language: file.language,
+      path: file.path || `/${file.filename}`,
+      folderPath: file.folderPath || '/',
+      size: Buffer.byteLength(file.content, 'utf8'),
+      isEntryPoint: file.isEntryPoint,
+      lastModified: file.lastModified || new Date()
+    }));
+ 
+    const processedFolders = folders.map(folder => ({
+      id: folder.id || `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      name: folder.name,
+      path: folder.path,
+      parentPath: folder.parentPath || '/',
+      depth: folder.depth || 0,
+      fileCount: folder.children?.length || 0,
+      subfolderCount: folder.folderChildren?.length || 0
+    }));
+ 
+    // Prepare question answer with folder structure
+    const questionAnswer = {
+      questionId: new mongoose.Types.ObjectId(questionId),
+      questionTitle: req.body.questionTitle || `Question ${questionId}`,
+      files: processedFiles,
+      folders: processedFolders,
+      projectStructure: {
+        ...projectStructure,
+        folders: folderHierarchy.length > 0 ? folderHierarchy.map(f => ({
+          id: f.id || `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          name: f.name,
+          path: f.path,
+          parentPath: f.parentPath || '/',
+          depth: f.depth || 0,
+          fileCount: f.fileCount || 0,
+          subfolderCount: f.subfolderCount || 0
+        })) : processedFolders,
+        folderTree: buildFolderTreeForDB(processedFolders, processedFiles),
+        hasFolders: hasFolders || processedFolders.length > 0,
+        totalFolders: folderCount || processedFolders.length,
+        totalFiles: totalFiles || processedFiles.length,
+        entryPoints: entryPoints,
+        fileDistribution: {
+          html: processedFiles.filter(f => f.language === 'html').length,
+          css: processedFiles.filter(f => f.language === 'css').length,
+          javascript: processedFiles.filter(f => f.language === 'javascript').length,
+          other: processedFiles.filter(f => !['html', 'css', 'javascript', 'sql'].includes(f.language)).length,
+          sql: processedFiles.filter(f => f.language === 'sql').length
+        }
+      },
+   
+      codeAnswer: `Multi-file project with ${processedFiles.length} files${processedFolders.length > 0 ? ` in ${processedFolders.length} folders` : ''}`,
+      language: 'multi-file',
+      totalScore: totalScore,
+      score: score,
+      feedback: feedback,
+      status: status,
+      isCorrect: status === 'solved' || status === 'evaluated' || score >= 70,
+      attempts: 1,
+      submittedAt: new Date(),
+      fileStructure: {
+        totalFiles: processedFiles.length,
+        htmlFiles: processedFiles.filter(f => f.language === 'html').length,
+        cssFiles: processedFiles.filter(f => f.language === 'css').length,
+        jsFiles: processedFiles.filter(f => f.language === 'javascript').length,
+        sqlFiles: processedFiles.filter(f => f.language === 'sql').length,
+        otherFiles: processedFiles.filter(f => !['html', 'css', 'javascript', 'sql'].includes(f.language)).length,
+        folders: processedFolders.length,
+        folderStructure: processedFolders.map(f => ({
+          name: f.name,
+          path: f.path,
+          fileCount: f.fileCount
+        }))
+      }
+    };
+ 
+    // Helper function to build folder tree for DB storage
+    function buildFolderTreeForDB(foldersList, filesList) {
+      const tree = {};
+     
+      // Create folder nodes
+      foldersList.forEach(folder => {
+        tree[folder.path] = {
+          id: folder.id,
+          name: folder.name,
+          path: folder.path,
+          parentPath: folder.parentPath || '/',
+          depth: folder.depth || 0,
+          children: [],
+          files: filesList
+            .filter(f => f.folderPath === folder.path)
+            .map(f => ({
+              id: f.id,
+              filename: f.filename,
+              language: f.language,
+              size: f.size
+            }))
+        };
+      });
+     
+      // Build hierarchy
+      foldersList.forEach(folder => {
+        if (folder.parentPath !== '/' && tree[folder.parentPath]) {
+          tree[folder.parentPath].children.push(tree[folder.path]);
+        }
+      });
+     
+      // Return root folders
+      return foldersList
+        .filter(folder => folder.parentPath === '/')
+        .map(folder => tree[folder.path]);
+    }
+ 
+    // Find or create course entry
+    let courseIndex = user.courses.findIndex(c =>
+      c.courseId && c.courseId.toString() === courseId
+    );
+ 
+    if (courseIndex === -1) {
+      user.courses.push({
+        courseId: new mongoose.Types.ObjectId(courseId),
+        answers: {
+          I_Do: new Map(),
+          We_Do: new Map(),
+          You_Do: new Map()
+        },
+        lastAccessed: new Date()
+      });
+      courseIndex = user.courses.length - 1;
+    }
+ 
+    // Ensure answers structure exists
+    if (!user.courses[courseIndex].answers) {
+      user.courses[courseIndex].answers = {
+        I_Do: new Map(),
+        We_Do: new Map(),
+        You_Do: new Map()
+      };
+    }
+ 
+    // Initialize category
+    if (!user.courses[courseIndex].answers[category]) {
+      user.courses[courseIndex].answers[category] = new Map();
+    }
+ 
+    // Determine exercise key
+    let exerciseKey;
+    if (category === 'We_Do' || category === 'You_Do') {
+      exerciseKey = subcategory || exerciseId.toString();
+    } else {
+      exerciseKey = exerciseId.toString();
+    }
+ 
+    // Get or create exercise array
+    let exerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey);
+    if (!exerciseArray) {
+      exerciseArray = [];
+    }
+ 
+    // Find or create exercise
+    let exerciseIndex = exerciseArray.findIndex(
+      ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
+    );
+ 
+    if (exerciseIndex === -1) {
+      exerciseArray.push({
+        exerciseId: new mongoose.Types.ObjectId(exerciseId),
+        exerciseName: req.body.exerciseName || `Exercise ${exerciseId}`,
+        questions: [questionAnswer],
+        nodeId,
+        nodeName,
+        nodeType,
+        selectedProgrammingLanguage,
+        subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
+        screenRecording: screenRecord,
+        status: 'in-progress',
+        projectType: 'multi-file',
+        hasFolderStructure: processedFolders.length > 0,
+        folderCount: processedFolders.length
+      });
+    } else {
+      // Update existing exercise
+      const existingExercise = exerciseArray[exerciseIndex];
+     
+      // Find existing question
+      const questionIndex = existingExercise.questions.findIndex(
+        q => q.questionId && q.questionId.toString() === questionId
+      );
+ 
+      if (questionIndex === -1) {
+        existingExercise.questions.push(questionAnswer);
+      } else {
+        existingExercise.questions[questionIndex] = {
+          ...existingExercise.questions[questionIndex],
+          ...questionAnswer,
+          attempts: (existingExercise.questions[questionIndex].attempts || 0) + 1,
+          updatedAt: new Date()
+        };
+      }
+ 
+      // Update exercise metadata
+      existingExercise.updatedAt = new Date();
+      existingExercise.projectType = 'multi-file';
+      existingExercise.hasFolderStructure = processedFolders.length > 0;
+      existingExercise.folderCount = processedFolders.length;
+      existingExercise.status = status === 'completed' ? 'completed' : existingExercise.status;
+    }
+ 
+    // Save back to map
+    user.courses[courseIndex].answers[category].set(exerciseKey, exerciseArray);
+ 
+    // Mark modified
+    user.markModified(`courses.${courseIndex}.answers.${category}`);
+   
+    await user.save();
+ 
+    res.status(200).json({
+      success: true,
+      message: `Multi-file project submitted successfully${processedFolders.length > 0 ? ` with ${processedFolders.length} folders` : ''}`,
+      data: {
+        courseId,
+        exerciseId,
+        questionId,
+        category,
+        fileCount: processedFiles.length,
+        folderCount: processedFolders.length,
+        fileStructure: questionAnswer.fileStructure,
+        submittedFiles: processedFiles.map(f => ({
+          id: f.id,
+          filename: f.filename,
+          language: f.language,
+          folderPath: f.folderPath,
+          size: f.size,
+          isEntryPoint: f.isEntryPoint
+        })),
+        folders: processedFolders.map(f => ({
+          id: f.id,
+          name: f.name,
+          path: f.path,
+          parentPath: f.parentPath,
+          fileCount: f.fileCount
+        })),
+        entryPoints: questionAnswer.entryPoints,
+        projectStructure: questionAnswer.projectStructure
+      }
+    });
+ 
+  } catch (error) {
+    console.error("Submit multi-files error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+ exports.getPreviousSubmission = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { courseId, exerciseId, questionId, category } = req.query;
+
+    // Validate required parameters
+    if (!courseId || !exerciseId || !questionId || !category) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required parameters: courseId, exerciseId, questionId, category"
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
+      });
+    }
+
+    const course = user.courses.find(c => c.courseId.toString() === courseId);
+    if (!course) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Course not found" 
+      });
+    }
+
+    let foundQuestion = null;
+    let foundExercise = null;
+
+    // Search through the category
+    if (course.answers && course.answers[category]) {
+      // Handle both Map and array formats
+      let exercisesArray = [];
+      
+      if (course.answers[category] instanceof Map) {
+        // Convert Map values to array
+        exercisesArray = Array.from(course.answers[category].values()).flat();
+      } else if (Array.isArray(course.answers[category])) {
+        exercisesArray = course.answers[category];
+      }
+
+      // Find the exercise
+      for (const exercise of exercisesArray) {
+        if (exercise && exercise.exerciseId && exercise.exerciseId.toString() === exerciseId) {
+          foundExercise = exercise;
+          
+          // Find the question
+          if (exercise.questions && Array.isArray(exercise.questions)) {
+            const question = exercise.questions.find(q =>
+              q.questionId && q.questionId.toString() === questionId
+            );
+            
+            if (question) {
+              foundQuestion = question;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (!foundQuestion) {
+      return res.status(404).json({
+        success: false,
+        message: "No previous submission found for this question"
+      });
+    }
+
+    // Prepare response with files and folders
+    const responseData = {
+      success: true,
+      data: {
+        // Files data
+        files: foundQuestion.files || [],
+        
+        // Folders data
+        folders: foundQuestion.folders || [],
+        
+        // Project structure
+        projectStructure: foundQuestion.projectStructure || {},
+        
+        // Individual code snippets (for backward compatibility)
+        htmlCode: foundQuestion.files?.find(f => f.language === 'html' && f.isEntryPoint)?.content ||
+                 foundQuestion.files?.find(f => f.language === 'html')?.content || "",
+        cssCode: foundQuestion.files?.find(f => f.language === 'css')?.content || "",
+        jsCode: foundQuestion.files?.find(f => f.language === 'javascript')?.content || "",
+        sqlCode: foundQuestion.files?.find(f => f.language === 'sql')?.content || "",
+        
+        // Metadata
+        score: foundQuestion.score || 0,
+        status: foundQuestion.status || 'submitted',
+        submittedAt: foundQuestion.submittedAt || foundQuestion.createdAt,
+        attempts: foundQuestion.attempts || 1,
+        
+        // Entry points
+        entryPoints: foundQuestion.entryPoints || foundQuestion.files?.filter(f => f.isEntryPoint)?.map(f => ({
+          filename: f.filename,
+          path: f.path,
+          language: f.language
+        })) || [],
+        
+        // File statistics
+        fileCount: foundQuestion.files?.length || 0,
+        folderCount: foundQuestion.folders?.length || 0
+      }
+    };
+
+    // Log for debugging
+    console.log("Previous submission found:", {
+      courseId,
+      exerciseId,
+      questionId,
+      category,
+      fileCount: responseData.data.fileCount,
+      folderCount: responseData.data.folderCount,
+      hasFiles: !!foundQuestion.files,
+      hasFolders: !!foundQuestion.folders
+    });
+
+    res.status(200).json(responseData);
+
+  } catch (error) {
+    console.error("Get previous submission error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error"
+    });
+  }
+};
+
+
+
+// exports.submitMultipleFiles = async (req, res) => {
+//   try {
+//     const userId = req.user._id;
+//     const {
+//       courseId,
+//       exerciseId,
+//       questionId,
+//       category,
+//       subcategory,
+//       selectedProgrammingLanguage,
+//       nodeId = "",
+//       nodeName = "",
+//       nodeType = "",
+//       screenRecord,
+//       // Files array with folder paths
+//       files = [],
+//       // Folder hierarchy
+//       folders = [],
+//       folderHierarchy = [],
+//       projectStructure = {},
+//       entryPoints = [],
+//       hasFolders = false,
+//       folderCount = 0,
+//       totalFiles = 0,
+//       status = "submitted",
+//       totalScore = 0,
+//       score = 0,
+//       feedback = "",
+//       language = "multi-file",
+//       isMultiFile = true
+//     } = req.body;
+
+//     // Validate required fields
+//     if (!courseId || !exerciseId || !questionId) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "courseId, exerciseId, and questionId are required"
+//       });
+//     }
+
+//     // Validate category
+//     const validCategories = ['I_Do', 'We_Do', 'You_Do'];
+//     if (!validCategories.includes(category)) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Category must be one of: I_Do, We_Do, You_Do"
+//       });
+//     }
+
+//     // Validate files array
+//     if (!files || !Array.isArray(files) || files.length === 0) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "At least one file is required"
+//       });
+//     }
+
+//     // Validate each file
+//     for (const file of files) {
+//       if (!file.filename || !file.content || !file.language) {
+//         return res.status(400).json({
+//           success: false,
+//           message: "Each file must have filename, content, and language properties"
+//         });
+//       }
+      
+//       // Validate file extension matches language
+//       const ext = file.filename.split('.').pop().toLowerCase();
+//       const langExtMap = {
+//         'html': ['html', 'htm'],
+//         'css': ['css'],
+//         'javascript': ['js', 'javascript'],
+//         'json': ['json'],
+//         'text': ['txt', 'md'],
+//         'markdown': ['md', 'markdown'],
+//         'xml': ['xml'],
+//         'sql': ['sql']
+//       };
+      
+//       if (langExtMap[file.language] && !langExtMap[file.language].includes(ext)) {
+//         return res.status(400).json({
+//           success: false,
+//           message: `File ${file.filename} extension does not match language ${file.language}`
+//         });
+//       }
+//     }
+
+//     // Find user
+//     const user = await User.findById(userId);
+//     if (!user) {
+//       return res.status(404).json({
+//         success: false,
+//         message: "User not found"
+//       });
+//     }
+
+//     // Generate unique IDs for files and folders if not provided
+//     const processedFiles = files.map(file => ({
+//       id: file.id || `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+//       filename: file.filename,
+//       content: file.content,
+//       language: file.language,
+//       path: file.path || `/${file.filename}`,
+//       folderPath: file.folderPath || '/',
+//       size: Buffer.byteLength(file.content, 'utf8'),
+//       isEntryPoint: file.isEntryPoint,
+//       lastModified: file.lastModified || new Date()
+//     }));
+
+//     const processedFolders = folders.map(folder => ({
+//       id: folder.id || `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+//       name: folder.name,
+//       path: folder.path,
+//       parentPath: folder.parentPath || '/',
+//       depth: folder.depth || 0,
+//       fileCount: folder.children?.length || 0,
+//       subfolderCount: folder.folderChildren?.length || 0
+//     }));
+
+//     // Prepare question answer with folder structure
+//     const questionAnswer = {
+//       questionId: new mongoose.Types.ObjectId(questionId),
+//       questionTitle: req.body.questionTitle || `Question ${questionId}`,
+//       files: processedFiles,
+//       folders: processedFolders,
+//       projectStructure: {
+//         ...projectStructure,
+//         folders: folderHierarchy.length > 0 ? folderHierarchy.map(f => ({
+//           id: f.id || `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+//           name: f.name,
+//           path: f.path,
+//           parentPath: f.parentPath || '/',
+//           depth: f.depth || 0,
+//           fileCount: f.fileCount || 0,
+//           subfolderCount: f.subfolderCount || 0
+//         })) : processedFolders,
+//         folderTree: buildFolderTreeForDB(processedFolders, processedFiles),
+//         hasFolders: hasFolders || processedFolders.length > 0,
+//         totalFolders: folderCount || processedFolders.length,
+//         totalFiles: totalFiles || processedFiles.length,
+//         entryPoints: entryPoints,
+//         fileDistribution: {
+//           html: processedFiles.filter(f => f.language === 'html').length,
+//           css: processedFiles.filter(f => f.language === 'css').length,
+//           javascript: processedFiles.filter(f => f.language === 'javascript').length,
+//           other: processedFiles.filter(f => !['html', 'css', 'javascript', 'sql'].includes(f.language)).length,
+//           sql: processedFiles.filter(f => f.language === 'sql').length
+//         }
+//       },
+    
+//       codeAnswer: `Multi-file project with ${processedFiles.length} files${processedFolders.length > 0 ? ` in ${processedFolders.length} folders` : ''}`,
+//       language: 'multi-file',
+//       totalScore: totalScore,
+//       score: score,
+//       feedback: feedback,
+//       status: status,
+//       isCorrect: status === 'solved' || status === 'evaluated' || score >= 70,
+//       attempts: 1,
+//       submittedAt: new Date(),
+//       fileStructure: {
+//         totalFiles: processedFiles.length,
+//         htmlFiles: processedFiles.filter(f => f.language === 'html').length,
+//         cssFiles: processedFiles.filter(f => f.language === 'css').length,
+//         jsFiles: processedFiles.filter(f => f.language === 'javascript').length,
+//         sqlFiles: processedFiles.filter(f => f.language === 'sql').length,
+//         otherFiles: processedFiles.filter(f => !['html', 'css', 'javascript', 'sql'].includes(f.language)).length,
+//         folders: processedFolders.length,
+//         folderStructure: processedFolders.map(f => ({
+//           name: f.name,
+//           path: f.path,
+//           fileCount: f.fileCount
+//         }))
+//       }
+//     };
+
+//     // Helper function to build folder tree for DB storage
+//     function buildFolderTreeForDB(foldersList, filesList) {
+//       const tree = {};
+      
+//       // Create folder nodes
+//       foldersList.forEach(folder => {
+//         tree[folder.path] = {
+//           id: folder.id,
+//           name: folder.name,
+//           path: folder.path,
+//           parentPath: folder.parentPath || '/',
+//           depth: folder.depth || 0,
+//           children: [],
+//           files: filesList
+//             .filter(f => f.folderPath === folder.path)
+//             .map(f => ({
+//               id: f.id,
+//               filename: f.filename,
+//               language: f.language,
+//               size: f.size
+//             }))
+//         };
+//       });
+      
+//       // Build hierarchy
+//       foldersList.forEach(folder => {
+//         if (folder.parentPath !== '/' && tree[folder.parentPath]) {
+//           tree[folder.parentPath].children.push(tree[folder.path]);
+//         }
+//       });
+      
+//       // Return root folders
+//       return foldersList
+//         .filter(folder => folder.parentPath === '/')
+//         .map(folder => tree[folder.path]);
+//     }
+
+//     // Find or create course entry
+//     let courseIndex = user.courses.findIndex(c => 
+//       c.courseId && c.courseId.toString() === courseId
+//     );
+
+//     if (courseIndex === -1) {
+//       user.courses.push({
+//         courseId: new mongoose.Types.ObjectId(courseId),
+//         answers: {
+//           I_Do: new Map(),
+//           We_Do: new Map(),
+//           You_Do: new Map()
+//         },
+//         lastAccessed: new Date()
+//       });
+//       courseIndex = user.courses.length - 1;
+//     }
+
+//     // Ensure answers structure exists
+//     if (!user.courses[courseIndex].answers) {
+//       user.courses[courseIndex].answers = {
+//         I_Do: new Map(),
+//         We_Do: new Map(),
+//         You_Do: new Map()
+//       };
+//     }
+
+//     // Initialize category
+//     if (!user.courses[courseIndex].answers[category]) {
+//       user.courses[courseIndex].answers[category] = new Map();
+//     }
+
+//     // Determine exercise key
+//     let exerciseKey;
+//     if (category === 'We_Do' || category === 'You_Do') {
+//       exerciseKey = subcategory || exerciseId.toString();
+//     } else {
+//       exerciseKey = exerciseId.toString();
+//     }
+
+//     // Get or create exercise array
+//     let exerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey);
+//     if (!exerciseArray) {
+//       exerciseArray = [];
+//     }
+
+//     // Find or create exercise
+//     let exerciseIndex = exerciseArray.findIndex(
+//       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
+//     );
+
+//     if (exerciseIndex === -1) {
+//       exerciseArray.push({
+//         exerciseId: new mongoose.Types.ObjectId(exerciseId),
+//         exerciseName: req.body.exerciseName || `Exercise ${exerciseId}`,
+//         questions: [questionAnswer],
+//         nodeId,
+//         nodeName,
+//         nodeType,
+//         selectedProgrammingLanguage,
+//         subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
+//         screenRecording: screenRecord,
+//         status: 'in-progress',
+//         projectType: 'multi-file',
+//         hasFolderStructure: processedFolders.length > 0,
+//         folderCount: processedFolders.length
+//       });
+//     } else {
+//       // Update existing exercise
+//       const existingExercise = exerciseArray[exerciseIndex];
+      
+//       // Find existing question
+//       const questionIndex = existingExercise.questions.findIndex(
+//         q => q.questionId && q.questionId.toString() === questionId
+//       );
+
+//       if (questionIndex === -1) {
+//         existingExercise.questions.push(questionAnswer);
+//       } else {
+//         existingExercise.questions[questionIndex] = {
+//           ...existingExercise.questions[questionIndex],
+//           ...questionAnswer,
+//           attempts: (existingExercise.questions[questionIndex].attempts || 0) + 1,
+//           updatedAt: new Date()
+//         };
+//       }
+
+//       // Update exercise metadata
+//       existingExercise.updatedAt = new Date();
+//       existingExercise.projectType = 'multi-file';
+//       existingExercise.hasFolderStructure = processedFolders.length > 0;
+//       existingExercise.folderCount = processedFolders.length;
+//       existingExercise.status = status === 'completed' ? 'completed' : existingExercise.status;
+//     }
+
+//     // Save back to map
+//     user.courses[courseIndex].answers[category].set(exerciseKey, exerciseArray);
+
+//     // Mark modified
+//     user.markModified(`courses.${courseIndex}.answers.${category}`);
+    
+//     await user.save();
+
+//     res.status(200).json({
+//       success: true,
+//       message: `Multi-file project submitted successfully${processedFolders.length > 0 ? ` with ${processedFolders.length} folders` : ''}`,
+//       data: {
+//         courseId,
+//         exerciseId,
+//         questionId,
+//         category,
+//         fileCount: processedFiles.length,
+//         folderCount: processedFolders.length,
+//         fileStructure: questionAnswer.fileStructure,
+//         submittedFiles: processedFiles.map(f => ({
+//           id: f.id,
+//           filename: f.filename,
+//           language: f.language,
+//           folderPath: f.folderPath,
+//           size: f.size,
+//           isEntryPoint: f.isEntryPoint
+//         })),
+//         folders: processedFolders.map(f => ({
+//           id: f.id,
+//           name: f.name,
+//           path: f.path,
+//           parentPath: f.parentPath,
+//           fileCount: f.fileCount
+//         })),
+//         entryPoints: questionAnswer.entryPoints,
+//         projectStructure: questionAnswer.projectStructure
+//       }
+//     });
+
+//   } catch (error) {
+//     console.error("Submit multi-files error:", error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message
+//     });
+//   }
+// };
+
+// exports.getPreviousSubmission = async (req, res) => {
+//   try {
+//     const userId = req.user._id;
+//     const { courseId, exerciseId, questionId, category } = req.query;
+
+//     // Validate
+//     if (!courseId || !exerciseId || !questionId || !category) {
+//       return res.status(400).json({
+//         success: false,
+//         message: "Missing required parameters"
+//       });
+//     }
+
+//     const user = await User.findById(userId);
+//     if (!user) {
+//       return res.status(404).json({ success: false, message: "User not found" });
+//     }
+
+//     const course = user.courses.find(c => c.courseId.toString() === courseId);
+//     if (!course) {
+//       return res.status(404).json({ success: false, message: "Course not found" });
+//     }
+
+//     let foundQuestion = null;
+//     let foundExercise = null;
+
+//     // Search through the category
+//     const categoryMap = course.answers[category];
+//     if (categoryMap) {
+//       for (const [key, exercises] of categoryMap) {
+//         for (const exercise of exercises) {
+//           if (exercise.exerciseId.toString() === exerciseId) {
+//             foundExercise = exercise;
+//             const question = exercise.questions.find(q => 
+//               q.questionId && q.questionId.toString() === questionId
+//             );
+//             if (question) {
+//               foundQuestion = question;
+//               break;
+//             }
+//           }
+//         }
+//         if (foundQuestion) break;
+//       }
+//     }
+
+//     if (!foundQuestion) {
+//       return res.status(404).json({
+//         success: false,
+//         message: "No previous submission found"
+//       });
+//     }
+
+//     // Return data in the format expected by frontend
+//     res.status(200).json({
+//       success: true,
+//       data: {
+//         htmlCode: foundQuestion.files?.find(f => f.language === 'html' && f.isEntryPoint)?.content || 
+//                 foundQuestion.files?.find(f => f.language === 'html')?.content || "",
+//         cssCode: foundQuestion.files?.find(f => f.language === 'css')?.content || "",
+//         jsCode: foundQuestion.files?.find(f => f.language === 'javascript')?.content || "",
+//         sqlCode: foundQuestion.files?.find(f => f.language === 'sql')?.content || "",
+//         files: foundQuestion.files || [],
+//         folders: foundQuestion.folders || [],
+//         projectStructure: foundQuestion.projectStructure || {},
+//         score: foundQuestion.score,
+//         status: foundQuestion.status,
+//         submittedAt: foundQuestion.submittedAt,
+//         attempts: foundQuestion.attempts,
+//         entryPoints: foundQuestion.entryPoints || []
+//       }
+//     });
+
+//   } catch (error) {
+//     console.error("Get previous submission error:", error);
+//     res.status(500).json({
+//       success: false,
+//       message: error.message
+//     });
+//   }
+// };
+
+
+

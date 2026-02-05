@@ -2,42 +2,151 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const validator = require("validator");
 
-// Question Answer Schema
+const folderSchema = new mongoose.Schema({
+  id: {
+    type: String, // Changed from ObjectId to String
+    required: true
+  },
+  name: {
+    type: String,
+    required: true
+  },
+  path: {
+    type: String,
+    required: true
+  },
+  parentPath: {
+    type: String,
+  },
+  depth: {
+    type: Number,
+    default: 0
+  },
+  fileCount: {
+    type: Number,
+    default: 0
+  },
+  subfolderCount: {
+    type: Number,
+    default: 0
+  }
+}, {
+  _id: false, // Important: Don't create _id for subdocuments
+  timestamps: false
+});
+
+// Update fileSchema
+const fileSchema = new mongoose.Schema({
+  id: {
+    type: String, // Changed from ObjectId to String
+    required: true
+  },
+  filename: {
+    type: String,
+    required: true
+  },
+  content: {
+    type: String,
+    required: true
+  },
+  language: {
+    type: String,
+    required: true
+  },
+  path: {
+    type: String,
+    required: true
+  },
+  folderPath: {
+    type: String,
+    default: '/'
+  },
+  size: {
+    type: Number,
+    default: 0
+  },
+  isEntryPoint: {
+    type: Boolean,
+    default: false
+  },
+      isQueryFile: { type: Boolean, default: false }, // Query file
+
+  lastModified: {
+    type: Date,
+    default: Date.now
+  }
+}, {
+  _id: false, // Important: Don't create _id for subdocuments
+  timestamps: false
+});
+
+// Update questionAnswerSchema
 const questionAnswerSchema = new mongoose.Schema({
   questionId: {
     type: mongoose.Schema.Types.ObjectId,
   },
-    questionTitle: {
+  questionTitle: {
     type: String,
   },
+  // Store multiple files
+  files: [fileSchema],
+  // Store folder structure
+  folders: [folderSchema],
+  // Enhanced project structure
+  projectStructure: {
+    folders: [folderSchema],
+    folderTree: mongoose.Schema.Types.Mixed,
+    hasFolders: Boolean,
+    totalFolders: Number,
+    totalFiles: Number,
+    entryPoints: [String],
+    fileDistribution: {
+      html: Number,
+      css: Number,
+      javascript: Number,
+      other: Number,
+      sql: Number
+    }
+  },
+    sqlMetadata: {
+    databaseType: { type: String, default: 'mysql' }, // mysql, postgresql, sqlite, etc.
+    hasSchemaFiles: { type: Boolean, default: false },
+    hasDataFiles: { type: Boolean, default: false },
+    hasProcedureFiles: { type: Boolean, default: false },
+    totalQueries: { type: Number, default: 0 },
+    databases: [{ // Multiple databases in project
+      name: String,
+      tables: [String],
+      fileIds: [String] // Files belonging to this database
+    }]
+  },
+
+  entryPoints: [String],
   codeAnswer: {
     type: String,
     trim: true
   },
   language: {
     type: String,
-   
   },
   isCorrect: {
     type: Boolean,
     default: false
   },
-    totalScore: {
+  totalScore: {
     type: Number,
-   
     default: 0
   },
   score: {
     type: Number,
-   
     default: 0
   },
-   feedback: {
+  feedback: {
     type: String
   },
   status: {
     type: String,
-    enum: ['solved', 'attempted', 'skipped', 'submitted','evaluated'],
+    enum: ['solved', 'attempted', 'skipped', 'submitted', 'evaluated'],
     default: 'attempted'
   },
   attempts: {
@@ -48,12 +157,26 @@ const questionAnswerSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
-
+  fileStructure: {
+    totalFiles: Number,
+    htmlFiles: Number,
+    cssFiles: Number,
+    jsFiles: Number,
+    otherFiles: Number,
+    sqlFiles: Number,
+    folders: Number,
+    sqlFiles: Number,
+    folderStructure: [{
+      name: String,
+      path: String,
+      fileCount: Number
+    }]
+  }
 }, {
   timestamps: true
 });
 
-// In your schema file - exerciseProgressSchema
+// Update exerciseProgressSchema
 const exerciseProgressSchema = new mongoose.Schema({
   exerciseId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -62,7 +185,6 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: String,
   },
   questions: [questionAnswerSchema],
-   
   status: {
     type: String,
     enum: ['in-progress', 'completed', 'terminated'],
@@ -73,13 +195,14 @@ const exerciseProgressSchema = new mongoose.Schema({
     default: false,
     description: "If true, user cannot re-enter this exercise"
   },
- 
+  selectedProgrammingLanguage: {
+    type: String,
+  },
   // Context information
   nodeId: {
     type: String,
     trim: true
   },
- 
   nodeName: {
     type: String,
     trim: true
@@ -92,11 +215,23 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
-    screenRecording: {
+  screenRecording: {
     type: String,
   },
-
-
+  // Folder structure metadata
+  hasFolderStructure: {
+    type: Boolean,
+    default: false
+  },
+  folderCount: {
+    type: Number,
+    default: 0
+  },
+  projectType: {
+    type: String,
+    enum: ['single-file', 'multi-file'],
+    default: 'single-file'
+  }
 }, {
   timestamps: true
 });

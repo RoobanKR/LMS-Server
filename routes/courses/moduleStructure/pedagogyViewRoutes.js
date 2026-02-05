@@ -12,19 +12,13 @@ const {
   duplicateCourseHierarchy,
   updateEntity,
   updateFileSettings,
-  addExercise,
-  updateExercise,
-  deleteExercise,
-  getExercises,
-  addQuestion,
-  getQuestions,
-  getQuestionById,
-  updateQuestion,
-  deleteQuestion,
+ 
   getAllCoursesDataWithoutAINotes,
   studentDashboardAnalyticsOptimized,
-  lockExercise,
-  getExerciseStatus,
+  staffDashboardAnalytics,
+  getStudentCourseProgress,
+  staffStudentAnalytics,
+
 } = require("../../../controllers/courses/moduleStructure/pedagogyView");
 
 // Routes
@@ -52,6 +46,18 @@ router.get(
   studentDashboardAnalyticsOptimized
 );
 
+router.get(
+  '/analytics/staff/analytics/students',
+  userAuth,
+  staffStudentAnalytics
+);
+
+router.get(
+  '/analytics/staff/analytics/student-progress/:courseId/:studentId',
+  userAuth,
+ getStudentCourseProgress
+);
+
 router.post("/dupicate-date", userAuth, duplicateCourseHierarchy);
 
 router.put("/uploadResourses/:type/:id", updateEntity);
@@ -60,44 +66,5 @@ router.put("/uploadResourses/:type/:id", userAuth, updateFileSettings);
 
 // We Do Routes can be added here in future
 
-router.put("/exercise/add/:type/:id", addExercise);
 
-// Update a specific exercise by ID
-router.put("/exercise/update/:type/:id/:exerciseId", updateExercise);
-
-// Delete a specific exercise by ID
-router.delete("/exercise/delete/:type/:id/:exerciseId", deleteExercise);
-
-// Get exercises by subcategory
-router.get("/exercise/get/:type/:id", getExercises);
-
-router.post("/question-add/:type/:id/exercise/:exerciseId", addQuestion);
-
-// Get all questions for an exercise
-router.get("/questions-get/:type/:id/:exerciseId", getQuestions);
-
-// Get single question by ID
-router.get(
-  "/exercise/:exerciseId/question/:questionId/question-getByid",
-  getQuestionById
-);
-
-// Update question
-router.put(
-  "/question-update/:type/:id/:exerciseId/:questionId",
-  updateQuestion
-);
-
-// Delete question
-router.delete(
-  "/question-delete/:type/:id/:exerciseId/:questionId",
-  deleteQuestion
-);
-
-router.post('/exercise/lock', 
-  userAuth,
-  lockExercise
-); 
-// 2. Check Exercise Status
-router.get("/exercise/status", userAuth, getExerciseStatus)
 module.exports = router;
