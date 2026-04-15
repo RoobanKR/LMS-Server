@@ -3,7 +3,7 @@ const Module1 = require('../../../models/Courses/moduleStructure/moduleModal');
 // Create a new Module
 exports.createModule = async (req, res) => {
   try {
-    const {  courses, title, description, duration, level,index } = req.body;
+    const {  courses, title, description, duration, level,index,testConfiguration } = req.body;
 
     // Basic validation
     if (  !courses || !title) {
@@ -18,6 +18,7 @@ exports.createModule = async (req, res) => {
       description,
       duration,
       level,
+      testConfiguration: testConfiguration || { coreProgram: [], frontend: [], database: [] },
       createdBy:req.user.email,
     });
 

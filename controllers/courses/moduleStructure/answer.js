@@ -21,7 +21,6 @@ exports.submitAnswer = async (req, res) => {
       nodeId = "",
       nodeName = "",
       nodeType = "",
-      screenRecord,
       code = "",
       score = 0,
       language = "",

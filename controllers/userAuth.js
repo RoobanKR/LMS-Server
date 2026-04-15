@@ -4,6 +4,7 @@ const { createSecretToken } = require("../config/secretToken");
 const config = require("config");
 const BASE_URL = config.get("BASE_URL");
 const mongoose = require("mongoose");
+const Role = require("../models/RoleModel");
 
 const bcrypt = require("bcryptjs");
 const emailUtil = require("../utils/sendEmail");
@@ -25,6 +26,70 @@ const supabaseUrl = process.env.SUPABASE_URL;
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+const getDefaultPermissions = (roleName) => {
+  // Student permissions
+  if (roleName === 'student') {
+    return [
+      {
+        permissionName: "Student Dashboard",
+        permissionKey: "studentdashboard",
+        permissionFunctionality: [
+          "view_courses",
+          "view_grades",
+          "submit_assignments"
+        ],
+        icon: "Home",
+        color: "green",
+        description: "Student Dashboard Access",
+        isActive: true,
+        order: 0
+      }
+    ];
+  }
+  
+  // Admin permissions
+  if (roleName === 'admin') {
+    return [
+      {
+        permissionName: "Admin Dashboard",
+        permissionKey: "admindashboard",
+        permissionFunctionality: [
+          "view_users",
+          "add_users",
+          "edit_users",
+          "delete_users"
+        ],
+        icon: "Home",
+        color: "green",
+        description: "Admin Dashboard Management",
+        isActive: true,
+        order: 0
+      }
+    ];
+  }
+  
+  // Staff permissions - This will apply to ALL other roles (faculty, coordinator, manager, etc.)
+  // Any role that is not 'student' or 'admin' will get these permissions
+  return [
+    {
+      permissionName: "Staff Dashboard",
+      permissionKey: "dashboard",
+      permissionFunctionality: [
+        "view_users",
+        "add_users",
+        "edit_users",
+        "delete_users"
+      ],
+      icon: "Home",
+      color: "green",
+      description: "Staff Dashboard Management",
+      isActive: true,
+      order: 0
+    }
+  ];
+};
+
+// Updated addUser function
 exports.Addusers = async (req, res) => {
   try {
     const {
@@ -32,9 +97,8 @@ exports.Addusers = async (req, res) => {
       firstName,
       lastName,
       phone,
-      role,
+      role, // This is the role ID
       gender,
-      permission,
       password,
       status,
       course,
@@ -64,6 +128,24 @@ exports.Addusers = async (req, res) => {
         message: [{ key: "error", value: "User already exists" }],
       });
     }
+
+    // Get the role details to determine default permissions
+    const roleDetails = await Role.findById(role);
+    if (!roleDetails) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid role selected" }],
+      });
+    }
+
+    // Get role name from the role details (use renameRole or originalRole)
+    const roleName = roleDetails.renameRole ? roleDetails.renameRole.toLowerCase() : 
+                     roleDetails.originalRole ? roleDetails.originalRole.toLowerCase() : 
+                     'staff'; // Default to staff if role name is not found
+    
+    // Get default permissions based on role
+    // For student and admin, specific permissions will be returned
+    // For any other role (faculty, coordinator, manager, etc.), staff permissions will be returned
+    const defaultPermissions = getDefaultPermissions(roleName);
 
     let imageUrl;
     const imageFile = req.files?.profile;
@@ -112,22 +194,22 @@ exports.Addusers = async (req, res) => {
       gender,
       password,
       profile: imageUrl,
-      role,
+      role: role,
       course,
       batch,
       degree,
       department, 
       year, 
       semester,
-      status,
+      status: status || "active",
+      permissions: defaultPermissions, // Assign default permissions
       institution: req.user.institution,
-      permission: permission,
       createdBy: req.user.email,
     });
 
     const token = createSecretToken(newUser._id);
 
-    const emailSubject = "Welcome to smartlms LMS - Your Account Details";
+    const emailSubject = `Welcome to smartlms LMS - Your Account Details`;
     const emailBody = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
         <h2 style="color: #333;">Welcome to the smartlms Dashboard</h2>
@@ -138,6 +220,7 @@ exports.Addusers = async (req, res) => {
           <p><strong>Name:</strong> ${firstName} ${lastName}</p>
           <p><strong>Email:</strong> ${email}</p>
           <p><strong>Temporary Password:</strong> ${password}</p>
+          <p><strong>Role:</strong> ${roleDetails.renameRole || roleDetails.originalRole}</p>
         </div>
         
         <p><strong>Important:</strong> Please change your password after your first login for security purposes.</p>
@@ -155,13 +238,11 @@ exports.Addusers = async (req, res) => {
       </div>
     `;
 
-    // Send email - using the updated format
+    // Send email
     const emailResult = await emailUtil.sendEmail({
       receiverEmails: email,
       subject: emailSubject,
       body: emailBody,
-      // Optional: ccEmails if needed
-      // ccEmails: ['admin@example.com']
     });
 
     if (emailResult.success) {
@@ -173,8 +254,9 @@ exports.Addusers = async (req, res) => {
           firstName: newUser.firstName,
           lastName: newUser.lastName,
           institution: newUser.institution,
-          permission: newUser.permission,
+          permissions: newUser.permissions,
           profile: newUser.profile,
+          role: newUser.role,
         },
         token: token,
       });
@@ -193,8 +275,9 @@ exports.Addusers = async (req, res) => {
           firstName: newUser.firstName,
           lastName: newUser.lastName,
           institution: newUser.institution,
-          permission: newUser.permission,
+          permissions: newUser.permissions,
           profile: newUser.profile,
+          role: newUser.role,
         },
         token: token,
       });

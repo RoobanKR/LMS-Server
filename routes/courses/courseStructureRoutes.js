@@ -18,7 +18,7 @@ router.post("/courses-structure/create", userAuth, createCourseStructure);
 router.get("/courses-structure/getAll", userAuth, getCourseStructure);
 
 router.get("/courses-structure/getById/:id", userAuth, getCourseStructureById);
-router.put("/courses-structure/update/:id", userAuth, updateCourseStructure);
+router.put("/courses-structure/update/:courseId", userAuth, updateCourseStructure);
 router.delete("/courses-structure/delete/:id", userAuth, deleteCourseStructure);
 
 router.post("/add-participants/:courseId", userAuth, singleAddParticipants);

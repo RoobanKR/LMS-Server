@@ -16,7 +16,8 @@ exports.createTopic = async (req, res) => {
       description,
       duration,
       createdBy,
-      level
+      level,
+      testConfiguration
     } = req.body;
  
     // Validation
@@ -36,6 +37,7 @@ exports.createTopic = async (req, res) => {
       description,
       duration,
       level,
+      testConfiguration: testConfiguration || { coreProgram: [], frontend: [], database: [] },
       createdBy: createdBy || req.user.email
     });
  

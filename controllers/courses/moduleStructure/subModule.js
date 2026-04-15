@@ -13,7 +13,8 @@ exports.createSubModule = async (req, res) => {
       description,
       duration,
       level,
-      createdBy
+      createdBy,
+      testConfiguration
     } = req.body;
  
     // Validation
@@ -32,6 +33,7 @@ exports.createSubModule = async (req, res) => {
       description,
       duration,
       level,
+      testConfiguration: testConfiguration || { coreProgram: [], frontend: [], database: [] },
       createdBy:req.user.email
     });
  

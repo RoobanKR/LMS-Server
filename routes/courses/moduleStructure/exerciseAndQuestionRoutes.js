@@ -19,7 +19,16 @@ const {
   getCourseExercisesAdminView,
   getUserExerciseGradeAnalytics,
   getExerciseById,
+  addMCQQuestions,
+  updateMCQQuestion,
+  deleteMCQQuestion,
+  uploadQuestionImage,
 } = require("../../../controllers/courses/moduleStructure/exerciseAndQuestion");
+const {
+  parseBulkDocument,
+  insertBulkQuestions,
+  downloadTemplate,
+} = require("../../../controllers/courses/moduleStructure/Bulkmcqcontroller");
 
 // We Do Routes can be added here in future
 
@@ -101,4 +110,27 @@ router.get("/exercise/status", userAuth, getExerciseStatus);
 router.get("/exercise/:exerciseId", userAuth, getExerciseById);
 
 
+router.post(
+  "/mcq-question-add/:type/:id/exercise/:exerciseId",
+  userAuth,
+  addMCQQuestions,
+);
+
+
+router.post("/bulk-upload/parse/:type/:id/exercise/:exerciseId", userAuth, parseBulkDocument);
+router.post("/bulk-upload/insert/:type/:id/exercise/:exerciseId", userAuth, insertBulkQuestions);
+router.get("/bulk-upload/template/:format", downloadTemplate);
+router.put(
+  '/:type/:id/exercise/:exerciseId/mcq/question/:questionId',
+  userAuth,
+  updateMCQQuestion
+);  
+
+router.delete(
+  '/:type/:id/exercise/:exerciseId/mcq/question/:questionId',
+  userAuth,
+  deleteMCQQuestion
+);
+
+router.post('/upload/question-image', userAuth, uploadQuestionImage);
 module.exports = router;

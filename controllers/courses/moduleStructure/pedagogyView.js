@@ -7,7 +7,7 @@ const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 const LevelView = require('../../../models/Courses/moduleStructure/levelModel');
 const User = require("../../../models/UserModel");
-const Role = require('../../../models/RoleModel'); 
+const Role = require('../../../models/RoleModel');
 
 
 const { createClient } = require("@supabase/supabase-js");
@@ -25,71 +25,71 @@ const fs = require('fs');
 // Configure ffmpeg paths
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
-  exports.createPedagogyView = async (req, res) => {
-    try {
-      const { institution, courses, pedagogies, createdBy } = req.body;
+exports.createPedagogyView = async (req, res) => {
+  try {
+    const { institution, courses, pedagogies, createdBy } = req.body;
 
-      if (!courses || !pedagogies || !Array.isArray(pedagogies)) {
-        return res.status(400).json({
-          message: [{ key: 'error', value: 'Required fields are missing (institution, courses, pedagogies)' }]
-        });
-      }
-
-      const newPedagogy = new PedagogyView({
-        institution: req.user.institution,
-        courses,
-        pedagogies,
-        createdBy: req.user.email
+    if (!courses || !pedagogies || !Array.isArray(pedagogies)) {
+      return res.status(400).json({
+        message: [{ key: 'error', value: 'Required fields are missing (institution, courses, pedagogies)' }]
       });
-
-      const savedPedagogy = await newPedagogy.save();
-
-      return res.status(201).json({
-        message: [{ key: 'success', value: 'PedagogyView created successfully' }],
-        pedagogyView: savedPedagogy
-      });
-    } catch (err) {
-      console.error('Error creating PedagogyView:', err);
-      return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
     }
-  };
 
-  exports.getAllPedagogyViews = async (req, res) => {
-    try {
-      const pedagogies = await PedagogyView.find()
-      
-      return res.status(200).json({
-        message: [{ key: 'success', value: 'PedagogyViews retrieved successfully' }],
-        pedagogyViews: pedagogies
-      });
-    } catch (err) {
-      console.error('Error retrieving PedagogyViews:', err);
-      return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
+    const newPedagogy = new PedagogyView({
+      institution: req.user.institution,
+      courses,
+      pedagogies,
+      createdBy: req.user.email
+    });
+
+    const savedPedagogy = await newPedagogy.save();
+
+    return res.status(201).json({
+      message: [{ key: 'success', value: 'PedagogyView created successfully' }],
+      pedagogyView: savedPedagogy
+    });
+  } catch (err) {
+    console.error('Error creating PedagogyView:', err);
+    return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
+  }
+};
+
+exports.getAllPedagogyViews = async (req, res) => {
+  try {
+    const pedagogies = await PedagogyView.find()
+
+    return res.status(200).json({
+      message: [{ key: 'success', value: 'PedagogyViews retrieved successfully' }],
+      pedagogyViews: pedagogies
+    });
+  } catch (err) {
+    console.error('Error retrieving PedagogyViews:', err);
+    return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
+  }
+};
+
+exports.getPedagogyViewById = async (req, res) => {
+  try {
+    const pedagogy = await PedagogyView.findById(req.params.id)
+
+    if (!pedagogy) {
+      return res.status(404).json({ message: [{ key: 'error', value: 'PedagogyView not found' }] });
     }
-  };
 
-  exports.getPedagogyViewById = async (req, res) => {
-    try {
-      const pedagogy = await PedagogyView.findById(req.params.id)
-      
-      if (!pedagogy) {
-        return res.status(404).json({ message: [{ key: 'error', value: 'PedagogyView not found' }] });
-      }
+    return res.status(200).json({
+      message: [{ key: 'success', value: 'PedagogyView retrieved successfully' }],
+      pedagogyView: pedagogy
+    });
+  } catch (err) {
+    console.error('Error retrieving PedagogyView by ID:', err);
+    return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
+  }
+};
 
-      return res.status(200).json({
-        message: [{ key: 'success', value: 'PedagogyView retrieved successfully' }],
-        pedagogyView: pedagogy
-      });
-    } catch (err) {
-      console.error('Error retrieving PedagogyView by ID:', err);
-      return res.status(500).json({ message: [{ key: 'error', value: 'Internal server error' }] });
-    }
-  };
-
-  exports.updatePedagogyView = async (req, res) => {
+exports.updatePedagogyView = async (req, res) => {
   try {
     const { institution, courses, pedagogies } = req.body;
-    
+
     if (!courses || !pedagogies || !Array.isArray(pedagogies)) {
       return res.status(400).json({
         message: [{ key: 'error', value: 'Required fields are missing (courses, pedagogies)' }]
@@ -111,19 +111,19 @@ ffmpeg.setFfprobePath(ffprobePath);
       const matchingPedagogy = pedagogyView.pedagogies.find(existingPedagogy => {
         return (
           arraysEqual(
-            existingPedagogy.module?.map(id => id.toString()) || [], 
+            existingPedagogy.module?.map(id => id.toString()) || [],
             incomingPedagogy.module?.map(id => id.toString()) || []
           ) &&
           arraysEqual(
-            existingPedagogy.subModule?.map(id => id.toString()) || [], 
+            existingPedagogy.subModule?.map(id => id.toString()) || [],
             incomingPedagogy.subModule?.map(id => id.toString()) || []
           ) &&
           arraysEqual(
-            existingPedagogy.topic?.map(id => id.toString()) || [], 
+            existingPedagogy.topic?.map(id => id.toString()) || [],
             incomingPedagogy.topic?.map(id => id.toString()) || []
           ) &&
           arraysEqual(
-            existingPedagogy.subTopic?.map(id => id.toString()) || [], 
+            existingPedagogy.subTopic?.map(id => id.toString()) || [],
             incomingPedagogy.subTopic?.map(id => id.toString()) || []
           )
         );
@@ -162,8 +162,8 @@ ffmpeg.setFfprobePath(ffprobePath);
 
   } catch (err) {
     console.error('Error updating pedagogy:', err);
-    return res.status(500).json({ 
-      message: [{ key: 'error', value: 'Internal server error' }] 
+    return res.status(500).json({
+      message: [{ key: 'error', value: 'Internal server error' }]
     });
   }
 };
@@ -174,26 +174,26 @@ ffmpeg.setFfprobePath(ffprobePath);
 
 function mergeActivityArrays(existing = [], incoming = []) {
   const merged = [...existing];
-  
+
   for (const incomingActivity of incoming) {
     const existingIndex = merged.findIndex(a => a.type === incomingActivity.type);
-    
+
     if (existingIndex !== -1) {
       merged[existingIndex] = { ...merged[existingIndex], ...incomingActivity };
     } else {
       merged.push(incomingActivity);
     }
   }
-  
+
   return merged;
 }
 
 function arraysEqual(arr1, arr2) {
   if (arr1.length !== arr2.length) return false;
-  
+
   const sorted1 = [...arr1].sort();
   const sorted2 = [...arr2].sort();
-  
+
   return sorted1.every((val, index) => val === sorted2[index]);
 }
 
@@ -353,40 +353,40 @@ async function performCascadeDeletion(model, deletedId) {
 
     if (model === 'Module1') {
       const directTopics = await Topic1.find({ moduleId: deletedId });
-      
+
       for (const topic of directTopics) {
         const subTopics = await SubTopic1.find({ topicId: topic._id });
-        
+
         for (const subTopic of subTopics) {
           await cleanUpPedagogyReferences('SubTopic1', subTopic._id);
           await cleanUpLevelReferences('SubTopic1', subTopic._id);
           await SubTopic1.findByIdAndDelete(subTopic._id);
         }
-        
+
         await cleanUpPedagogyReferences('Topic1', topic._id);
         await cleanUpLevelReferences('Topic1', topic._id);
         await Topic1.findByIdAndDelete(topic._id);
       }
 
       const subModules = await SubModule1.find({ moduleId: deletedId });
-      
+
       for (const subModule of subModules) {
         const topics = await Topic1.find({ subModuleId: subModule._id });
-        
+
         for (const topic of topics) {
           const subTopics = await SubTopic1.find({ topicId: topic._id });
-          
+
           for (const subTopic of subTopics) {
             await cleanUpPedagogyReferences('SubTopic1', subTopic._id);
             await cleanUpLevelReferences('SubTopic1', subTopic._id);
             await SubTopic1.findByIdAndDelete(subTopic._id);
           }
-          
+
           await cleanUpPedagogyReferences('Topic1', topic._id);
           await cleanUpLevelReferences('Topic1', topic._id);
           await Topic1.findByIdAndDelete(topic._id);
         }
-        
+
         await cleanUpPedagogyReferences('SubModule1', subModule._id);
         await cleanUpLevelReferences('SubModule1', subModule._id);
         await SubModule1.findByIdAndDelete(subModule._id);
@@ -396,13 +396,13 @@ async function performCascadeDeletion(model, deletedId) {
       const topics = await Topic1.find({ subModuleId: deletedId });
       for (const topic of topics) {
         const subTopics = await SubTopic1.find({ topicId: topic._id });
-        
+
         for (const subTopic of subTopics) {
           await cleanUpPedagogyReferences('SubTopic1', subTopic._id);
           await cleanUpLevelReferences('SubTopic1', subTopic._id);
           await SubTopic1.findByIdAndDelete(subTopic._id);
         }
-        
+
         await cleanUpPedagogyReferences('Topic1', topic._id);
         await cleanUpLevelReferences('Topic1', topic._id);
         await Topic1.findByIdAndDelete(topic._id);
@@ -410,7 +410,7 @@ async function performCascadeDeletion(model, deletedId) {
     }
     else if (model === 'Topic1') {
       const subTopics = await SubTopic1.find({ topicId: deletedId });
-      
+
       for (const subTopic of subTopics) {
         await cleanUpPedagogyReferences('SubTopic1', subTopic._id);
         await cleanUpLevelReferences('SubTopic1', subTopic._id);
@@ -426,7 +426,7 @@ async function performCascadeDeletion(model, deletedId) {
 
 async function cleanUpPedagogyReferences(model, deletedId) {
   try {
-    
+
     const fieldMap = {
       'Module1': 'module',
       'SubModule1': 'subModule',
@@ -443,21 +443,21 @@ async function cleanUpPedagogyReferences(model, deletedId) {
     for (const pView of pedagogyViews) {
       let shouldUpdate = false;
       let removedPedagogies = 0;
-      
+
       for (let i = pView.pedagogies.length - 1; i >= 0; i--) {
         const pedagogy = pView.pedagogies[i];
         const pedagogyId = pedagogy._id;
-      
+
         if (pedagogy[field] && pedagogy[field].some(refId => refId.toString() === deletedId.toString())) {
           pView.pedagogies.splice(i, 1);
           shouldUpdate = true;
           removedPedagogies++;
         }
       }
-      
+
       if (pView.pedagogies.length === 0) {
         await PedagogyView.findByIdAndDelete(pView._id);
-      } 
+      }
       else if (shouldUpdate) {
         await pView.save();
       }
@@ -471,7 +471,7 @@ async function cleanUpPedagogyReferences(model, deletedId) {
 
 async function cleanUpLevelReferences(model, deletedId) {
   try {
-    
+
     const fieldMap = {
       'Module1': 'module',
       'SubModule1': 'subModule',
@@ -488,19 +488,19 @@ async function cleanUpLevelReferences(model, deletedId) {
     for (const lView of levelViews) {
       let shouldUpdate = false;
       let removedLevels = 0;
-      
+
       for (let i = lView.levels.length - 1; i >= 0; i--) {
         const level = lView.levels[i];
-                if (level[field] && level[field].some(refId => refId.toString() === deletedId.toString())) {
+        if (level[field] && level[field].some(refId => refId.toString() === deletedId.toString())) {
           lView.levels.splice(i, 1);
           shouldUpdate = true;
           removedLevels++;
         }
       }
-      
+
       if (lView.levels.length === 0) {
         await LevelView.findByIdAndDelete(lView._id);
-      } 
+      }
       else if (shouldUpdate) {
         await lView.save();
       }
@@ -527,7 +527,7 @@ async function cleanUpCourseHierarchy(model, deletedId, courseId) {
       course.courseHierarchy.modules = course.courseHierarchy.modules.filter(
         mod => mod._id.toString() !== deletedId.toString()
       );
-    } 
+    }
     else if (model === 'SubModule1') {
       for (const module of course.courseHierarchy.modules) {
         if (module.subModules) {
@@ -560,7 +560,7 @@ async function cleanUpCourseHierarchy(model, deletedId, courseId) {
                   topic.subTopics = topic.subTopics.filter(
                     subTopic => subTopic._id.toString() !== deletedId.toString()
                   );
-                  
+
                   if (topic.subTopics.length === 0) {
                     subModule.topics = subModule.topics.filter(
                       t => t._id.toString() !== topic._id?.toString()
@@ -589,34 +589,34 @@ function cleanEmptyHierarchyArrays(hierarchy) {
 
   for (let i = hierarchy.modules.length - 1; i >= 0; i--) {
     const module = hierarchy.modules[i];
-    
+
     if (module.subModules) {
       for (let j = module.subModules.length - 1; j >= 0; j--) {
         const subModule = module.subModules[j];
-        
+
         if (subModule.topics) {
           for (let k = subModule.topics.length - 1; k >= 0; k--) {
             const topic = subModule.topics[k];
-                        if (topic.subTopics && topic.subTopics.length === 0) {
+            if (topic.subTopics && topic.subTopics.length === 0) {
               subModule.topics.splice(k, 1);
             }
           }
-          
+
           if (subModule.topics.length === 0) {
             module.subModules.splice(j, 1);
           }
         }
-        
+
         if (!subModule.topics || subModule.topics.length === 0) {
           module.subModules.splice(j, 1);
         }
       }
-      
+
       if (module.subModules.length === 0) {
         hierarchy.modules.splice(i, 1);
       }
     }
-    
+
     if (!module.subModules || module.subModules.length === 0) {
       hierarchy.modules.splice(i, 1);
     }
@@ -627,7 +627,7 @@ exports.getAllCoursesData = async (req, res) => {
   try {
     const { courseId } = req.params;
 
-     const course = await CourseStructure.findById(courseId).lean().populate({
+    const course = await CourseStructure.findById(courseId).lean().populate({
       path: "singleParticipants",
       populate: [
         {
@@ -664,7 +664,7 @@ exports.getAllCoursesData = async (req, res) => {
       topicId: { $in: topics.map(t => t._id) }
     }).lean();
 
-   
+
     const structuredCourse = {
       ...course,
       modules: modules.map(module => {
@@ -796,7 +796,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
             if (categoryData && typeof categoryData === 'object') {
               for (const key in categoryData) {
                 let exercises = categoryData[key];
-                
+
                 // Ensure exercises is an array
                 let exercisesArray = [];
                 if (Array.isArray(exercises)) {
@@ -804,12 +804,12 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
                 } else if (exercises && typeof exercises === 'object') {
                   exercisesArray = Object.values(exercises);
                 }
-                
+
                 // Find exercise in this category
-                const foundExercise = exercisesArray.find(ex => 
+                const foundExercise = exercisesArray.find(ex =>
                   ex && ex.exerciseId && ex.exerciseId.toString() === exerciseId
                 );
-                
+
                 if (foundExercise) {
                   hasExerciseProgress = true;
                   exerciseProgress = {
@@ -827,9 +827,9 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
 
         // Clean user data
         const cleanUserData = JSON.parse(JSON.stringify(participant.user, (key, value) => {
-          if (key === 'notes' || key === 'ai_history' || key === 'password' || 
-              key === 'tokens' || key === '__v' || key === '$__' || 
-              key === '$isNew' || value === undefined) {
+          if (key === 'notes' || key === 'ai_history' || key === 'password' ||
+            key === 'tokens' || key === '__v' || key === '$__' ||
+            key === '$isNew' || value === undefined) {
             return undefined;
           }
           return value;
@@ -892,17 +892,17 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
         if (categoryData && typeof categoryData === 'object') {
           for (const subcategory in categoryData) {
             const subcategoryData = categoryData[subcategory];
-            
+
             if (Array.isArray(subcategoryData)) {
               // Search in array
-              const exercise = subcategoryData.find(ex => 
+              const exercise = subcategoryData.find(ex =>
                 ex && ex._id && ex._id.toString() === targetExerciseId
               );
               if (exercise) {
                 return { found: exercise, category, subcategory };
               }
-            } else if (subcategoryData && subcategoryData._id && 
-                       subcategoryData._id.toString() === targetExerciseId) {
+            } else if (subcategoryData && subcategoryData._id &&
+              subcategoryData._id.toString() === targetExerciseId) {
               // Search in object
               return { found: subcategoryData, category, subcategory };
             }
@@ -955,21 +955,21 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
     // Prepare modules data without duplicating exercise info
     const modulesData = modules.map(module => {
       // Get topics for this module
-      const moduleTopics = topics.filter(t => 
+      const moduleTopics = topics.filter(t =>
         t.moduleId?.toString() === module._id.toString()
       );
 
       const topicsData = moduleTopics.map(topic => {
         // Check if this topic contains the searched exercise
         const containsSearchedExercise = topic._id.toString() === parentTopic?._id?.toString();
-        
+
         // Get exercises from this topic (excluding the searched exercise to avoid duplication)
         let topicExercises = [];
         if (topic.pedagogy) {
           topicExercises = getAllExercisesFromPedagogy(topic.pedagogy);
-          
+
           // Remove the searched exercise from the list
-          topicExercises = topicExercises.filter(ex => 
+          topicExercises = topicExercises.filter(ex =>
             ex._id.toString() !== exerciseId
           );
         }
@@ -1005,13 +1005,13 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
     // Helper function to get all exercises from pedagogy
     function getAllExercisesFromPedagogy(pedagogy) {
       const exercises = [];
-      
+
       for (const category in pedagogy) {
         const categoryData = pedagogy[category];
         if (categoryData && typeof categoryData === 'object') {
           for (const subcategory in categoryData) {
             const subcategoryData = categoryData[subcategory];
-            
+
             if (Array.isArray(subcategoryData)) {
               subcategoryData.forEach(exercise => {
                 if (exercise && exercise._id) {
@@ -1032,7 +1032,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
           }
         }
       }
-      
+
       return exercises;
     }
 
@@ -1045,7 +1045,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
       exercise: cleanExerciseResponse,
       singleParticipants: singleParticipants,
       modules: modulesData,
-     
+
     };
 
     res.status(200).json({
@@ -1065,7 +1065,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
 };
 
 exports.studentDashboardAnalyticsOptimized = async (req, res) => {
-  try { 
+  try {
     const { institution } = req.user;
 
     // Get all courses with ALL basic info
@@ -1110,8 +1110,8 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
           { subModuleId: { $in: await SubModule1.find({ moduleId: { $in: moduleIds } }).distinct('_id') } }
         ]
       })
-      .select('-__v -createdAt -updatedAt')
-      .lean(),
+        .select('-__v -createdAt -updatedAt')
+        .lean(),
       // Get all subtopics with ALL fields
       SubTopic1.find()
         .select('-__v -createdAt -updatedAt')
@@ -1133,10 +1133,10 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     // Organize modules by course
     allModules.forEach(module => {
       // Handle both array and single course reference
-      const moduleCourses = Array.isArray(module.courses) 
-        ? module.courses 
+      const moduleCourses = Array.isArray(module.courses)
+        ? module.courses
         : [module.courses];
-      
+
       moduleCourses.forEach(courseRef => {
         if (courseRef) {
           const courseId = courseRef.toString();
@@ -1158,22 +1158,22 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
       const courseIdStr = course._id.toString();
       const courseModules = modulesByCourse[courseIdStr] || [];
       const courseModuleIds = courseModules.map(m => m._id.toString());
-      
+
       // Filter submodules for this course
       const courseSubModules = allSubModules.filter(
         sm => sm.moduleId && courseModuleIds.includes(sm.moduleId.toString())
       );
-      
+
       const courseSubModuleIds = courseSubModules.map(sm => sm._id.toString());
-      
+
       // Filter topics for this course
       const courseTopics = allTopics.filter(
         t => (t.moduleId && courseModuleIds.includes(t.moduleId.toString())) ||
-             (t.subModuleId && courseSubModuleIds.includes(t.subModuleId.toString()))
+          (t.subModuleId && courseSubModuleIds.includes(t.subModuleId.toString()))
       );
-      
+
       const courseTopicIds = courseTopics.map(t => t._id.toString());
-      
+
       // Filter subtopics for this course
       const courseSubTopics = allSubTopics.filter(
         st => st.topicId && courseTopicIds.includes(st.topicId.toString())
@@ -1190,10 +1190,10 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
         );
 
         const subModuleIds = moduleSubModules.map(sm => sm._id.toString());
-        
+
         const moduleTopics = courseTopics.filter(
           t => (t.moduleId && t.moduleId.toString() === module._id.toString()) ||
-               (t.subModuleId && subModuleIds.includes(t.subModuleId.toString()))
+            (t.subModuleId && subModuleIds.includes(t.subModuleId.toString()))
         );
 
         const processedSubModules = moduleSubModules.map(subModule => {
@@ -1262,7 +1262,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     coursesWithData.forEach(course => {
       const level = course.courseLevel || 'Not Specified';
       const service = course.serviceType || 'Not Specified';
-      
+
       coursesByLevel[level] = (coursesByLevel[level] || 0) + 1;
       coursesByService[service] = (coursesByService[service] || 0) + 1;
     });
@@ -1321,36 +1321,41 @@ exports.staffStudentAnalytics = async (req, res) => {
     }
 
     // Filter courses to only those with students
-    const coursesWithStudents = courses.filter(course => 
-      course.singleParticipants && 
+    const coursesWithStudents = courses.filter(course =>
+      course.singleParticipants &&
       course.singleParticipants.length > 0
     );
 
     const allCourseIds = coursesWithStudents.map(course => course._id.toString());
 
-    // Get user answers for all courses WITH role populated
-    const allUsers = await User.find({ 
-      institution, 
+    // Get all modules and topics for these courses
+    const [allModules, allTopics] = await Promise.all([
+      Module1.find({ courses: { $in: allCourseIds } })
+        .select('title courses')
+        .lean(),
+      Topic1.find({ courses: { $in: allCourseIds } })
+        .select('pedagogy courses')
+        .lean()
+    ]);
+
+    // Get all users enrolled in these courses
+    const allUsers = await User.find({
+      institution,
       'courses.courseId': { $in: allCourseIds }
     })
-    .select('firstName lastName email department courses role')
-    .populate({
-      path: 'role',
-      select: 'renameRole originalRole roleValue',
-      model: 'Role'
-    })
-    .lean();
+      .select('firstName lastName email department courses role')
+      .populate({
+        path: 'role',
+        select: 'renameRole originalRole roleValue',
+        model: 'Role'
+      })
+      .lean();
 
     // Filter only students based on role value
     const studentUsers = allUsers.filter(user => {
       const roleValue = user.role?.roleValue || user.role?.renameRole || '';
       return roleValue.toLowerCase() === 'student';
     });
-
-    // Get all modules for these courses
-    const allModules = await Module1.find({ courses: { $in: allCourseIds } })
-      .select('title courses')
-      .lean();
 
     // Organize modules by course
     const modulesByCourse = {};
@@ -1365,116 +1370,158 @@ exports.staffStudentAnalytics = async (req, res) => {
       });
     });
 
+    // Organize topics by course
+    const topicsByCourse = {};
+    allTopics.forEach(topic => {
+      const topicCourses = Array.isArray(topic.courses) ? topic.courses : [topic.courses];
+      topicCourses.forEach(courseId => {
+        const courseIdStr = courseId.toString();
+        if (!topicsByCourse[courseIdStr]) {
+          topicsByCourse[courseIdStr] = [];
+        }
+        topicsByCourse[courseIdStr].push(topic);
+      });
+    });
+
+    // Helper function to extract all pedagogy types and categories
+    const extractPedagogyStructure = (topics) => {
+      const structure = {};
+
+      topics.forEach(topic => {
+        if (topic.pedagogy && typeof topic.pedagogy === 'object') {
+          Object.keys(topic.pedagogy).forEach(pedagogyType => {
+            if (!structure[pedagogyType]) {
+              structure[pedagogyType] = new Set();
+            }
+
+            const pedagogySection = topic.pedagogy[pedagogyType];
+            if (pedagogySection && typeof pedagogySection === 'object') {
+              Object.keys(pedagogySection).forEach(category => {
+                structure[pedagogyType].add(category);
+              });
+            }
+          });
+        }
+      });
+
+      // Convert Sets to Arrays
+      const result = {};
+      Object.keys(structure).forEach(pedagogyType => {
+        result[pedagogyType] = Array.from(structure[pedagogyType]);
+      });
+
+      return result;
+    };
+
+    // Helper function to calculate completion dynamically
+    const calculateCompletion = (exercises) => {
+      if (!exercises || !Array.isArray(exercises) || exercises.length === 0) {
+        return { completed: 0, total: 0, percentage: 0, questionProgress: 0 };
+      }
+
+      let completed = 0;
+      let totalQuestions = 0;
+      let attemptedQuestions = 0;
+
+      exercises.forEach(exercise => {
+        if (exercise.questions && exercise.questions.length > 0) {
+          totalQuestions += exercise.questions.length;
+          const attempted = exercise.questions.filter(q =>
+            q.status === 'attempted' || q.status === 'evaluated' || q.submittedAt
+          ).length;
+          attemptedQuestions += attempted;
+
+          if (attempted > 0) {
+            completed++;
+          }
+        }
+      });
+
+      return {
+        completed,
+        total: exercises.length,
+        percentage: exercises.length > 0 ? Math.round((completed / exercises.length) * 100) : 0,
+        questionProgress: totalQuestions > 0 ? Math.round((attemptedQuestions / totalQuestions) * 100) : 0
+      };
+    };
+
     // Process analytics for each course
     const coursesAnalytics = coursesWithStudents.map(course => {
       const courseIdStr = course._id.toString();
       const courseStudents = course.singleParticipants || [];
-      
+
       // Filter only students (roleValue = 'Student')
       const studentParticipants = courseStudents.filter(participant => {
         const student = participant.user;
         if (!student || !student.role) return false;
-        
+
         const roleValue = student.role.roleValue || student.role.renameRole || '';
         return roleValue.toLowerCase() === 'student';
       });
-      
+
+      // Get course topics and extract pedagogy structure
+      const courseTopics = topicsByCourse[courseIdStr] || [];
+      const pedagogyStructure = extractPedagogyStructure(courseTopics);
+
+      // Count total exercises in course
+      const totalExercisesInCourse = courseTopics.reduce((total, topic) => {
+        if (topic.pedagogy && typeof topic.pedagogy === 'object') {
+          Object.keys(topic.pedagogy).forEach(pedagogyType => {
+            const pedagogySection = topic.pedagogy[pedagogyType];
+            if (pedagogySection && typeof pedagogySection === 'object') {
+              Object.keys(pedagogySection).forEach(category => {
+                const exercises = pedagogySection[category];
+                if (Array.isArray(exercises)) {
+                  total += exercises.length;
+                }
+              });
+            }
+          });
+        }
+        return total;
+      }, 0);
+
       // Process each student's progress
       const studentsAnalytics = studentParticipants.map(participant => {
         const student = participant.user;
         if (!student) return null;
 
-        // Find user from studentUsers for their answers
+        // Find user from studentUsers
         const userData = studentUsers.find(u => u._id.toString() === student._id.toString());
         if (!userData) return null;
 
         // Get student's course data
-        const studentCourse = userData.courses?.find(c => 
+        const studentCourse = userData.courses?.find(c =>
           c.courseId && c.courseId.toString() === courseIdStr
         );
 
-        if (!studentCourse?.answers) {
-          return {
-            student: {
-              _id: student._id,
-              firstName: student.firstName,
-              lastName: student.lastName,
-              email: student.email,
-              department: student.department,
-              role: {
-                renameRole: student.role?.renameRole,
-                originalRole: student.role?.originalRole,
-                roleValue: student.role?.roleValue
-              }
-            },
-            progress: {
-              overall: 0,
-              weDo: {
-                practical: { completed: 0, total: 0, percentage: 0 },
-                project_development: { completed: 0, total: 0, percentage: 0 },
-                others: { completed: 0, total: 0, percentage: 0 }
-              },
-              youDo: {
-                assessments: { completed: 0, total: 0, percentage: 0 }
-              }
-            }
-          };
-        }
+        const studentAnswers = studentCourse?.answers || {};
 
-        // Calculate We_Do progress
-        const weDoPractical = studentCourse.answers.We_Do?.practical || [];
-        const weDoProject = studentCourse.answers.We_Do?.project_development || [];
-        const weDoOthers = studentCourse.answers.We_Do?.others || [];
+        // Calculate progress for each pedagogy type and category dynamically
+        const progress = {};
+        let totalAttempts = 0;
+        let totalPossibleAttempts = 0;
 
-        // Calculate You_Do progress
-        const youDoAssessments = studentCourse.answers.You_Do?.assessments || [];
+        // Initialize progress structure
+        Object.keys(pedagogyStructure).forEach(pedagogyType => {
+          progress[pedagogyType] = {};
+          pedagogyStructure[pedagogyType].forEach(category => {
+            // Get student's answers for this category
+            const categoryAnswers = studentAnswers[pedagogyType]?.[category] || [];
+            const categoryProgress = calculateCompletion(categoryAnswers);
 
-        // Helper function to calculate completion
-        const calculateCompletion = (exercises) => {
-          if (!exercises || exercises.length === 0) return { completed: 0, total: 0, percentage: 0 };
-          
-          let completed = 0;
-          let totalQuestions = 0;
-          let attemptedQuestions = 0;
+            progress[pedagogyType][category] = categoryProgress;
 
-          exercises.forEach(exercise => {
-            if (exercise.questions && exercise.questions.length > 0) {
-              totalQuestions += exercise.questions.length;
-              const attempted = exercise.questions.filter(q => 
-                q.status === 'attempted' || q.status === 'evaluated' || q.submittedAt
-              ).length;
-              attemptedQuestions += attempted;
-              
-              if (attempted > 0) {
-                completed++;
-              }
-            }
+            // Count total attempts
+            totalAttempts += categoryProgress.completed;
+            totalPossibleAttempts += categoryProgress.total;
           });
+        });
 
-          return {
-            completed,
-            total: exercises.length,
-            percentage: exercises.length > 0 ? Math.round((completed / exercises.length) * 100) : 0,
-            questionProgress: totalQuestions > 0 ? Math.round((attemptedQuestions / totalQuestions) * 100) : 0
-          };
-        };
-
-        const practicalProgress = calculateCompletion(weDoPractical);
-        const projectProgress = calculateCompletion(weDoProject);
-        const othersProgress = calculateCompletion(weDoOthers);
-        const assessmentsProgress = calculateCompletion(youDoAssessments);
-
-        // Calculate overall progress (weighted average)
-        const weDoTotal = practicalProgress.total + projectProgress.total + othersProgress.total;
-        const weDoWeighted = 
-          (practicalProgress.percentage * practicalProgress.total +
-           projectProgress.percentage * projectProgress.total +
-           othersProgress.percentage * othersProgress.total) / 
-          (weDoTotal || 1);
-
-        const overallProgress = Math.round(
-          (weDoWeighted * 0.7) + (assessmentsProgress.percentage * 0.3)
-        );
+        // Calculate overall progress
+        const overallProgress = totalPossibleAttempts > 0
+          ? Math.round((totalAttempts / totalPossibleAttempts) * 100)
+          : 0;
 
         return {
           student: {
@@ -1492,42 +1539,45 @@ exports.staffStudentAnalytics = async (req, res) => {
           },
           progress: {
             overall: overallProgress,
-            weDo: {
-              practical: practicalProgress,
-              project_development: projectProgress,
-              others: othersProgress
-            },
-            youDo: {
-              assessments: assessmentsProgress
+            ...progress,
+            metadata: {
+              totalExercisesInCourse,
+              totalAttempts,
+              totalPossibleAttempts,
+              pedagogyStructure
             }
           },
-          lastActivity: studentCourse.lastAccessed || null
+          lastActivity: studentCourse?.lastAccessed || null
         };
       }).filter(student => student !== null);
 
       // Calculate course-level statistics
       const courseStats = {
         totalStudents: studentsAnalytics.length,
-        averageProgress: studentsAnalytics.length > 0 
+        averageProgress: studentsAnalytics.length > 0
           ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.overall, 0) / studentsAnalytics.length)
           : 0,
         completedStudents: studentsAnalytics.filter(s => s.progress.overall >= 80).length,
         inProgressStudents: studentsAnalytics.filter(s => s.progress.overall > 0 && s.progress.overall < 80).length,
         notStartedStudents: studentsAnalytics.filter(s => s.progress.overall === 0).length,
-        
-        weDoStats: {
-          practical: {
-            averageCompletion: studentsAnalytics.length > 0
-              ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.weDo.practical.percentage, 0) / studentsAnalytics.length)
-              : 0
-          },
-          project_development: {
-            averageCompletion: studentsAnalytics.length > 0
-              ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.weDo.project_development.percentage, 0) / studentsAnalytics.length)
-              : 0
-          }
-        }
+
+        // Dynamic category stats
+        categoryStats: {}
       };
+
+      // Calculate average completion for each pedagogy category
+      if (studentsAnalytics.length > 0) {
+        Object.keys(pedagogyStructure).forEach(pedagogyType => {
+          pedagogyStructure[pedagogyType].forEach(category => {
+            const categoryKey = `${pedagogyType}_${category}`;
+            courseStats.categoryStats[categoryKey] = {
+              averageCompletion: Math.round(studentsAnalytics.reduce((sum, s) =>
+                sum + (s.progress[pedagogyType]?.[category]?.percentage || 0), 0) / studentsAnalytics.length
+              )
+            };
+          });
+        });
+      }
 
       return {
         course: {
@@ -1539,7 +1589,8 @@ exports.staffStudentAnalytics = async (req, res) => {
           courseImage: course.courseImage,
           totalModules: modulesByCourse[courseIdStr]?.length || 0,
           totalParticipants: course.singleParticipants?.length || 0,
-          totalStudents: studentParticipants.length
+          totalStudents: studentParticipants.length,
+          pedagogyStructure // Include pedagogy structure in course info
         },
         stats: courseStats,
         students: studentsAnalytics
@@ -1553,21 +1604,37 @@ exports.staffStudentAnalytics = async (req, res) => {
       averageCourseProgress: coursesAnalytics.length > 0
         ? Math.round(coursesAnalytics.reduce((sum, course) => sum + course.stats.averageProgress, 0) / coursesAnalytics.length)
         : 0,
-      
+
       performanceDistribution: {
         excellent: coursesAnalytics.filter(course => course.stats.averageProgress >= 80).length,
         good: coursesAnalytics.filter(course => course.stats.averageProgress >= 50 && course.stats.averageProgress < 80).length,
         average: coursesAnalytics.filter(course => course.stats.averageProgress >= 30 && course.stats.averageProgress < 50).length,
         poor: coursesAnalytics.filter(course => course.stats.averageProgress < 30).length
       },
-      
-      weDoEngagement: {
-        practical: Math.round(coursesAnalytics.reduce((sum, course) => 
-          sum + course.stats.weDoStats.practical.averageCompletion, 0) / coursesAnalytics.length || 0),
-        project: Math.round(coursesAnalytics.reduce((sum, course) => 
-          sum + course.stats.weDoStats.project_development.averageCompletion, 0) / coursesAnalytics.length || 0)
-      }
+
+      // Collect all unique pedagogy categories across all courses
+      allPedagogyCategories: {}
     };
+
+    // Aggregate all pedagogy categories
+    coursesAnalytics.forEach(course => {
+      if (course.course.pedagogyStructure) {
+        Object.keys(course.course.pedagogyStructure).forEach(pedagogyType => {
+          if (!overallStats.allPedagogyCategories[pedagogyType]) {
+            overallStats.allPedagogyCategories[pedagogyType] = new Set();
+          }
+          course.course.pedagogyStructure[pedagogyType].forEach(category => {
+            overallStats.allPedagogyCategories[pedagogyType].add(category);
+          });
+        });
+      }
+    });
+
+    // Convert Sets to Arrays
+    Object.keys(overallStats.allPedagogyCategories).forEach(pedagogyType => {
+      overallStats.allPedagogyCategories[pedagogyType] =
+        Array.from(overallStats.allPedagogyCategories[pedagogyType]);
+    });
 
     res.status(200).json({
       success: true,
@@ -1588,16 +1655,15 @@ exports.staffStudentAnalytics = async (req, res) => {
   }
 };
 
-// Get detailed student progress for a specific course
 exports.getStudentCourseProgress = async (req, res) => {
   try {
     const { courseId, studentId } = req.params;
     const { institution } = req.user;
 
     // Get course details
-    const course = await CourseStructure.findOne({ 
-      _id: courseId, 
-      institution 
+    const course = await CourseStructure.findOne({
+      _id: courseId,
+      institution
     }).select('courseName courseCode courseLevel').lean();
 
     if (!course) {
@@ -1607,36 +1673,18 @@ exports.getStudentCourseProgress = async (req, res) => {
       });
     }
 
-    // First, find the Student role document
-    const studentRole = await Role.findOne({
-      institution,
-      $or: [
-        { roleValue: 'Student' },
-        { renameRole: 'Student' },
-        { originalRole: 'Student' }
-      ]
-    }).select('_id').lean();
-
-    if (!studentRole) {
-      return res.status(404).json({
-        success: false,
-        message: "Student role not found"
-      });
-    }
-
     // Get student details with role populated
     const student = await User.findOne({
       _id: studentId,
-      institution,
-      role: studentRole._id  // Use the ObjectId of the Student role
+      institution
     })
-    .select('firstName lastName email department phone role')
-    .populate({
-      path: 'role',
-      select: 'renameRole originalRole roleValue',
-      model: 'Role'
-    })
-    .lean();
+      .select('firstName lastName email department phone role')
+      .populate({
+        path: 'role',
+        select: 'renameRole originalRole roleValue',
+        model: 'Role'
+      })
+      .lean();
 
     if (!student) {
       return res.status(404).json({
@@ -1651,133 +1699,93 @@ exports.getStudentCourseProgress = async (req, res) => {
       'courses.courseId': courseId
     }).select('courses.$').lean();
 
-    if (!studentCourse?.courses?.[0]) {
-      return res.status(200).json({
-        success: true,
-        data: {
-          course,
-          student: {
-            _id: student._id,
-            firstName: student.firstName,
-            lastName: student.lastName,
-            email: student.email,
-            department: student.department,
-            phone: student.phone,
-            role: {
-              renameRole: student.role?.renameRole,
-              originalRole: student.role?.originalRole,
-              roleValue: student.role?.roleValue
-            }
-          },
-          progress: {
-            overall: 0,
-            exercises: []
-          }
-        }
-      });
-    }
-
-    const courseData = studentCourse.courses[0];
-    const answers = courseData.answers || {};
-
-    // Get all modules and their exercises for this course
-    const modules = await Module1.find({ courses: courseId })
-      .select('title')
+    // Get all topics for this course
+    const topics = await Topic1.find({
+      courses: courseId
+    })
+      .select('title pedagogy')
       .lean();
 
-    // Get all submodules and topics to map exercises
-    const subModules = await SubModule1.find({ 
-      moduleId: { $in: modules.map(m => m._id) } 
-    }).select('title moduleId').lean();
+    const answers = studentCourse?.courses?.[0]?.answers || {};
 
-    const topics = await Topic1.find({
-      $or: [
-        { moduleId: { $in: modules.map(m => m._id) } },
-        { subModuleId: { $in: subModules.map(sm => sm._id) } }
-      ]
-    }).select('title moduleId subModuleId').lean();
+    // Extract all exercises from topics dynamically
+    const allExercises = [];
+    const exerciseSummary = {};
 
-    // Process We_Do exercises
-    const weDoExercises = [];
-    
-    // Process practical exercises
-    if (answers.We_Do?.practical) {
-      answers.We_Do.practical.forEach((exercise, index) => {
-        weDoExercises.push({
-          type: 'We_Do',
-          category: 'practical',
-          exerciseId: exercise.exerciseId || `PRAC-${index + 1}`,
-          exerciseName: exercise.exerciseInformation?.exerciseName || `Practical Exercise ${index + 1}`,
-          status: exercise.questions?.some(q => q.status === 'evaluated') ? 'evaluated' :
-                 exercise.questions?.some(q => q.status === 'attempted') ? 'attempted' : 'not_started',
-          completedQuestions: exercise.questions?.filter(q => 
-            q.status === 'attempted' || q.status === 'evaluated'
-          ).length || 0,
-          totalQuestions: exercise.questions?.length || 0,
-          score: exercise.score || 0,
-          maxScore: exercise.maxScore || 0,
-          lastAttempt: exercise.lastAttempt,
-          attempts: exercise.attempts || 0
+    topics.forEach(topic => {
+      if (topic.pedagogy && typeof topic.pedagogy === 'object') {
+        Object.keys(topic.pedagogy).forEach(pedagogyType => {
+          const pedagogySection = topic.pedagogy[pedagogyType];
+          if (pedagogySection && typeof pedagogySection === 'object') {
+
+            // Initialize summary structure
+            if (!exerciseSummary[pedagogyType]) {
+              exerciseSummary[pedagogyType] = {};
+            }
+
+            Object.keys(pedagogySection).forEach(category => {
+              const exercises = pedagogySection[category];
+              if (Array.isArray(exercises)) {
+
+                // Initialize category array in summary
+                if (!exerciseSummary[pedagogyType][category]) {
+                  exerciseSummary[pedagogyType][category] = [];
+                }
+
+                exercises.forEach((exercise, index) => {
+                  if (!exercise) return;
+
+                  // Find student's answer for this exercise
+                  const exerciseAnswers = answers[pedagogyType]?.[category] || [];
+                  const studentAnswer = exerciseAnswers.find(a =>
+                    a.exerciseId === exercise.exerciseId
+                  );
+
+                  const questions = studentAnswer?.questions || exercise.questions || [];
+                  const completedQuestions = questions.filter(q =>
+                    q.status === 'attempted' || q.status === 'evaluated' || q.submittedAt
+                  ).length;
+
+                  const exerciseData = {
+                    type: pedagogyType,
+                    category: category,
+                    exerciseId: exercise.exerciseId || `${pedagogyType}-${category}-${index + 1}`,
+                    exerciseName: exercise.exerciseInformation?.exerciseName ||
+                      `${pedagogyType} ${category} ${index + 1}`,
+                    status: questions.some(q => q.status === 'evaluated') ? 'evaluated' :
+                      questions.some(q => q.status === 'attempted') ? 'attempted' : 'not_started',
+                    completedQuestions,
+                    totalQuestions: questions.length || 0,
+                    score: studentAnswer?.score || exercise.score || 0,
+                    maxScore: studentAnswer?.maxScore || exercise.maxScore || 0,
+                    lastAttempt: studentAnswer?.lastAttempt || exercise.lastAttempt,
+                    attempts: studentAnswer?.attempts || exercise.attempts || 0,
+                    submissionDate: studentAnswer?.submittedAt || exercise.submittedAt,
+                    evaluated: studentAnswer?.evaluated || exercise.evaluated || false,
+                    metadata: {
+                      topicTitle: topic.title,
+                      exerciseInfo: exercise.exerciseInformation || {}
+                    }
+                  };
+
+                  allExercises.push(exerciseData);
+                  exerciseSummary[pedagogyType][category].push(exerciseData);
+                });
+              }
+            });
+          }
         });
-      });
-    }
+      }
+    });
 
-    // Process project development exercises
-    if (answers.We_Do?.project_development) {
-      answers.We_Do.project_development.forEach((exercise, index) => {
-        weDoExercises.push({
-          type: 'We_Do',
-          category: 'project_development',
-          exerciseId: exercise.exerciseId || `PROJ-${index + 1}`,
-          exerciseName: exercise.exerciseInformation?.exerciseName || `Project Exercise ${index + 1}`,
-          status: exercise.questions?.some(q => q.status === 'evaluated') ? 'evaluated' :
-                 exercise.questions?.some(q => q.status === 'attempted') ? 'attempted' : 'not_started',
-          completedQuestions: exercise.questions?.filter(q => 
-            q.status === 'attempted' || q.status === 'evaluated'
-          ).length || 0,
-          totalQuestions: exercise.questions?.length || 0,
-          score: exercise.score || 0,
-          maxScore: exercise.maxScore || 0,
-          lastAttempt: exercise.lastAttempt,
-          attempts: exercise.attempts || 0
-        });
-      });
-    }
-
-    // Process You_Do assessments
-    const youDoExercises = [];
-    if (answers.You_Do?.assessments) {
-      answers.You_Do.assessments.forEach((assessment, index) => {
-        youDoExercises.push({
-          type: 'You_Do',
-          category: 'assessment',
-          exerciseId: assessment.exerciseId || `ASSESS-${index + 1}`,
-          exerciseName: assessment.exerciseInformation?.exerciseName || `Assessment ${index + 1}`,
-          status: assessment.status || 'not_started',
-          completedQuestions: assessment.questions?.filter(q => 
-            q.status === 'attempted' || q.status === 'evaluated'
-          ).length || 0,
-          totalQuestions: assessment.questions?.length || 0,
-          score: assessment.score || 0,
-          maxScore: assessment.maxScore || 0,
-          lastAttempt: assessment.lastAttempt,
-          attempts: assessment.attempts || 0,
-          submissionDate: assessment.submittedAt,
-          evaluated: assessment.evaluated || false
-        });
-      });
-    }
-
-    const allExercises = [...weDoExercises, ...youDoExercises];
-    
     // Calculate overall progress
     const totalExercises = allExercises.length;
-    const completedExercises = allExercises.filter(e => 
+    const completedExercises = allExercises.filter(e =>
       e.status === 'evaluated' || e.completedQuestions > 0
     ).length;
-    
-    const overallProgress = totalExercises > 0 
-      ? Math.round((completedExercises / totalExercises) * 100) 
+
+    const overallProgress = totalExercises > 0
+      ? Math.round((completedExercises / totalExercises) * 100)
       : 0;
 
     // Calculate average score
@@ -1785,6 +1793,25 @@ exports.getStudentCourseProgress = async (req, res) => {
     const averageScore = scoredExercises.length > 0
       ? Math.round(scoredExercises.reduce((sum, e) => sum + e.score, 0) / scoredExercises.length)
       : 0;
+
+    // Generate dynamic statistics
+    const categoryStats = {};
+    Object.keys(exerciseSummary).forEach(pedagogyType => {
+      categoryStats[pedagogyType] = {};
+      Object.keys(exerciseSummary[pedagogyType]).forEach(category => {
+        const categoryExercises = exerciseSummary[pedagogyType][category];
+        const completed = categoryExercises.filter(e => e.status === 'evaluated' || e.completedQuestions > 0).length;
+
+        categoryStats[pedagogyType][category] = {
+          total: categoryExercises.length,
+          completed: completed,
+          percentage: categoryExercises.length > 0 ? Math.round((completed / categoryExercises.length) * 100) : 0,
+          averageScore: categoryExercises.length > 0
+            ? Math.round(categoryExercises.reduce((sum, e) => sum + e.score, 0) / categoryExercises.length)
+            : 0
+        };
+      });
+    });
 
     res.status(200).json({
       success: true,
@@ -1809,17 +1836,10 @@ exports.getStudentCourseProgress = async (req, res) => {
           totalExercises,
           completedExercises,
           pendingExercises: totalExercises - completedExercises,
-          exercises: allExercises
+          exercises: allExercises,
+          categoryStats
         },
-        summary: {
-          weDo: {
-            practical: weDoExercises.filter(e => e.category === 'practical'),
-            project_development: weDoExercises.filter(e => e.category === 'project_development')
-          },
-          youDo: {
-            assessments: youDoExercises
-          }
-        }
+        summary: exerciseSummary
       }
     });
 
@@ -2057,7 +2077,16 @@ const modelMap = {
   topics: { model: Topic1, path: "topics" },
   subtopics: { model: SubTopic1, path: "subtopics" },
 };
-
+// ─── getModel helper ──────────────────────────────────────────────────────────
+function getModel(type) {
+  const map = {
+    module:    mongoose.model("Module1"),
+    submodule: mongoose.model("SubModule1"),
+    topic:     mongoose.model("Topic1"),
+    subtopic:  mongoose.model("SubTopic1"),
+  };
+  return map[type] || null;
+}
 // Normalize duration
 const normalizeDuration = (duration) => {
   if (!duration) return null;
@@ -2068,8 +2097,9 @@ const normalizeDuration = (duration) => {
 };
 
 
+
 class VideoProcessor {
-  static async processVideo(inputBuffer, fileName, targetResolutions = ['2160p', '1440p', '1080p', '720p', '480p', '360p','240p']) {
+  static async processVideo(inputBuffer, fileName, targetResolutions = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p']) {
     const tempDir = path.join(__dirname, '../temp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -2097,15 +2127,15 @@ class VideoProcessor {
 
       // Get video information
       const videoInfo = await this.getVideoInfo(inputPath);
-      
+
       console.log(`📊 Original video info: ${videoInfo.width}x${videoInfo.height}, duration: ${videoInfo.duration}s`);
-      
+
       // Filter resolutions based on original video quality
       const supportedResolutions = this.getSupportedResolutions(videoInfo.width, targetResolutions);
       console.log(`🎯 Target resolutions: ${supportedResolutions.join(', ')}`);
 
       // Process each supported resolution in parallel
-      const processingPromises = supportedResolutions.map(resolution => 
+      const processingPromises = supportedResolutions.map(resolution =>
         this.convertResolution(inputPath, baseFileName, resolution, videoInfo, uniqueId)
       );
 
@@ -2115,7 +2145,7 @@ class VideoProcessor {
 
       // Wait for all conversions to complete
       const results = await Promise.allSettled(processingPromises);
-      
+
       // Combine successful results
       results.forEach((result, index) => {
         if (result.status === 'fulfilled' && result.value) {
@@ -2159,7 +2189,7 @@ class VideoProcessor {
     return new Promise((resolve, reject) => {
       ffmpeg.ffprobe(inputPath, (err, metadata) => {
         if (err) return reject(err);
-        
+
         const videoStream = metadata.streams.find(stream => stream.codec_type === 'video');
         if (!videoStream) {
           return reject(new Error('No video stream found'));
@@ -2293,17 +2323,17 @@ class VideoProcessor {
     return new Promise((resolve, reject) => {
       ffmpeg.ffprobe(filePath, (err, metadata) => {
         if (err) return reject(err);
-        
+
         const videoStream = metadata.streams.find(s => s.codec_type === 'video');
         const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
-        
+
         console.log('📊 Video validation:', {
           videoCodec: videoStream?.codec_name,
           audioCodec: audioStream?.codec_name,
           duration: metadata.format.duration,
           size: metadata.format.size
         });
-        
+
         resolve({
           isValid: videoStream?.codec_name === 'h264' && audioStream?.codec_name === 'aac',
           metadata
@@ -2333,11 +2363,122 @@ class VideoProcessor {
   }
 }
 
+const findOrCreateFolder = (folders, pathParts) => {
+  if (!Array.isArray(folders)) {
+    folders = [];
+  }
+
+  if (pathParts.length === 0) {
+    return { folders, targetFolder: null };
+  }
+
+  const [current, ...rest] = pathParts;
+  let folder = folders.find((f) => f.name === current);
+
+  if (!folder) {
+    console.log(`📁 Creating new folder: ${current}`);
+    folder = {
+      _id: new mongoose.Types.ObjectId(),
+      name: current,
+      files: [],
+      subfolders: [],
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    folders.push(folder);
+  }
+
+  // Ensure arrays exist
+  if (!Array.isArray(folder.files)) folder.files = [];
+  if (!Array.isArray(folder.subfolders)) folder.subfolders = [];
+
+  if (rest.length > 0) {
+    return findOrCreateFolder(folder.subfolders, rest);
+  }
+
+  return { folders: folder.subfolders, targetFolder: folder };
+};
+const findFolderByPathForNav = (folders, pathParts) => {
+  if (!Array.isArray(folders) || pathParts.length === 0) {
+    return { folders: [], targetFolder: null };
+  }
+
+  const [current, ...rest] = pathParts;
+  const folder = folders.find((f) => f.name === current);
+
+  if (!folder) return { folders: [], targetFolder: null };
+
+  if (rest.length === 0) {
+    return {
+      folders: Array.isArray(folder.subfolders) ? folder.subfolders : [],
+      files: Array.isArray(folder.files) ? folder.files : [],
+      targetFolder: folder
+    };
+  }
+
+  if (!Array.isArray(folder.subfolders)) {
+    return { folders: [], targetFolder: null };
+  }
+
+  return findFolderByPathForNav(folder.subfolders, rest);
+};
+
+const findFolderByPath = (folders, pathParts) => {
+  if (!Array.isArray(folders)) {
+    return null;
+  }
+
+  if (pathParts.length === 0) return { folders };
+
+  const [current, ...rest] = pathParts;
+  const folder = folders.find((f) => f.name === current);
+
+  if (!folder) return null;
+  if (rest.length === 0) return { parent: folders, folder, index: folders.indexOf(folder) };
+
+  if (!Array.isArray(folder.subfolders)) {
+    return null;
+  }
+
+  return findFolderByPath(folder.subfolders, rest);
+};
+
+const findFileById = (pedagogyElement, fileId) => {
+  const filesArray = Array.isArray(pedagogyElement.files) ? pedagogyElement.files : [];
+
+  const rootFile = filesArray.find(f => f._id && f._id.toString() === fileId);
+  if (rootFile) {
+    return { parent: filesArray, file: rootFile, index: filesArray.indexOf(rootFile) };
+  }
+
+  const searchInFolders = (folders) => {
+    if (!Array.isArray(folders)) {
+      return null;
+    }
+
+    for (let folder of folders) {
+      const folderFiles = Array.isArray(folder.files) ? folder.files : [];
+      const fileInFolder = folderFiles.find(f => f._id && f._id.toString() === fileId);
+
+      if (fileInFolder) {
+        return { parent: folderFiles, file: fileInFolder, index: folderFiles.indexOf(fileInFolder) };
+      }
+
+      const result = searchInFolders(folder.subfolders);
+      if (result) return result;
+    }
+    return null;
+  };
+
+  const foldersArray = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
+  return searchInFolders(foldersArray);
+};
+
 // Upload Original Video (Fallback)
 const uploadOriginalVideo = async (file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement, supabase) => {
   const uniqueFileName = `${Date.now()}_${file.name}`;
   const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
-  
+
   // Store in resolutions/base folder
   const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/resolutions/base/${uniqueFileName}`;
 
@@ -2379,13 +2520,13 @@ const uploadOriginalVideo = async (file, type, section, name, pathParts, targetF
 // Upload to Resolution Specific Folder
 const uploadToResolutionFolder = async (fileBuffer, fileName, resolution, type, section, name, pathParts) => {
   const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
-  
+
   // Store in resolutions/{resolution} folder
   const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/resolutions/${resolution}/${fileName}`;
 
   const { error: uploadError } = await supabase.storage
     .from("smartlms")
-    .upload(storagePath, fileBuffer, { 
+    .upload(storagePath, fileBuffer, {
       contentType: 'video/mp4',
       upsert: true
     });
@@ -2402,7 +2543,7 @@ const deleteFromResolutionFolder = async (fileUrl, type, section, name, pathPart
   try {
     // Extract the path after "smartlms/" to get the storage path
     const storagePath = fileUrl.split('/storage/v1/object/public/smartlms/')[1];
-    
+
     if (storagePath) {
       const { error: deleteError } = await supabase.storage
         .from("smartlms")
@@ -2435,120 +2576,14 @@ const debugFolderStructure = (folders, depth = 0) => {
   });
 };
 
-
-const findOrCreateFolder = (folders, pathParts) => {
-    if (!Array.isArray(folders)) {
-        folders = [];
-    }
-    
-    if (pathParts.length === 0) {
-        return { folders, targetFolder: null };
-    }
-
-    const [current, ...rest] = pathParts;
-    let folder = folders.find((f) => f.name === current);
-
-    if (!folder) {
-        console.log(`📁 Creating new folder: ${current}`);
-        folder = { 
-            _id: new mongoose.Types.ObjectId(),
-            name: current, 
-            files: [], 
-            subfolders: [],
-            createdAt: new Date(),
-            updatedAt: new Date()
-        };
-        folders.push(folder);
-    }
-
-    // Ensure arrays exist
-    if (!Array.isArray(folder.files)) folder.files = [];
-    if (!Array.isArray(folder.subfolders)) folder.subfolders = [];
-
-    if (rest.length > 0) {
-        return findOrCreateFolder(folder.subfolders, rest);
-    }
-    
-    return { folders: folder.subfolders, targetFolder: folder };
-};
-const findFolderByPathForNav = (folders, pathParts) => {
-  if (!Array.isArray(folders) || pathParts.length === 0) {
-    return { folders: [], targetFolder: null };
+function extractFileNameFromUrl(url) {
+  try {
+    const decoded = decodeURIComponent(url);
+    return decoded.split('/').pop().split('?')[0] || "external_link";
+  } catch {
+    return "external_link";
   }
-
-  const [current, ...rest] = pathParts;
-  const folder = folders.find((f) => f.name === current);
-
-  if (!folder) return { folders: [], targetFolder: null };
-  
-  if (rest.length === 0) {
-    return { 
-      folders: Array.isArray(folder.subfolders) ? folder.subfolders : [], 
-      files: Array.isArray(folder.files) ? folder.files : [],
-      targetFolder: folder 
-    };
-  }
-
-  if (!Array.isArray(folder.subfolders)) {
-    return { folders: [], targetFolder: null };
-  }
-  
-  return findFolderByPathForNav(folder.subfolders, rest);
-};
-
-const findFolderByPath = (folders, pathParts) => {
-  if (!Array.isArray(folders)) {
-    return null;
-  }
-  
-  if (pathParts.length === 0) return { folders };
-
-  const [current, ...rest] = pathParts;
-  const folder = folders.find((f) => f.name === current);
-
-  if (!folder) return null;
-  if (rest.length === 0) return { parent: folders, folder, index: folders.indexOf(folder) };
-
-  if (!Array.isArray(folder.subfolders)) {
-    return null;
-  }
-  
-  return findFolderByPath(folder.subfolders, rest);
-};
-
-const findFileById = (pedagogyElement, fileId) => {
-  const filesArray = Array.isArray(pedagogyElement.files) ? pedagogyElement.files : [];
-  
-  const rootFile = filesArray.find(f => f._id && f._id.toString() === fileId);
-  if (rootFile) {
-    return { parent: filesArray, file: rootFile, index: filesArray.indexOf(rootFile) };
-  }
-
-  const searchInFolders = (folders) => {
-    if (!Array.isArray(folders)) {
-      return null;
-    }
-    
-    for (let folder of folders) {
-      const folderFiles = Array.isArray(folder.files) ? folder.files : [];
-      const fileInFolder = folderFiles.find(f => f._id && f._id.toString() === fileId);
-      
-      if (fileInFolder) {
-        return { parent: folderFiles, file: fileInFolder, index: folderFiles.indexOf(fileInFolder) };
-      }
-      
-      const result = searchInFolders(folder.subfolders);
-      if (result) return result;
-    }
-    return null;
-  };
-
-  const foldersArray = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
-  return searchInFolders(foldersArray);
-};
-
-
-
+}
 
 exports.updateEntity = async (req, res) => {
   try {
@@ -2564,6 +2599,7 @@ exports.updateEntity = async (req, res) => {
       return res.status(404).json({ message: [{ key: "error", value: `${type} not found` }] });
     }
 
+    // Parse body fields
     const {
       courses,
       moduleId,
@@ -2585,8 +2621,8 @@ exports.updateEntity = async (req, res) => {
       showToStudents,
       allowDownload,
       selectedFileType,
-            fileDescription, // NEW: Add file description
-      tags, // NEW: Add tags
+      fileDescription,
+      tags,
     } = req.body;
 
     // Update simple fields
@@ -2609,127 +2645,342 @@ exports.updateEntity = async (req, res) => {
     const name = subcategory;
 
     if (!entity.pedagogy[section]) entity.pedagogy[section] = new Map();
-    
+
     if (!entity.pedagogy[section].get(name)) {
-      entity.pedagogy[section].set(name, { 
-        description: "", 
-        files: [], 
-        folders: []
+      entity.pedagogy[section].set(name, {
+        description: "",
+        files: [],
+        folders: [],
+        pages: []
       });
     }
 
     const pedagogyElement = entity.pedagogy[section].get(name);
 
+    // Ensure arrays exist
     if (!Array.isArray(pedagogyElement.files)) {
       pedagogyElement.files = [];
     }
     if (!Array.isArray(pedagogyElement.folders)) {
       pedagogyElement.folders = [];
     }
+    if (!Array.isArray(pedagogyElement.pages)) {
+      pedagogyElement.pages = [];
+    }
 
-    // FILE SETTINGS UPDATE ACTION
-    if (action === 'updateFileSettings' && updateFileId) {
-      // Get showToStudents and allowDownload from req.body
-      const showToStudentsValue = req.body.showToStudents === 'true' || req.body.showToStudents === true;
-      const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
-  const fileDescriptionValue = req.body.fileDescription || ""; // Get file description
-  const tagsValue = req.body.tags || []; // Get tags
-      const fileResult = findFileById(pedagogyElement, updateFileId);
-      
-      if (!fileResult) {
-        return res.status(404).json({ 
-          message: [{ key: "error", value: "File not found" }] 
-        });
+    // Parse folder path
+    let parsedFolderPath = [];
+    if (folderPath) {
+      if (Array.isArray(folderPath)) {
+        parsedFolderPath = folderPath;
+      } else if (typeof folderPath === 'string') {
+        try {
+          parsedFolderPath = JSON.parse(folderPath);
+        } catch (e) {
+          parsedFolderPath = folderPath.split('/').filter(Boolean);
+        }
       }
-   if (fileDescriptionValue !== undefined) {
-    fileResult.file.fileDescription = fileDescriptionValue;
+    }
+
+// FILE UPDATE HANDLING
+if (isUpdate === 'true' && updateFileId) {
+  console.log('📝 Processing file update:', { updateFileId, section, name, folderPath: parsedFolderPath });
+
+  // Check if this is a metadata-only update (no files uploaded)
+  const isMetadataOnly = !req.files || !req.files.files;
+  
+  const searchResult = findFileInPedagogyStructureSafe(pedagogyElement, updateFileId);
+
+  if (!searchResult) {
+    console.error('❌ File not found for update:', updateFileId);
+    return res.status(404).json({
+      message: [{ key: "error", value: "File not found" }]
+    });
   }
 
-  // Update tags
-  if (tagsValue) {
+  const { container, filesArray, file, fileIndex, location, folderPath: fileFolderPath } = searchResult;
+
+  // Get values from request
+  const showToStudentsValue = showToStudents === 'true' || showToStudents === true;
+  const allowDownloadValue = allowDownload === 'true' || allowDownload === true;
+  const fileDescriptionValue = fileDescription || file.fileDescription || "";
+  const updateFileName = req.body.updateFileName || file.fileName;
+
+  // Parse tags
+  let parsedTags = [];
+  if (tags) {
     try {
-      const parsedTags = typeof tagsValue === 'string' ? JSON.parse(tagsValue) : tagsValue;
-      if (Array.isArray(parsedTags)) {
-        fileResult.file.tags = parsedTags.map(tag => ({
-          tagName: tag.tagName || tag.name || '',
-          tagColor: tag.tagColor || tag.color || '#3B82F6'
-        }));
+      let raw = tags;
+      while (typeof raw === 'string') {
+        raw = JSON.parse(raw);
       }
+      parsedTags = Array.isArray(raw) ? raw.map((t) => ({
+        tagName: t.tagName || t.name || "",
+        tagColor: t.tagColor || t.color || "#3B82F6",
+      })) : [];
     } catch (error) {
       console.error("Error parsing tags:", error);
+      parsedTags = [];
     }
   }
 
-      // Ensure fileSettings object exists
-      if (!fileResult.file.fileSettings) {
-        fileResult.file.fileSettings = {};
+  // If metadata-only update (no files uploaded)
+  if (isMetadataOnly) {
+    console.log('📝 Metadata-only update for file:', updateFileId);
+    
+    // Create updated file WITHOUT spreading to avoid circular references
+    const updatedFile = {
+      _id: file._id,
+      fileName: updateFileName || file.fileName,
+      fileType: file.fileType,
+      fileUrl: file.fileUrl, // Keep existing file URLs
+      size: file.size,
+      uploadedAt: file.uploadedAt,
+      updatedAt: new Date(),
+      isVideo: file.isVideo || false,
+      availableResolutions: file.availableResolutions || [],
+      fileDescription: fileDescriptionValue,
+      tags: parsedTags.length > 0 ? parsedTags : (file.tags || []),
+      fileSettings: {
+        showToStudents: showToStudentsValue,
+        allowDownload: allowDownloadValue,
+        lastModified: new Date()
+      },
+      isReference: file.isReference || false
+    };
+
+    // Add optional fields if they exist
+    if (file.mcqQuestions) updatedFile.mcqQuestions = file.mcqQuestions;
+
+    filesArray[fileIndex] = updatedFile;
+
+    if (location === 'folder') {
+      entity.markModified(`pedagogy.${section}.${name}.folders`);
+    } else {
+      entity.markModified(`pedagogy.${section}.${name}.files`);
+    }
+
+    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
+    entity.updatedAt = new Date();
+
+    const savedEntity = await entity.save();
+
+    console.log('✅ File metadata updated successfully:', updateFileId);
+
+    return res.status(200).json({
+      message: [{ key: "success", value: "File metadata updated successfully" }],
+      data: savedEntity,
+    });
+  }
+
+  // If files are uploaded, proceed with file content update
+  if (req.files && req.files.files) {
+    const files = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
+    const fileToUpdate = files[0];
+    
+    console.log(`🔄 Updating file content: ${fileToUpdate.name}`);
+
+    const isVideo = fileToUpdate.mimetype && fileToUpdate.mimetype.startsWith('video/');
+
+    try {
+      if (isVideo) {
+        const targetResolutions = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p'];
+
+        const processedVersions = await VideoProcessor.processVideo(
+          fileToUpdate.data,
+          fileToUpdate.name,
+          targetResolutions
+        );
+
+        // Delete old files
+        if (file.fileUrl instanceof Map) {
+          for (const [resolution, oldFileUrl] of file.fileUrl) {
+            try {
+              await deleteFromResolutionFolder(oldFileUrl, type, section, name, fileFolderPath);
+            } catch (delError) {
+              console.warn(`⚠️ Could not delete old ${resolution}:`, delError.message);
+            }
+          }
+        }
+
+        const fileUrlMap = new Map();
+        const availableResolutions = [];
+
+        for (const [resolution, processedFile] of Object.entries(processedVersions)) {
+          if (processedFile && processedFile.buffer) {
+            try {
+              const uploadPath = parsedFolderPath.length > 0 ? parsedFolderPath : fileFolderPath;
+              const fileUrl = await uploadToResolutionFolder(
+                processedFile.buffer,
+                processedFile.fileName,
+                resolution,
+                type,
+                section,
+                name,
+                uploadPath
+              );
+
+              fileUrlMap.set(resolution, fileUrl);
+              availableResolutions.push(resolution);
+            } catch (uploadError) {
+              console.error(`Failed to upload ${resolution}:`, uploadError.message);
+            }
+          }
+        }
+
+        const updatedFile = {
+          _id: file._id,
+          fileName: fileToUpdate.name,
+          fileType: fileToUpdate.mimetype,
+          fileUrl: fileUrlMap,
+          size: fileToUpdate.size.toString(),
+          uploadedAt: new Date(),
+          updatedAt: new Date(),
+          isVideo: true,
+          availableResolutions: availableResolutions.sort((a, b) => {
+            const order = { '2160p': 7, '1440p': 6, '1080p': 5, '720p': 4, '480p': 3, '360p': 2, '240p': 1, 'base': 0 };
+            return (order[b] || 0) - (order[a] || 0);
+          }),
+          fileDescription: fileDescriptionValue,
+          tags: parsedTags.length > 0 ? parsedTags : (file.tags || []),
+          fileSettings: {
+            showToStudents: showToStudentsValue,
+            allowDownload: allowDownloadValue,
+            lastModified: new Date()
+          },
+          isReference: file.isReference || false
+        };
+
+        filesArray[fileIndex] = updatedFile;
+
+      } else {
+        const uniqueFileName = `${Date.now()}_${fileToUpdate.name}`;
+        const storageFolderPath = parsedFolderPath.length > 0 ? parsedFolderPath.join('/') : (fileFolderPath.length > 0 ? fileFolderPath.join('/') : "root");
+        const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("smartlms")
+          .upload(storagePath, fileToUpdate.data, { contentType: fileToUpdate.mimetype });
+
+        if (uploadError) {
+          throw new Error(`Upload failed: ${uploadError.message}`);
+        }
+
+        const fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${storagePath}`;
+        const fileUrlMap = new Map();
+        fileUrlMap.set('base', fileUrl);
+
+        if (file.fileUrl instanceof Map) {
+          for (const [resolution, oldFileUrl] of file.fileUrl) {
+            await deleteFromResolutionFolder(oldFileUrl, type, section, name, fileFolderPath);
+          }
+        } else if (file.fileUrl) {
+          await deleteFromResolutionFolder(file.fileUrl, type, section, name, fileFolderPath);
+        }
+
+        const updatedFile = {
+          _id: file._id,
+          fileName: fileToUpdate.name,
+          fileType: fileToUpdate.mimetype,
+          fileUrl: fileUrlMap,
+          size: fileToUpdate.size.toString(),
+          uploadedAt: new Date(),
+          updatedAt: new Date(),
+          isVideo: false,
+          fileDescription: fileDescriptionValue,
+          tags: parsedTags.length > 0 ? parsedTags : (file.tags || []),
+          fileSettings: {
+            showToStudents: showToStudentsValue,
+            allowDownload: allowDownloadValue,
+            lastModified: new Date()
+          },
+          isReference: file.isReference || false
+        };
+
+        filesArray[fileIndex] = updatedFile;
       }
 
-      // Update file settings
-      fileResult.file.fileSettings = {
-        showToStudents: showToStudentsValue !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
-        allowDownload: allowDownloadValue !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
-        lastModified: new Date()
-      };
-
-      // Mark the entity as modified
-      entity.markModified(`pedagogy.${section}.${name}`);
+      if (location === 'folder') {
+        entity.markModified(`pedagogy.${section}.${name}.folders`);
+      } else {
+        entity.markModified(`pedagogy.${section}.${name}.files`);
+      }
 
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = new Date();
 
-      const updatedEntity = await entity.save();
+      const savedEntity = await entity.save();
+
+      console.log('✅ File content and metadata updated successfully:', updateFileId);
 
       return res.status(200).json({
-        message: [{ key: "success", value: "File settings updated successfully" }],
-        data: updatedEntity,
+        message: [{ key: "success", value: "File updated successfully" }],
+        data: savedEntity,
+      });
+
+    } catch (processError) {
+      console.error('Error during file update:', processError);
+      return res.status(500).json({
+        message: [{ key: "error", value: "Failed to process file update: " + processError.message }]
       });
     }
-
+  }
+  
+  // If we get here, something is wrong
+  return res.status(400).json({
+    message: [{ key: "error", value: "Invalid update request" }]
+  });
+}
     // FOLDER CREATION
     if (action === 'createFolder' && folderName) {
-      const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
-      
-      console.log('🔍 BACKEND FOLDER CREATION:', {
-        section,
-        name,
-        folderPath,
-        pathParts,
-        folderName,
-        existingFolders: pedagogyElement.folders ? pedagogyElement.folders.length : 0
-      });
+      const pathParts = folderPath ? (Array.isArray(folderPath) ? folderPath : folderPath.split("/").filter(p => p)) : [];
 
       if (!Array.isArray(pedagogyElement.folders)) {
         pedagogyElement.folders = [];
       }
 
       let targetFolders = pedagogyElement.folders;
-      
+
       if (pathParts.length > 0) {
         for (const pathPart of pathParts) {
           let foundFolder = targetFolders.find(f => f.name === pathPart);
-          
+
           if (!foundFolder) {
-            console.log('❌ Parent folder not found:', pathPart);
-            return res.status(404).json({ 
-              message: [{ key: "error", value: `Parent folder '${pathPart}' not found` }] 
+            return res.status(404).json({
+              message: [{ key: "error", value: `Parent folder '${pathPart}' not found` }]
             });
           }
-          
+
           if (!Array.isArray(foundFolder.subfolders)) {
             foundFolder.subfolders = [];
           }
-          
+
           targetFolders = foundFolder.subfolders;
         }
       }
 
       const existingFolder = targetFolders.find(f => f.name === folderName);
       if (existingFolder) {
-        console.log('❌ Folder already exists:', folderName);
-        return res.status(400).json({ 
-          message: [{ key: "error", value: `Folder '${folderName}' already exists` }] 
+        return res.status(400).json({
+          message: [{ key: "error", value: `Folder '${folderName}' already exists` }]
         });
+      }
+
+      let parsedTags = [];
+      if (tags) {
+        try {
+          let raw = tags;
+          while (typeof raw === 'string') {
+            raw = JSON.parse(raw);
+          }
+          parsedTags = Array.isArray(raw) ? raw.filter(t => t.tagName && t.tagName.trim()).map((t) => ({
+            tagName:  t.tagName  || t.name  || "",
+            tagColor: t.tagColor || t.color || "#3B82F6",
+          })) : [];
+        } catch (error) {
+          console.error("Error parsing tags:", error);
+          parsedTags = [];
+        }
       }
 
       const newFolder = {
@@ -2737,65 +2988,155 @@ exports.updateEntity = async (req, res) => {
         name: folderName,
         files: [],
         subfolders: [],
+        tags: parsedTags,
+        pages: [],
         createdAt: new Date(),
         updatedAt: new Date()
       };
 
-      console.log('📁 Adding new folder to target:', {
-        targetLocation: pathParts.length > 0 ? `inside ${pathParts.join('/')}` : 'root',
-        targetFoldersCount: targetFolders.length,
-        newFolderName: folderName
-      });
-
       targetFolders.push(newFolder);
-      
-      entity.markModified(`pedagogy.${section}.${name}`);
-      
+
+      entity.markModified(`pedagogy.${section}.${name}.folders`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = new Date();
 
-      try {
-        const updatedEntity = await entity.save();
+      const updatedEntity = await entity.save();
 
-        console.log('✅ Folder created successfully in database at location:', 
-          pathParts.length > 0 ? `${pathParts.join('/')}/${folderName}` : folderName);
+      return res.status(200).json({
+        message: [{ key: "success", value: `Folder '${folderName}' created successfully` }],
+        data: updatedEntity,
+      });
+    }
 
-        return res.status(200).json({
-          message: [{ key: "success", value: `Folder '${folderName}' created successfully` }],
-          data: updatedEntity,
-        });
-      } catch (saveError) {
-        console.error('❌ Failed to save folder to database:', saveError);
-        return res.status(500).json({ 
-          message: [{ key: "error", value: "Failed to save folder to database" }] 
-        });
+    // FOLDER UPDATE
+   // FOLDER UPDATE
+if (action === 'updateFolder' && folderName) {
+  const pathParts = folderPath ? (Array.isArray(folderPath) ? folderPath : folderPath.split("/").filter(p => p)) : [];
+  const originalFolderName = req.body.originalFolderName;
+
+  if (!originalFolderName) {
+    return res.status(400).json({
+      message: [{ key: "error", value: "originalFolderName is required for folder update" }]
+    });
+  }
+
+  // Parse tags for folder update
+  let parsedTags = [];
+  const tagsRaw = req.body.tags;
+  
+  console.log('📝 Raw tags value for folder update:', tagsRaw, 'Type:', typeof tagsRaw);
+
+  if (tagsRaw) {
+    try {
+      let tagsData = tagsRaw;
+      if (typeof tagsRaw === 'string') {
+        tagsData = JSON.parse(tagsRaw);
+      }
+
+      if (Array.isArray(tagsData)) {
+        parsedTags = tagsData
+          .map(tag => {
+            if (typeof tag === 'object') {
+              return {
+                tagName: tag.tagName || tag.name || "",
+                tagColor: tag.tagColor || tag.color || "#3B82F6",
+              };
+            } else if (typeof tag === 'string') {
+              return {
+                tagName: tag,
+                tagColor: "#3B82F6",
+              };
+            }
+            return null;
+          })
+          .filter(tag => tag && tag.tagName && tag.tagName.trim() !== "");
+      }
+
+      console.log('✅ Parsed tags for folder update:', parsedTags);
+    } catch (error) {
+      console.error('❌ Error parsing tags for folder update:', error);
+
+      // Fallback: try to parse as comma-separated string
+      if (typeof tagsRaw === 'string' && tagsRaw.includes(',')) {
+        parsedTags = tagsRaw.split(',').map(t => ({
+          tagName: t.trim(),
+          tagColor: "#3B82F6"
+        })).filter(t => t.tagName);
       }
     }
-      // FOLDER DELETION
+  }
+
+  let targetFolders = pedagogyElement.folders;
+
+  if (pathParts.length > 0) {
+    for (const pathPart of pathParts) {
+      const foundFolder = targetFolders.find(f => f.name === pathPart);
+      if (!foundFolder) {
+        return res.status(404).json({
+          message: [{ key: "error", value: `Parent folder '${pathPart}' not found` }]
+        });
+      }
+      if (!Array.isArray(foundFolder.subfolders)) foundFolder.subfolders = [];
+      targetFolders = foundFolder.subfolders;
+    }
+  }
+
+  const folderToUpdate = targetFolders.find(f => f.name === originalFolderName);
+  if (!folderToUpdate) {
+    return res.status(404).json({
+      message: [{ key: "error", value: `Folder '${originalFolderName}' not found` }]
+    });
+  }
+
+  // Update folder properties
+  folderToUpdate.name = folderName;
+  folderToUpdate.updatedAt = new Date();
+  
+  // ✅ UPDATE TAGS HERE
+  if (parsedTags.length > 0) {
+    folderToUpdate.tags = parsedTags;
+  } else if (tagsRaw === null || tagsRaw === '' || (Array.isArray(tagsRaw) && tagsRaw.length === 0)) {
+    // If tags are explicitly cleared, set to empty array
+    folderToUpdate.tags = [];
+  }
+
+  entity.markModified(`pedagogy.${section}.${name}.folders`);
+  entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
+  entity.updatedAt = new Date();
+
+  const updatedEntity = await entity.save();
+
+  console.log('✅ Folder updated with tags:', folderToUpdate.tags);
+
+  return res.status(200).json({
+    message: [{ key: "success", value: `Folder renamed to '${folderName}' successfully` }],
+    data: updatedEntity,
+  });
+}
+
+    // FOLDER DELETION
     if (action === 'deleteFolder' && folderName) {
-      const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
+      const pathParts = folderPath ? (Array.isArray(folderPath) ? folderPath : folderPath.split("/").filter(p => p)) : [];
       const fullPath = [...pathParts, folderName];
-      
+
       const result = findFolderByPath(pedagogyElement.folders, fullPath);
-      
+
       if (!result || !result.parent) {
-        return res.status(404).json({ 
-          message: [{ key: "error", value: `Folder '${folderName}' not found` }] 
+        return res.status(404).json({
+          message: [{ key: "error", value: `Folder '${folderName}' not found` }]
         });
       }
 
       const deleteFolderFilesRecursively = async (folder, currentPath = []) => {
         const filesArray = Array.isArray(folder.files) ? folder.files : [];
-        
+
         for (let file of filesArray) {
           try {
             if (file.fileUrl instanceof Map) {
-              // Delete all resolution versions
               for (const [resolution, fileUrl] of file.fileUrl) {
                 await deleteFromResolutionFolder(fileUrl, type, section, name, currentPath);
               }
-            } else {
-              // Delete single file
+            } else if (file.fileUrl) {
               await deleteFromResolutionFolder(file.fileUrl, type, section, name, currentPath);
             }
           } catch (storageError) {
@@ -2814,37 +3155,38 @@ exports.updateEntity = async (req, res) => {
       if (Array.isArray(result.parent)) {
         result.parent.splice(result.index, 1);
       }
-      
+
+      entity.markModified(`pedagogy.${section}.${name}.folders`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = Date.now();
 
       const updatedEntity = await entity.save();
 
       return res.status(200).json({
-        message: [{ key: "success", value: `Folder '${folderName}' and all contents deleted successfully` }],
+        message: [{ key: "success", value: `Folder '${folderName}' deleted successfully` }],
         data: updatedEntity,
       });
     }
- if (action === 'deleteFile' && updateFileId) {
+
+    // FILE DELETION
+    if (action === 'deleteFile' && updateFileId) {
       const fileResult = findFileById(pedagogyElement, updateFileId);
 
       if (!fileResult) {
-        return res.status(404).json({ 
-          message: [{ key: "error", value: "File not found" }] 
+        return res.status(404).json({
+          message: [{ key: "error", value: "File not found" }]
         });
       }
 
       try {
         const fileUrlMap = fileResult.file.fileUrl;
-        
+
         if (fileUrlMap instanceof Map) {
-          // Delete all resolution versions
           for (const [resolution, fileUrl] of fileUrlMap) {
-            await deleteFromResolutionFolder(fileUrl, type, section, name, folderPath ? folderPath.split("/").filter(p => p) : []);
+            await deleteFromResolutionFolder(fileUrl, type, section, name, parsedFolderPath);
           }
-        } else {
-          // Delete single file
-          await deleteFromResolutionFolder(fileResult.file.fileUrl, type, section, name, folderPath ? folderPath.split("/").filter(p => p) : []);
+        } else if (fileResult.file.fileUrl) {
+          await deleteFromResolutionFolder(fileResult.file.fileUrl, type, section, name, parsedFolderPath);
         }
       } catch (storageError) {
         console.warn("Storage deletion error:", storageError);
@@ -2853,80 +3195,85 @@ exports.updateEntity = async (req, res) => {
       if (Array.isArray(fileResult.parent)) {
         fileResult.parent.splice(fileResult.index, 1);
       }
-      
+
+      entity.markModified(`pedagogy.${section}.${name}`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = Date.now();
 
       const updatedEntity = await entity.save();
 
       return res.status(200).json({
-        message: [{ key: "success", value: "File and all resolutions deleted successfully" }],
+        message: [{ key: "success", value: "File deleted successfully" }],
         data: updatedEntity,
       });
     }
-    // FILE UPLOAD WITH FILE SETTINGS
-    if (req.files && req.files.files) {
-      const files = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
-      const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
-            const fileDescriptionValue = req.body.fileDescription || ""; // NEW: Get file description
 
-      // Get file settings from request
-      const showToStudentsValue = req.body.showToStudents === 'true' || req.body.showToStudents === true;
-      const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
-        let parsedTags = [];
-      if (req.body.tags) {
+    // NEW FILE UPLOAD
+    if (req.files && req.files.files && (!isUpdate || !updateFileId)) {
+      const files = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
+      const pathParts = parsedFolderPath;
+
+      const showToStudentsValue = showToStudents === 'true' || showToStudents === true;
+      const allowDownloadValue = allowDownload === 'true' || allowDownload === true;
+
+      let parsedTags = [];
+      const tagsRaw = req.body.tags;
+
+      console.log('📝 Raw tags value:', tagsRaw, 'Type:', typeof tagsRaw);
+
+      if (tagsRaw) {
         try {
-          parsedTags = typeof req.body.tags === 'string' ? JSON.parse(req.body.tags) : req.body.tags;
+          let tagsData = tagsRaw;
+          if (typeof tagsRaw === 'string') {
+            tagsData = JSON.parse(tagsRaw);
+          }
+
+          if (Array.isArray(tagsData)) {
+            parsedTags = tagsData
+              .map(tag => {
+                if (typeof tag === 'object') {
+                  return {
+                    tagName: tag.tagName || tag.name || "",
+                    tagColor: tag.tagColor || tag.color || "#3B82F6",
+                  };
+                } else if (typeof tag === 'string') {
+                  return {
+                    tagName: tag,
+                    tagColor: "#3B82F6",
+                  };
+                }
+                return null;
+              })
+              .filter(tag => tag && tag.tagName && tag.tagName.trim() !== "");
+          }
+
+          console.log('✅ Parsed tags:', parsedTags);
         } catch (error) {
-          console.error("Error parsing tags:", error);
+          console.error('❌ Error parsing tags:', error);
+
+          if (typeof tagsRaw === 'string' && tagsRaw.includes(',')) {
+            parsedTags = tagsRaw.split(',').map(t => ({
+              tagName: t.trim(),
+              tagColor: "#3B82F6"
+            })).filter(t => t.tagName);
+          }
         }
       }
 
-      console.log('📋 File settings from request:', {
-        showToStudents: showToStudentsValue,
-        allowDownload: allowDownloadValue,
-        hasSettings: !!req.body.showToStudents,
-         fileDescription: fileDescriptionValue, // NEW: Log file description
-        tags: parsedTags, // NEW: Log tags
-      });
-
-      const isReferenceUpload = selectedFileType === "reference" || req.body.fileType === "reference";
-
-      console.log('📁 FILE UPLOAD TO FOLDER:', {
-        pathParts,
-        folderPath,
-        filesCount: files.length,
-        isReferenceUpload
-      });
-
-      let currentFolders = pedagogyElement.folders;
       let targetFolder = pedagogyElement;
 
       if (pathParts.length > 0) {
+        let currentFolders = pedagogyElement.folders || [];
+
         for (const folderName of pathParts) {
-          if (!Array.isArray(currentFolders)) {
-            currentFolders = [];
-            if (targetFolder !== pedagogyElement) {
-              targetFolder.subfolders = currentFolders;
-            } else {
-              pedagogyElement.folders = currentFolders;
-            }
-          }
-
-          let foundFolder = currentFolders.find(f => f.name === folderName);
-          
+          const foundFolder = currentFolders.find(f => f.name === folderName);
           if (!foundFolder) {
-            foundFolder = {
-              _id: new mongoose.Types.ObjectId(),
-              name: folderName,
-              files: [],
-              subfolders: []
-            };
-            currentFolders.push(foundFolder);
+            return res.status(404).json({
+              message: [{ key: "error", value: `Folder '${folderName}' not found` }]
+            });
           }
-
           targetFolder = foundFolder;
-          currentFolders = foundFolder.subfolders;
+          currentFolders = foundFolder.subfolders || [];
         }
       }
 
@@ -2934,70 +3281,70 @@ exports.updateEntity = async (req, res) => {
         targetFolder.files = [];
       }
 
-      const uploadedFileNames = new Set(targetFolder.files.map(f => f.fileName));
-      
       for (let file of files) {
-        if (!isUpdate && uploadedFileNames.has(file.name)) {
-          console.log(`⚠️ File ${file.name} already exists, skipping upload`);
-          continue;
-        }
+        const isVideo = file.mimetype && file.mimetype.startsWith('video/');
 
-        // Process different file types
-        if (file.mimetype.startsWith('video/')) {
-          // Video processing logic
+        if (isVideo) {
+          console.log(`🎬 Processing video: ${file.name} (${file.size} bytes)`);
+
           try {
-            console.log(`🎬 Processing video: ${file.name}`);
-            
-            const targetResolutions = ['2160p', '1440p', '1080p', '720p', '480p', '360p','240p'];
-            
+            const targetResolutions = ['2160p', '1440p', '1080p', '720p', '480p', '360p', '240p'];
+
             const processedVersions = await VideoProcessor.processVideo(
-              file.data, 
-              file.name, 
+              file.data,
+              file.name,
               targetResolutions
             );
-
-            if (!processedVersions || Object.keys(processedVersions).length === 0) {
-              console.log('❌ No versions were processed, falling back to original upload');
-              await uploadOriginalVideo(file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement, supabase);
-              continue;
-            }
 
             const fileUrlMap = new Map();
             const availableResolutions = [];
 
             for (const [resolution, processedFile] of Object.entries(processedVersions)) {
-              if (!processedFile || !processedFile.buffer) {
-                console.warn(`⚠️ Skipping ${resolution}: No buffer available`);
-                continue;
+              if (processedFile && processedFile.buffer) {
+                try {
+                  // ── FIX 1: use uploadToResolutionFolder helper ──────────────
+                  const fileUrl = await uploadToResolutionFolder(
+                    processedFile.buffer,
+                    processedFile.fileName,
+                    resolution,
+                    type,
+                    section,
+                    name,
+                    pathParts
+                  );
+                  fileUrlMap.set(resolution, fileUrl);
+                  availableResolutions.push(resolution);
+                  console.log(`✅ Uploaded ${resolution}: ${fileUrl}`);
+                } catch (uploadErr) {
+                  console.error(`❌ Upload error for ${resolution}:`, uploadErr.message);
+                }
               }
+            }
 
+            // ── FIX 2: use uploadOriginalVideo fallback ─────────────────────
+            if (fileUrlMap.size === 0) {
+              console.warn('⚠️ No processed versions succeeded, falling back to original');
               try {
-                const fileUrl = await uploadToResolutionFolder(
-                  processedFile.buffer,
-                  processedFile.fileName,
-                  resolution,
+                await uploadOriginalVideo(
+                  file,
                   type,
                   section,
                   name,
-                  pathParts
+                  pathParts,
+                  targetFolder,
+                  false,
+                  null,
+                  pedagogyElement,
+                  supabase
                 );
-
-                fileUrlMap.set(resolution, fileUrl);
-                availableResolutions.push(resolution);
-
-                console.log(`✅ Uploaded ${resolution} version to resolutions/${resolution}/ folder`);
-              } catch (uploadError) {
-                console.error(`❌ Failed to upload ${resolution} version:`, uploadError.message);
+                console.log('✅ Fallback original video uploaded');
+                continue; // uploadOriginalVideo already pushed to targetFolder.files
+              } catch (fallbackErr) {
+                console.error('❌ Fallback upload also failed:', fallbackErr.message);
+                continue;
               }
             }
 
-            if (availableResolutions.length === 0) {
-              console.log('🔄 No resolutions uploaded successfully, falling back to original upload');
-              await uploadOriginalVideo(file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement, supabase);
-              continue;
-            }
-
-            // ✅ CREATE VIDEO FILE WITH SETTINGS
             const newFile = {
               _id: new mongoose.Types.ObjectId(),
               fileName: file.name,
@@ -3006,78 +3353,35 @@ exports.updateEntity = async (req, res) => {
               size: file.size.toString(),
               uploadedAt: new Date(),
               isVideo: true,
-              isReference: isReferenceUpload,
+                isReference: selectedFileType === "reference" ? true : false,
+
+              // ── FIX 3: sort resolutions best-first ─────────────────────────
               availableResolutions: availableResolutions.sort((a, b) => {
-                const order = {'2160p': 7, '1440p': 6, '1080p': 5, '720p': 4, '480p': 3, '360p': 2,'240p':1, 'base': 0};
+                const order = { '2160p': 7, '1440p': 6, '1080p': 5, '720p': 4, '480p': 3, '360p': 2, '240p': 1, 'base': 0 };
                 return (order[b] || 0) - (order[a] || 0);
               }),
-               fileDescription: fileDescriptionValue,
-              // ✅ TAGS ADDED HERE
-              tags: parsedTags.map(tag => ({
-                tagName: tag.tagName || tag.name || '',
-                tagColor: tag.tagColor || tag.color || '#3B82F6'
-              })),
-              // ✅ FILE SETTINGS ADDED HERE
+              fileDescription: fileDescription || "",
+              tags: parsedTags,
               fileSettings: {
                 showToStudents: showToStudentsValue,
                 allowDownload: allowDownloadValue,
-                lastModified: new Date()
-              }
+                lastModified: new Date(),
+              },
             };
 
-            if (isUpdate && updateFileId) {
-              const fileResult = findFileById(pedagogyElement, updateFileId);
-              if (fileResult && Array.isArray(fileResult.parent)) {
-                // Delete old resolution files before updating
-                const oldFile = fileResult.file;
-                if (oldFile.fileUrl instanceof Map) {
-                  for (const [resolution, fileUrl] of oldFile.fileUrl) {
-                    try {
-                      await deleteFromResolutionFolder(fileUrl, type, section, name, pathParts);
-                    } catch (delError) {
-                      console.warn(`⚠️ Could not delete old ${resolution}:`, delError.message);
-                    }
-                  }
-                }
-                
-                // ✅ PRESERVE EXISTING SETTINGS IF NOT PROVIDED
-                fileResult.parent[fileResult.index] = {
-                  ...fileResult.parent[fileResult.index],
-                  ...newFile,
-                  updatedAt: new Date(),
-                   fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
-                  tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
-                    tagName: tag.tagName || tag.name || '',
-                    tagColor: tag.tagColor || tag.color || '#3B82F6'
-                  })) : fileResult.file.tags || [],
-                  fileSettings: {
-                    showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
-                    allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
-                    lastModified: new Date()
-                  }
-                };
-              }
-            } else {
-              targetFolder.files.push(newFile);
-            }
+            targetFolder.files.push(newFile);
+            console.log(`✅ Video saved with ${availableResolutions.length} resolution(s):`, availableResolutions);
 
-          } catch (videoError) {
-            console.error('❌ Video processing error:', videoError);
-            try {
-              await uploadOriginalVideo(file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement, supabase);
-            } catch (fallbackError) {
-              console.error('❌ Fallback upload also failed:', fallbackError);
-            }
+          } catch (videoErr) {
+            console.error('❌ Video processing failed entirely:', videoErr.message);
+            continue;
           }
+
         } else {
-          // NON-VIDEO FILE OR ARCHIVE UPLOAD
+          // Non-video upload — unchanged from doc 8
           const uniqueFileName = `${Date.now()}_${file.name}`;
           const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
           const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
-
-          const isArchive = /\.(zip|rar|tar)$/i.test(file.name);
-          const fileTypeLabel = isArchive ? "archive" : "regular";
-
 
           const { error: uploadError } = await supabase.storage
             .from("smartlms")
@@ -3092,25 +3396,18 @@ exports.updateEntity = async (req, res) => {
           const fileUrlMap = new Map();
           fileUrlMap.set('base', fileUrl);
 
-          // ✅ CREATE NON-VIDEO FILE WITH SETTINGS
           const newFile = {
             _id: new mongoose.Types.ObjectId(),
             fileName: file.name,
-            fileType: file.mimetype || (isArchive ? "application/octet-stream" : "unknown"),
+            fileType: file.mimetype,
             fileUrl: fileUrlMap,
             size: file.size.toString(),
             uploadedAt: new Date(),
             isVideo: false,
-             fileDescription: fileDescriptionValue,
-            // ✅ TAGS ADDED HERE
-            tags: parsedTags.map(tag => ({
-              tagName: tag.tagName || tag.name || '',
-              tagColor: tag.tagColor || tag.color || '#3B82F6'
-            })),
-            isArchive,
-            isReference: isReferenceUpload,
-            availableResolutions: [],
-            // ✅ FILE SETTINGS ADDED HERE
+              isReference: selectedFileType === "reference" ? true : false,
+
+            fileDescription: fileDescription || "",
+            tags: parsedTags,
             fileSettings: {
               showToStudents: showToStudentsValue,
               allowDownload: allowDownloadValue,
@@ -3118,94 +3415,80 @@ exports.updateEntity = async (req, res) => {
             }
           };
 
-          if (isUpdate && updateFileId) {
-            const fileResult = findFileById(pedagogyElement, updateFileId);
-            if (fileResult && Array.isArray(fileResult.parent)) {
-              // ✅ PRESERVE EXISTING SETTINGS IF NOT PROVIDED
-              fileResult.parent[fileResult.index] = {
-                ...fileResult.parent[fileResult.index],
-                ...newFile,
-                updatedAt: new Date(),
-                 fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
-                tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
-                  tagName: tag.tagName || tag.name || '',
-                  tagColor: tag.tagColor || tag.color || '#3B82F6'
-                })) : fileResult.file.tags || [],
-                fileSettings: {
-                  showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
-                  allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
-                  lastModified: new Date()
-                }
-              };
-            }
-          } else {
-            targetFolder.files.push(newFile);
-          }
+          targetFolder.files.push(newFile);
+          console.log('📁 Added file with tags:', parsedTags);
         }
       }
 
-      entity.markModified(`pedagogy.${section}.${name}`);
+      // CRITICAL: Mark the correct path as modified
+      if (pathParts.length > 0) {
+        entity.markModified(`pedagogy.${section}.${name}.folders`);
+      } else {
+        entity.markModified(`pedagogy.${section}.${name}.files`);
+      }
+
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = new Date();
-      
-      await entity.save();
+
+      const savedEntity = await entity.save();
+
+      console.log('💾 Saved entity, checking tags in saved file:');
+      const savedFiles = pathParts.length > 0
+        ? savedEntity.pedagogy[section].get(name).folders
+        : savedEntity.pedagogy[section].get(name).files;
+      console.log('Saved files with tags:', JSON.stringify(savedFiles, null, 2));
+
+      return res.status(200).json({
+        message: [{ key: "success", value: "Files uploaded successfully" }],
+        data: savedEntity,
+      });
     }
 
-    // URL LINK HANDLING WITH FILE SETTINGS
+    // URL LINK HANDLING
     if (req.body.fileUrl && !req.files) {
       const { fileUrl, fileName, fileType } = req.body;
 
       if (!fileUrl) {
-        return res.status(400).json({ 
-          message: [{ key: "error", value: "File URL is required" }] 
+        return res.status(400).json({
+          message: [{ key: "error", value: "File URL is required" }]
         });
       }
 
-      // Get file settings from request
-      const showToStudentsValue = req.body.showToStudents === 'true' || req.body.showToStudents === true;
-      const allowDownloadValue = req.body.allowDownload === 'true' || req.body.allowDownload === true;
+      const showToStudentsValue = showToStudents === 'true' || showToStudents === true;
+      const allowDownloadValue = allowDownload === 'true' || allowDownload === true;
 
-      const isReferenceUpload = selectedFileType === "reference" || req.body.selectedFileType === "reference";
-     const fileDescriptionValue = req.body.fileDescription || ""; // NEW: Get file description
-  const tagsValue = req.body.tags || []; // FIXED: Get tags
+      let parsedTags = [];
+      if (tags) {
+        try {
+          let raw = tags;
+          while (typeof raw === 'string') {
+            raw = JSON.parse(raw);
+          }
+          parsedTags = Array.isArray(raw) ? raw.map((t) => ({
+            tagName:  t.tagName  || t.name  || "",
+            tagColor: t.tagColor || t.color || "#3B82F6",
+          })) : [];
+        } catch (error) {
+          console.error("Error parsing tags:", error);
+          parsedTags = [];
+        }
+      }
 
-      // NEW: Parse tags from request
-    let parsedTags = [];
-  if (tagsValue) {
-    try {
-      parsedTags = typeof tagsValue === 'string' ? JSON.parse(tagsValue) : tagsValue;
-    } catch (error) {
-      console.error("Error parsing tags:", error);
-    }
-  }
-      const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
-      let currentFolders = pedagogyElement.folders;
+      const pathParts = parsedFolderPath;
       let targetFolder = pedagogyElement;
 
       if (pathParts.length > 0) {
+        let currentFolders = pedagogyElement.folders || [];
+
         for (const folderName of pathParts) {
-          if (!Array.isArray(currentFolders)) {
-            currentFolders = [];
-            if (targetFolder !== pedagogyElement) {
-              targetFolder.subfolders = currentFolders;
-            } else {
-              pedagogyElement.folders = currentFolders;
-            }
-          }
-
-          let foundFolder = currentFolders.find(f => f.name === folderName);
+          const foundFolder = currentFolders.find(f => f.name === folderName);
           if (!foundFolder) {
-            foundFolder = {
-              _id: new mongoose.Types.ObjectId(),
-              name: folderName,
-              files: [],
-              subfolders: [],
-            };
-            currentFolders.push(foundFolder);
+            return res.status(404).json({
+              message: [{ key: "error", value: `Folder '${folderName}' not found` }]
+            });
           }
-
           targetFolder = foundFolder;
-          currentFolders = foundFolder.subfolders;
+          currentFolders = foundFolder.subfolders || [];
         }
       }
 
@@ -3216,24 +3499,18 @@ exports.updateEntity = async (req, res) => {
       const fileUrlMap = new Map();
       fileUrlMap.set("base", fileUrl);
 
-      // ✅ CREATE URL FILE WITH SETTINGS
       const newFile = {
         _id: new mongoose.Types.ObjectId(),
-        fileName: fileName || "External URL",
+        fileName: fileName || extractFileNameFromUrl(fileUrl),
         fileType: fileType || "text/uri-list",
         fileUrl: fileUrlMap,
         size: "0",
         uploadedAt: new Date(),
         isVideo: false,
-        isReference: isReferenceUpload,
-        availableResolutions: [],
-         fileDescription: fileDescriptionValue, // ✅ FIXED: Add file description
-    // ✅ TAGS ADDED HERE - ensure proper format
-    tags: parsedTags.map(tag => ({
-      tagName: tag.tagName || tag.name || '',
-      tagColor: tag.tagColor || tag.color || '#3B82F6'
-    })),
-        // ✅ FILE SETTINGS ADDED HERE
+          isReference: selectedFileType === "reference" ? true : false,
+
+        fileDescription: fileDescription || "",
+        tags: parsedTags,
         fileSettings: {
           showToStudents: showToStudentsValue,
           allowDownload: allowDownloadValue,
@@ -3241,29 +3518,7 @@ exports.updateEntity = async (req, res) => {
         }
       };
 
-      if (isUpdate && updateFileId) {
-        const fileResult = findFileById(pedagogyElement, updateFileId);
-        if (fileResult && Array.isArray(fileResult.parent)) {
-          // ✅ PRESERVE EXISTING SETTINGS IF NOT PROVIDED
-          fileResult.parent[fileResult.index] = {
-            ...fileResult.parent[fileResult.index],
-            ...newFile,
-            updatedAt: new Date(),
-              fileDescription: fileDescriptionValue || fileResult.file.fileDescription || "",
-            tags: parsedTags.length > 0 ? parsedTags.map(tag => ({
-              tagName: tag.tagName || tag.name || '',
-              tagColor: tag.tagColor || tag.color || '#3B82F6'
-            })) : fileResult.file.tags || [],
-            fileSettings: {
-              showToStudents: req.body.showToStudents !== undefined ? showToStudentsValue : (fileResult.file.fileSettings?.showToStudents ?? true),
-              allowDownload: req.body.allowDownload !== undefined ? allowDownloadValue : (fileResult.file.fileSettings?.allowDownload ?? true),
-              lastModified: new Date()
-            }
-          };
-        }
-      } else {
-        targetFolder.files.push(newFile);
-      }
+      targetFolder.files.push(newFile);
 
       entity.markModified(`pedagogy.${section}.${name}`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -3277,62 +3532,84 @@ exports.updateEntity = async (req, res) => {
       });
     }
 
-    // Update description only
-    if (pedagogy) {
-      const parsedPedagogy = typeof pedagogy === "string" ? JSON.parse(pedagogy) : pedagogy;
+    // If no specific action was handled
+    entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
+    entity.updatedAt = new Date();
 
-      for (let section of ["I_Do", "We_Do", "You_Do"]) {
-        if (!parsedPedagogy[section]) continue;
-        if (!entity.pedagogy[section]) entity.pedagogy[section] = new Map();
+    const updatedEntity = await entity.save();
 
-        for (let [name, element] of Object.entries(parsedPedagogy[section])) {
-          const existing = entity.pedagogy[section].get(name) || { files: [], folders: [] };
-          entity.pedagogy[section].set(name, {
-            description: element.description || "",
-            files: existing.files,
-            folders: existing.folders,
-          });
-        }
-      }
-    }
-
-    // If no specific action was handled, update timestamps
-    if (!action && !req.files && !req.body.fileUrl) {
-      entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
-      entity.updatedAt = new Date();
-
-      const updatedEntity = await entity.save();
-      const populatedEntity = await model.findById(updatedEntity._id);
-
-      return res.status(200).json({
-        message: [{ key: "success", value: `${type} updated successfully` }],
-        data: populatedEntity,
-      });
-    }
-
-    // For actions that already returned a response, return success
     return res.status(200).json({
-      message: [{ key: "success", value: "Operation completed successfully" }],
-      data: entity,
+      message: [{ key: "success", value: `${type} updated successfully` }],
+      data: updatedEntity,
     });
 
   } catch (err) {
     console.error("Update error:", err);
-    res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
+    res.status(500).json({
+      message: [{ key: "error", value: "Internal server error: " + err.message }]
+    });
   }
+};
+
+// Helper function to find file in pedagogy structure
+const findFileInPedagogyStructureSafe = (pedagogyElement, fileId) => {
+  // Search in root files
+  const rootFiles = Array.isArray(pedagogyElement.files) ? pedagogyElement.files : [];
+  const rootFileIndex = rootFiles.findIndex(f => f._id && f._id.toString() === fileId);
+  
+  if (rootFileIndex !== -1) {
+    return {
+      container: pedagogyElement,
+      filesArray: rootFiles,
+      file: rootFiles[rootFileIndex],
+      fileIndex: rootFileIndex,
+      location: 'root',
+      folderPath: []
+    };
+  }
+
+  // Search in folders recursively
+  const searchInFolders = (folders, currentPath = []) => {
+    if (!Array.isArray(folders)) return null;
+    
+    for (let i = 0; i < folders.length; i++) {
+      const folder = folders[i];
+      const folderFiles = Array.isArray(folder.files) ? folder.files : [];
+      const fileIndex = folderFiles.findIndex(f => f._id && f._id.toString() === fileId);
+      
+      if (fileIndex !== -1) {
+        return {
+          container: folder,
+          filesArray: folderFiles,
+          file: folderFiles[fileIndex],
+          fileIndex: fileIndex,
+          location: 'folder',
+          folderPath: [...currentPath, folder.name]
+        };
+      }
+      
+      const subfolders = Array.isArray(folder.subfolders) ? folder.subfolders : [];
+      const found = searchInFolders(subfolders, [...currentPath, folder.name]);
+      if (found) return found;
+    }
+    return null;
+  };
+  
+  const folders = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
+  return searchInFolders(folders);
 };
 
 // Separate endpoint for updating only file settings
 exports.updateFileSettings = async (req, res) => {
   try {
     const { type, id } = req.params;
-    const { 
-      tabType, 
-      subcategory, 
-      updateFileId, 
-      showToStudents, 
+    const {
+      tabType,
+      subcategory,
+      updateFileId,
+      showToStudents,
       allowDownload,
-      folderPath = '' 
+      folderPath = ''
     } = req.body;
 
     if (!modelMap[type]) {
@@ -3354,11 +3631,11 @@ exports.updateFileSettings = async (req, res) => {
     const name = subcategory;
 
     if (!entity.pedagogy[section]) entity.pedagogy[section] = new Map();
-    
+
     if (!entity.pedagogy[section].get(name)) {
-      entity.pedagogy[section].set(name, { 
-        description: "", 
-        files: [], 
+      entity.pedagogy[section].set(name, {
+        description: "",
+        files: [],
         folders: []
       });
     }
@@ -3375,14 +3652,14 @@ exports.updateFileSettings = async (req, res) => {
         if (!Array.isArray(currentFolders)) {
           currentFolders = [];
         }
-        
+
         const foundFolder = currentFolders.find(f => f.name === folderName);
         if (!foundFolder) {
-          return res.status(404).json({ 
-            message: [{ key: "error", value: `Folder '${folderName}' not found` }] 
+          return res.status(404).json({
+            message: [{ key: "error", value: `Folder '${folderName}' not found` }]
           });
         }
-        
+
         targetFolder = foundFolder;
         currentFolders = foundFolder.subfolders || [];
       }
@@ -3397,16 +3674,16 @@ exports.updateFileSettings = async (req, res) => {
       // Also search in root files
       const rootFileIndex = pedagogyElement.files.findIndex(f => f._id.toString() === updateFileId);
       if (rootFileIndex === -1) {
-        return res.status(404).json({ 
-          message: [{ key: "error", value: "File not found" }] 
+        return res.status(404).json({
+          message: [{ key: "error", value: "File not found" }]
         });
       }
-      
+
       // Update root file settings
       if (!pedagogyElement.files[rootFileIndex].fileSettings) {
         pedagogyElement.files[rootFileIndex].fileSettings = {};
       }
-      
+
       pedagogyElement.files[rootFileIndex].fileSettings = {
         showToStudents: showToStudents !== undefined ? showToStudents : (pedagogyElement.files[rootFileIndex].fileSettings?.showToStudents),
         allowDownload: allowDownload !== undefined ? allowDownload : (pedagogyElement.files[rootFileIndex].fileSettings?.allowDownload),
@@ -3417,7 +3694,7 @@ exports.updateFileSettings = async (req, res) => {
       if (!targetFolder.files[fileIndex].fileSettings) {
         targetFolder.files[fileIndex].fileSettings = {};
       }
-      
+
       targetFolder.files[fileIndex].fileSettings = {
         showToStudents: showToStudents !== undefined ? showToStudents : (targetFolder.files[fileIndex].fileSettings?.showToStudents ?? true),
         allowDownload: allowDownload !== undefined ? allowDownload : (targetFolder.files[fileIndex].fileSettings?.allowDownload ?? true),
@@ -3443,3 +3720,1239 @@ exports.updateFileSettings = async (req, res) => {
 
 
 
+
+/**
+ * Create a new page in a folder or root
+ */
+// ─── createPage controller ────────────────────────────────────────────────────
+// POST /pages/:type/:id/pages
+
+exports.createPage = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+
+    // ── 1. Destructure body ───────────────────────────────────────────────────
+    const {
+      pages,          // array of PagePayloadItem (multi-page doc)
+      combinedCode,   // combined HTML string for all pages
+      combinedHtml,   // alias sent by some frontend versions
+      hierarchyInfo,
+      tabType,
+      subcategory,
+      folderPath,
+    } = req.body;
+
+    // ── 2. Resolve fields defensively — no duplicate const ───────────────────
+    const resolvedTitle = req.body.title || pages?.[0]?.name || "Untitled";
+    const resolvedBlocks = req.body.blocks || pages?.[0]?.blocks || [];
+    const resolvedCombinedCode = combinedCode || combinedHtml || "";
+
+    // ── 3. Validate required fields ───────────────────────────────────────────
+    if (!resolvedTitle) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Page title is required" }],
+      });
+    }
+
+    if (!resolvedCombinedCode && resolvedBlocks.length === 0) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Page must have content (blocks or HTML)" }],
+      });
+    }
+
+    if (!tabType || !subcategory) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "tabType and subcategory are required" }],
+      });
+    }
+
+    // ── 4. Resolve model ──────────────────────────────────────────────────────
+    const modelMap = {
+      module: mongoose.model("Module1"),
+      submodule: mongoose.model("SubModule1"),
+      topic: mongoose.model("Topic1"),
+      subtopic: mongoose.model("SubTopic1"),
+    };
+
+    const Model = modelMap[type];
+    if (!Model) {
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}` }],
+      });
+    }
+
+    const entity = await Model.findById(id);
+    if (!entity) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }],
+      });
+    }
+
+    // ── 5. Ensure pedagogy structure exists ───────────────────────────────────
+    if (!entity.pedagogy) {
+      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
+    }
+
+    if (!entity.pedagogy[tabType]) {
+      entity.pedagogy[tabType] = new Map();
+    }
+
+    // ── 6. Ensure subcategory element exists ──────────────────────────────────
+    const getter = entity.pedagogy[tabType].get
+      ? entity.pedagogy[tabType].get(subcategory)
+      : entity.pedagogy[tabType][subcategory];
+
+    if (!getter) {
+      const emptyElement = { description: "", files: [], folders: [], pages: [] };
+      if (entity.pedagogy[tabType].set) {
+        entity.pedagogy[tabType].set(subcategory, emptyElement);
+      } else {
+        entity.pedagogy[tabType][subcategory] = emptyElement;
+      }
+    }
+
+    const pedagogyElement = entity.pedagogy[tabType].get
+      ? entity.pedagogy[tabType].get(subcategory)
+      : entity.pedagogy[tabType][subcategory];
+
+    // ── 7. Ensure arrays exist on the pedagogy element ────────────────────────
+    if (!Array.isArray(pedagogyElement.files)) pedagogyElement.files = [];
+    if (!Array.isArray(pedagogyElement.folders)) pedagogyElement.folders = [];
+    if (!Array.isArray(pedagogyElement.pages)) pedagogyElement.pages = [];
+
+    // ── 8. Parse blocks safely ────────────────────────────────────────────────
+    const parsedBlocks =
+      typeof resolvedBlocks === "string"
+        ? JSON.parse(resolvedBlocks)
+        : resolvedBlocks;
+
+    // ── 9. Parse pages array safely (multi-page docs) ─────────────────────────
+    let parsedPages = [];
+    if (pages) {
+      parsedPages = typeof pages === "string" ? JSON.parse(pages) : pages;
+    }
+
+    // ── 10. Resolve folder path ───────────────────────────────────────────────
+    let folderPathArray = [];
+    if (Array.isArray(folderPath)) {
+      folderPathArray = folderPath;
+    } else if (typeof folderPath === "string" && folderPath.trim()) {
+      // Support comma-separated OR slash-separated paths
+      folderPathArray = folderPath.includes(",")
+        ? folderPath.split(",").filter(Boolean)
+        : folderPath.split("/").filter(Boolean);
+    }
+
+    // ── 11. Navigate to target folder if path provided ────────────────────────
+    let targetContainer = pedagogyElement;
+    let targetFolderId = null;
+    let addedInsideFolder = false;
+
+    if (folderPathArray.length > 0) {
+      const result = findOrCreateFolder(pedagogyElement.folders, folderPathArray);
+      const targetFolder = result?.targetFolder;
+
+      if (!targetFolder) {
+        return res.status(404).json({
+          message: [{ key: "error", value: "Failed to create or find folder path" }],
+        });
+      }
+
+      if (!Array.isArray(targetFolder.pages)) {
+        targetFolder.pages = [];
+      }
+
+      targetFolderId = targetFolder._id || null;
+      targetContainer = targetFolder;
+      addedInsideFolder = true;
+    }
+
+    // ── 12. Build the page document ───────────────────────────────────────────
+    const newPage = {
+      _id: new mongoose.Types.ObjectId(),
+      title: resolvedTitle,
+      blocks: parsedBlocks,
+      combinedCode: resolvedCombinedCode,
+      // Store each individual page's data for multi-page documents
+      pagesData: parsedPages.length > 0 ? parsedPages.map((p) => ({
+        id: p.id || p._id || String(new mongoose.Types.ObjectId()),
+        name: p.name || p.title || "Untitled",
+        html: p.html || "",
+        blocks: p.blocks || [],
+      })) : undefined,
+      isMultiPage: parsedPages.length > 1,
+      pageCount: parsedPages.length || 1,
+      version: "1.0.0",
+      folderId: targetFolderId,
+      folderPath: folderPathArray,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      createdBy: req.user?.email || "system",
+      updatedBy: req.user?.email || "system",
+    };
+
+    // ── 13. Push into target container ────────────────────────────────────────
+    if (!Array.isArray(targetContainer.pages)) {
+      targetContainer.pages = [];
+    }
+    targetContainer.pages.push(newPage);
+
+    // ── 14. Mark modified so Mongoose persists nested change ──────────────────
+    if (addedInsideFolder) {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+    }
+
+    entity.updatedBy = req.user?.email || "system";
+    entity.updatedAt = new Date();
+
+    // ── 15. Save ──────────────────────────────────────────────────────────────
+    const savedEntity = await entity.save({
+      validateModifiedOnly: true,
+      validateBeforeSave: true,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: [{ key: "success", value: "Page created successfully" }],
+      data: savedEntity,
+      page: newPage,
+      location: addedInsideFolder ? "inside_folder" : "root",
+      folderPath: folderPathArray,
+      folderId: targetFolderId,
+      isMultiPage: parsedPages.length > 1,
+      pageCount: parsedPages.length || 1,
+    });
+
+  } catch (err) {
+    console.error("Create page error:", err);
+
+    if (err.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "Validation error" }],
+        errors: err.errors,
+      });
+    }
+
+    if (err instanceof SyntaxError) {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "Invalid JSON in request body" }],
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
+// Find a page by ID (searches in root and all folders)
+const findPageById = (pedagogyElement, pageId) => {
+  // Search in root pages
+  const rootPages = Array.isArray(pedagogyElement.pages) ? pedagogyElement.pages : [];
+  const rootPage = rootPages.find(p => p._id && p._id.toString() === pageId);
+  if (rootPage) {
+    return {
+      parent: rootPages,
+      page: rootPage,
+      index: rootPages.indexOf(rootPage),
+      location: 'root',
+      container: pedagogyElement
+    };
+  }
+
+  // Search in folders recursively
+  const searchInFolders = (folders, path = []) => {
+    if (!Array.isArray(folders)) return null;
+
+    for (let folder of folders) {
+      const folderPages = Array.isArray(folder.pages) ? folder.pages : [];
+      const pageInFolder = folderPages.find(p => p._id && p._id.toString() === pageId);
+
+      if (pageInFolder) {
+        return {
+          parent: folderPages,
+          page: pageInFolder,
+          index: folderPages.indexOf(pageInFolder),
+          location: 'folder',
+          container: folder,
+          folderPath: [...path, folder.name]
+        };
+      }
+
+      // Search in subfolders recursively
+      if (Array.isArray(folder.subfolders) && folder.subfolders.length > 0) {
+        const result = searchInFolders(folder.subfolders, [...path, folder.name]);
+        if (result) return result;
+      }
+    }
+    return null;
+  };
+
+  const folders = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
+  return searchInFolders(folders);
+};
+
+// Find pages in a specific folder
+const findPagesInFolder = (pedagogyElement, folderPathArray) => {
+  if (!folderPathArray || folderPathArray.length === 0) {
+    // Return root pages
+    return Array.isArray(pedagogyElement.pages) ? pedagogyElement.pages : [];
+  }
+
+  // Navigate to the folder
+  let currentFolder = null;
+  let currentFolders = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
+
+  for (let i = 0; i < folderPathArray.length; i++) {
+    const folderName = folderPathArray[i];
+    currentFolder = currentFolders.find(f => f.name === folderName);
+
+    if (!currentFolder) {
+      return []; // Folder not found
+    }
+
+    if (i < folderPathArray.length - 1) {
+      currentFolders = Array.isArray(currentFolder.subfolders) ? currentFolder.subfolders : [];
+    }
+  }
+
+  // Return pages from the target folder
+  return currentFolder && Array.isArray(currentFolder.pages) ? currentFolder.pages : [];
+};
+
+// Get page by ID with full context
+const getPageWithContext = async (entityType, entityId, pageId, tabType, subcategory) => {
+  const Model = mongoose.model(getModelName(entityType));
+  const entity = await Model.findById(entityId);
+
+  if (!entity || !entity.pedagogy?.[tabType]?.get(subcategory)) {
+    return null;
+  }
+
+  const pedagogyElement = entity.pedagogy[tabType].get(subcategory);
+  const pageContext = findPageById(pedagogyElement, pageId);
+
+  if (!pageContext) {
+    return null;
+  }
+
+  return {
+    ...pageContext.page.toObject(),
+    location: pageContext.location,
+    folderPath: pageContext.folderPath || [],
+    containerId: pageContext.container._id,
+    containerName: pageContext.container.name || 'root'
+  };
+};
+
+
+
+/**
+ * Update a page
+ */
+// exports.updatePage = async (req, res) => {
+//   try {
+//     const { type, id, pageId } = req.params;
+//     const { title, blocks, combinedCode, tabType, subcategory } = req.body;
+
+//     const modelMap = {
+//       module: mongoose.model("Module1"),
+//       submodule: mongoose.model("SubModule1"),
+//       topic: mongoose.model("Topic1"),
+//       subtopic: mongoose.model("SubTopic1")
+//     };
+
+//     const Model = modelMap[type];
+//     const entity = await Model.findById(id);
+
+//     if (!entity) {
+//       return res.status(404).json({ message: [{ key: "error", value: `${type} not found` }] });
+//     }
+
+//     const pedagogyElement = entity.pedagogy?.[tabType]?.get(subcategory);
+
+//     if (!pedagogyElement) {
+//       return res.status(404).json({
+//         message: [{ key: "error", value: "Pedagogy element not found" }]
+//       });
+//     }
+
+//     // Find the page
+//     const pageResult = findPageById(pedagogyElement, pageId);
+
+//     if (!pageResult) {
+//       return res.status(404).json({
+//         message: [{ key: "error", value: "Page not found" }]
+//       });
+//     }
+
+//     // Update page
+//     const page = pageResult.page;
+//     if (title) page.title = title;
+//     if (blocks) page.blocks = typeof blocks === 'string' ? JSON.parse(blocks) : blocks;
+//     if (combinedCode) page.combinedCode = combinedCode;
+//     page.updatedAt = new Date();
+//     page.updatedBy = req.user?.email || "system";
+
+//     // Mark as modified
+//     if (pageResult.location === 'root') {
+//       entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+//     } else {
+//       entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+//     }
+
+//     entity.updatedBy = req.user?.email || "system";
+//     entity.updatedAt = new Date();
+
+//     await entity.save();
+
+//     return res.status(200).json({
+//       success: true,
+//       message: [{ key: "success", value: "Page updated successfully" }],
+//       page: page,
+//       location: pageResult.location,
+//       folderPath: pageResult.folderPath
+//     });
+
+//   } catch (err) {
+//     console.error("Update page error:", err);
+//     res.status(500).json({
+//       success: false,
+//       message: [{ key: "error", value: "Internal server error" }]
+//     });
+//   }
+// };
+
+/**
+ * Delete a page
+ */
+// ─── deletePage ───────────────────────────────────────────────────────────────
+exports.deletePage = async (req, res) => {
+  try {
+    const { type, id, pageId } = req.params;
+    const { tabType, subcategory, folderPath } = req.body;
+
+    if (!tabType || !subcategory) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "tabType and subcategory are required" }],
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(pageId)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid pageId format" }],
+      });
+    }
+
+    const modelMap = {
+      module: mongoose.model("Module1"),
+      submodule: mongoose.model("SubModule1"),
+      topic: mongoose.model("Topic1"),
+      subtopic: mongoose.model("SubTopic1"),
+    };
+
+    const Model = modelMap[type];
+    if (!Model) {
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}` }],
+      });
+    }
+
+    const entity = await Model.findById(id);
+    if (!entity) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }],
+      });
+    }
+
+    if (!entity.pedagogy?.[tabType]) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Pedagogy section not found" }],
+      });
+    }
+
+    // Support both Map and plain Object
+    const pedagogyElement = entity.pedagogy[tabType].get
+      ? entity.pedagogy[tabType].get(subcategory)
+      : entity.pedagogy[tabType][subcategory];
+
+    if (!pedagogyElement) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `Subcategory "${subcategory}" not found` }],
+      });
+    }
+
+    // Resolve folder path
+    let folderPathArray = [];
+    if (Array.isArray(folderPath)) {
+      folderPathArray = folderPath;
+    } else if (typeof folderPath === "string" && folderPath.trim()) {
+      folderPathArray = folderPath.includes(",")
+        ? folderPath.split(",").filter(Boolean)
+        : folderPath.split("/").filter(Boolean);
+    }
+
+    // Navigate into folder if path given
+    let targetContainer = pedagogyElement;
+    let deletedFromFolder = false;
+
+    if (folderPathArray.length > 0) {
+      // Walk folder tree by name
+      let current = pedagogyElement.folders || [];
+      let found = null;
+      for (const name of folderPathArray) {
+        found = current.find(f => f.name === name);
+        if (!found) {
+          return res.status(404).json({
+            message: [{ key: "error", value: `Folder "${name}" not found in path` }],
+          });
+        }
+        current = found.subfolders || [];
+      }
+      if (!Array.isArray(found.pages)) found.pages = [];
+      targetContainer = found;
+      deletedFromFolder = true;
+    }
+
+    if (!Array.isArray(targetContainer.pages)) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "No pages found in target location" }],
+      });
+    }
+
+    // Find the page
+    const pageIndex = targetContainer.pages.findIndex(
+      p => p._id && p._id.toString() === pageId
+    );
+
+    if (pageIndex === -1) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `Page "${pageId}" not found` }],
+      });
+    }
+
+    const deletedPage = targetContainer.pages[pageIndex];
+
+    // Remove it
+    targetContainer.pages.splice(pageIndex, 1);
+
+    // Mark modified so Mongoose persists the nested array change
+    if (deletedFromFolder) {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+    }
+
+    entity.updatedBy = req.user?.email || "system";
+    entity.updatedAt = new Date();
+
+    await entity.save({ validateModifiedOnly: true });
+
+    return res.status(200).json({
+      success: true,
+      message: [{ key: "success", value: "Page deleted successfully" }],
+      deletedPage: { _id: deletedPage._id, title: deletedPage.title },
+      location: deletedFromFolder ? "inside_folder" : "root",
+    });
+
+  } catch (err) {
+    console.error("Delete page error:", err);
+
+    if (err.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "Validation error during delete" }],
+        errors: err.errors,
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATE PAGE
+// PUT /:type/:id/pages/:pageId
+// Body: { title?, blocks?, htmlContent?, tabType, subcategory, folderPath? }
+// ─────────────────────────────────────────────────────────────────────────────
+exports.updatePage = async (req, res) => {
+  try {
+    const { type, id, pageId } = req.params;
+    const {
+      title, blocks, htmlContent, combinedCode,
+      pages,
+      tabType, subcategory, folderPath,
+    } = req.body;
+
+    if (!tabType || !subcategory) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "tabType and subcategory are required" }],
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(pageId)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid pageId format" }],
+      });
+    }
+
+    const Model = getModel(type);
+    if (!Model) {
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}` }],
+      });
+    }
+
+    const entity = await Model.findById(id);
+    if (!entity) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }],
+      });
+    }
+
+    if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Pedagogy section not found" }],
+      });
+    }
+
+    const pedagogyElement = entity.pedagogy[tabType].get
+      ? entity.pedagogy[tabType].get(subcategory)
+      : entity.pedagogy[tabType][subcategory];
+
+    if (!pedagogyElement) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `Subcategory "${subcategory}" not found` }],
+      });
+    }
+
+    // ── Resolve folder path ───────────────────────────────────────────────────
+    const folderPathArray = Array.isArray(folderPath)
+      ? folderPath
+      : (typeof folderPath === "string" && folderPath.trim()
+          ? (folderPath.includes(",") ? folderPath.split(",") : folderPath.split("/")).filter(Boolean)
+          : []);
+
+    let targetContainer = pedagogyElement;
+    let updatedInFolder = false;
+
+    if (folderPathArray.length > 0) {
+      let current = Array.isArray(pedagogyElement.folders) ? pedagogyElement.folders : [];
+      let found = null;
+      for (const name of folderPathArray) {
+        found = current.find(f => f.name === name);
+        if (!found) {
+          return res.status(404).json({
+            message: [{ key: "error", value: `Folder "${name}" not found` }],
+          });
+        }
+        current = Array.isArray(found.subfolders) ? found.subfolders : [];
+      }
+      if (!Array.isArray(found.pages)) found.pages = [];
+      targetContainer = found;
+      updatedInFolder = true;
+    }
+
+    if (!Array.isArray(targetContainer.pages)) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "No pages found in target location" }],
+      });
+    }
+
+    // ── Find page by INDEX (not reference) ───────────────────────────────────
+    const pageIndex = targetContainer.pages.findIndex(
+      (p) => p._id && p._id.toString() === pageId
+    );
+
+    if (pageIndex === -1) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `Page "${pageId}" not found` }],
+      });
+    }
+
+    const existingPage = targetContainer.pages[pageIndex];
+
+    // ── Parse incoming data ───────────────────────────────────────────────────
+    let parsedPages = [];
+    if (pages) {
+      parsedPages = typeof pages === "string" ? JSON.parse(pages) : pages;
+    }
+
+    let parsedBlocks = existingPage.blocks;
+    if (blocks !== undefined) {
+      parsedBlocks = typeof blocks === "string" ? JSON.parse(blocks) : blocks;
+    } else if (parsedPages.length > 0 && parsedPages[0]?.blocks) {
+      parsedBlocks = parsedPages[0].blocks;
+    }
+
+    const resolvedCombinedCode = combinedCode || htmlContent || existingPage.combinedCode;
+
+    // ── REPLACE entire page object — reliable Mongoose detection ─────────────
+    targetContainer.pages[pageIndex] = {
+      _id:          existingPage._id,
+      title:        title !== undefined ? title : existingPage.title,
+      blocks:       parsedBlocks,
+      combinedCode: resolvedCombinedCode,
+      pagesData:    parsedPages.length > 0
+        ? parsedPages.map(p => ({
+            id:     p.id || p._id || String(new mongoose.Types.ObjectId()),
+            name:   p.name || p.title || "Untitled",
+            html:   p.html || "",
+            blocks: p.blocks || [],
+          }))
+        : existingPage.pagesData,
+      isMultiPage:  parsedPages.length > 0 ? parsedPages.length > 1 : existingPage.isMultiPage,
+      pageCount:    parsedPages.length > 0 ? parsedPages.length    : existingPage.pageCount,
+      version:      existingPage.version   || "1.0.0",
+      folderId:     existingPage.folderId,
+      folderPath:   existingPage.folderPath,
+      createdAt:    existingPage.createdAt,
+      createdBy:    existingPage.createdBy,
+      updatedAt:    new Date(),
+      updatedBy:    req.user?.email || "system",
+    };
+
+    if (updatedInFolder) {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+    }
+
+    entity.updatedBy = req.user?.email || "system";
+    entity.updatedAt = new Date();
+
+    await entity.save({ validateModifiedOnly: true });
+
+    return res.status(200).json({
+      success: true,
+      message: [{ key: "success", value: "Page updated successfully" }],
+      page: {
+        _id:       targetContainer.pages[pageIndex]._id,
+        title:     targetContainer.pages[pageIndex].title,
+        updatedAt: targetContainer.pages[pageIndex].updatedAt,
+      },
+      location: updatedInFolder ? "inside_folder" : "root",
+    });
+
+  } catch (err) {
+    console.error("Update page error:", err);
+    if (err.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "Validation error during update" }],
+        errors: err.errors,
+      });
+    }
+    return res.status(500).json({
+      success: false,
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
+
+
+const findEntityByTypeAndId = async (type, id) => {
+  const modelMap = {
+    module: mongoose.model("Module1"),
+    submodule: mongoose.model("SubModule1"),
+    topic: mongoose.model("Topic1"),
+    subtopic: mongoose.model("SubTopic1")
+  };
+
+  if (!modelMap[type]) {
+    throw new Error(`Invalid entity type: ${type}`);
+  }
+
+  const Model = modelMap[type];
+  const entity = await Model.findById(id);
+
+  if (!entity) {
+    throw new Error(`${type} not found with id: ${id}`);
+  }
+
+  return entity;
+};
+
+// Helper function to find file in pedagogy structure
+const findFileInPedagogy = (entity, tabType, subcategory, folderPath, fileId) => {
+  if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+    return { error: "Pedagogy section not found" };
+  }
+
+  const pedagogyElement = entity.pedagogy[tabType].get(subcategory);
+  if (!pedagogyElement) {
+    return { error: "Subcategory not found" };
+  }
+
+  let targetFiles = [];
+  let targetContainer = pedagogyElement;
+
+  // Parse folderPath if it's a string
+  let parsedFolderPath = folderPath;
+  if (typeof folderPath === 'string') {
+    try {
+      parsedFolderPath = JSON.parse(folderPath);
+    } catch (e) {
+      // If it's not valid JSON, treat as empty array
+      parsedFolderPath = [];
+    }
+  }
+
+  // Ensure parsedFolderPath is an array
+  if (!Array.isArray(parsedFolderPath)) {
+    parsedFolderPath = [];
+  }
+
+  // If folder path exists, navigate through folders
+  if (parsedFolderPath && parsedFolderPath.length > 0) {
+    let currentFolders = pedagogyElement.folders || [];
+    let currentFolder = null;
+
+    for (const folderName of parsedFolderPath) {
+      currentFolder = currentFolders.find(f => f.name === folderName);
+      if (!currentFolder) {
+        return { error: `Folder not found: ${folderName}` };
+      }
+      currentFolders = currentFolder.folders || [];
+    }
+
+    if (currentFolder) {
+      targetContainer = currentFolder;
+      targetFiles = currentFolder.files || [];
+    }
+  } else {
+    targetFiles = pedagogyElement.files || [];
+  }
+
+  // Find the specific file
+  const fileIndex = targetFiles.findIndex(f => f._id.toString() === fileId);
+  if (fileIndex === -1) {
+    return { error: "File not found" };
+  }
+
+  return {
+    container: targetContainer,
+    files: targetFiles,
+    fileIndex,
+    file: targetFiles[fileIndex]
+  };
+};
+
+// Helper function to update lastModified in fileSettings
+const updateFileLastModified = (file) => {
+  if (file.fileSettings) {
+    file.fileSettings.lastModified = new Date();
+  }
+};
+
+
+
+// Add MCQ question to a file
+async function uploadImageToSupabase(file, folderPath) {
+  try {
+    // Generate unique filename
+    const timestamp = Date.now();
+    const sanitizedName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+    const fileName = `${timestamp}_${sanitizedName}`;
+    const filePath = `question/${folderPath}/${fileName}`;
+
+    // Upload to Supabase
+    const { data, error } = await supabase.storage
+      .from("smartlms")
+      .upload(filePath, file.data, {
+        contentType: file.mimetype,
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) {
+      throw new Error(`Supabase upload failed: ${error.message}`);
+    }
+
+    // Generate public URL
+    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+
+    return imageUrl;
+
+  } catch (error) {
+    console.error("❌ Image upload failed:", error);
+    throw error;
+  }
+}
+
+// Add MCQ question to a file
+exports.addMCQQuestionToFile = async (req, res) => {
+  try {
+    const { type, id } = req.params; // type: module/submodule/topic/subtopic
+
+    // Parse body fields
+    let {
+      tabType, // I_Do, We_Do, You_Do
+      subcategory, // lecture, assignments, etc.
+      folderPath, // array of folder names (might be string or array)
+      fileId,
+      questionsData  // Accept array or single object
+    } = req.body;
+
+    // ✅ Parse folderPath if it's a string
+    if (typeof folderPath === 'string') {
+      try {
+        folderPath = JSON.parse(folderPath);
+      } catch (e) {
+        // If parsing fails, treat as empty array
+        folderPath = [];
+      }
+    }
+
+    // Ensure folderPath is an array
+    if (!Array.isArray(folderPath)) {
+      folderPath = [];
+    }
+
+    // ✅ Parse questionsData if it's a string (from FormData)
+    if (typeof questionsData === 'string') {
+      try {
+        questionsData = JSON.parse(questionsData);
+      } catch (parseError) {
+        console.error('❌ Failed to parse questionsData JSON:', parseError);
+        return res.status(400).json({
+          success: false,
+          message: [{ key: "error", value: "Invalid questionsData format. Must be valid JSON." }]
+        });
+      }
+    }
+
+    // Validate required fields
+    if (!tabType || !subcategory || !fileId || !questionsData) {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "Missing required fields: tabType, subcategory, fileId, questionsData" }]
+      });
+    }
+
+    // Convert to array if single object is sent
+    const questionsArray = Array.isArray(questionsData) ? questionsData : [questionsData];
+
+    if (questionsArray.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: "error", value: "questionsData cannot be empty" }]
+      });
+    }
+
+    // Find the entity (module/submodule/topic/subtopic)
+    const entity = await findEntityByTypeAndId(type, id);
+
+    // Initialize pedagogy if not exists
+    if (!entity.pedagogy) {
+      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
+    }
+
+    // Ensure pedagogy section exists
+    if (!entity.pedagogy[tabType]) {
+      entity.pedagogy[tabType] = new Map();
+    }
+
+    // Ensure subcategory exists
+    if (!entity.pedagogy[tabType].get(subcategory)) {
+      entity.pedagogy[tabType].set(subcategory, {
+        description: "",
+        files: [],
+        folders: [],
+        pages: []
+      });
+    }
+
+    // Find the file
+    const result = findFileInPedagogy(entity, tabType, subcategory, folderPath, fileId);
+
+    if (result.error) {
+      return res.status(404).json({
+        success: false,
+        message: [{ key: "error", value: result.error }]
+      });
+    }
+
+    const { file } = result;
+
+    // Initialize mcqQuestions array if not exists
+    if (!file.mcqQuestions) {
+      file.mcqQuestions = [];
+    }
+
+    // Parse folderPath for storage
+    const parsedFolderPath = folderPath || [];
+    const savedQuestions = [];
+
+    // Process each question in the array
+    for (let i = 0; i < questionsArray.length; i++) {
+      const questionData = questionsArray[i];
+
+      // Validate each question
+      if (!questionData.mcqQuestionTitle || !questionData.mcqQuestionTitle.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: [{ key: "error", value: `Question ${i + 1}: title is required` }]
+        });
+      }
+
+      if (!questionData.mcqQuestionOptions || !Array.isArray(questionData.mcqQuestionOptions) || questionData.mcqQuestionOptions.length < 2) {
+        return res.status(400).json({
+          success: false,
+          message: [{ key: "error", value: `Question ${i + 1}: At least 2 options are required` }]
+        });
+      }
+
+      if (!questionData.mcqQuestionCorrectAnswers || !Array.isArray(questionData.mcqQuestionCorrectAnswers) || questionData.mcqQuestionCorrectAnswers.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: [{ key: "error", value: `Question ${i + 1}: At least one correct answer is required` }]
+        });
+      }
+
+      // Process options and upload images
+      const formattedOptions = await Promise.all(
+        questionData.mcqQuestionOptions.map(async (opt, optIndex) => {
+          let imageUrl = opt.imageUrl || null;
+
+          // Check if there's an image file uploaded for this option
+          const imageField = `question_${i}_option_${optIndex}_image`;
+          const imageFile = req.files?.[imageField];
+
+          if (imageFile) {
+            try {
+              const uploadedImageUrl = await uploadImageToSupabase(
+                imageFile,
+                `mcq/files/${fileId}/question_${Date.now()}_option_${optIndex}`
+              );
+              imageUrl = uploadedImageUrl;
+            } catch (uploadError) {
+              console.error(`Error uploading image for option ${optIndex}:`, uploadError);
+              return res.status(500).json({
+                success: false,
+                message: [{ key: "error", value: `Failed to upload image for option ${optIndex + 1}` }]
+              });
+            }
+          }
+
+          return {
+            text: opt.text || '',
+            isCorrect: opt.isCorrect || questionData.mcqQuestionCorrectAnswers.includes(opt.text) || false,
+            imageUrl: imageUrl,
+            imageAlignment: opt.imageAlignment || 'left',
+            imageSizePercent: opt.imageSizePercent || 100
+          };
+        })
+      );
+
+      // Process question image if any
+      let questionImageUrl = null;
+      const questionImageField = `question_${i}_image`;
+      const questionImageFile = req.files?.[questionImageField];
+
+      if (questionImageFile) {
+        try {
+          questionImageUrl = await uploadImageToSupabase(
+            questionImageFile,
+            `mcq/files/${fileId}/question_${Date.now()}_main`
+          );
+        } catch (uploadError) {
+          console.error('Error uploading question image:', uploadError);
+          return res.status(500).json({
+            success: false,
+            message: [{ key: "error", value: `Failed to upload image for question ${i + 1}` }]
+          });
+        }
+      }
+
+
+      // Create new MCQ question with updated schema
+      const newMCQQuestion = {
+        _id: new mongoose.Types.ObjectId(),
+        isActive: questionData.isActive !== undefined ? questionData.isActive : true,
+        sequence: questionData.sequence || file.mcqQuestions.length + 1,
+        timestamp: questionData.videoTimestamp || questionData.timestamp || 0,
+        videoTimestamp: questionData.videoTimestamp || questionData.timestamp || 0,
+        mcqQuestion: {
+          questionTitle: questionData.mcqQuestionTitle,
+          explanation: questionData.mcqQuestionDescription || '',
+          options: formattedOptions,
+          correctAnswers: questionData.mcqQuestionCorrectAnswers,
+          mcqQuestionType: questionData.mcqQuestionType,
+          mcqQuestionOptionsPerRow: questionData.mcqQuestionOptionsPerRow || 2,
+          mcqQuestionRequired: questionData.mcqQuestionRequired !== undefined ? questionData.mcqQuestionRequired : true
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        createdBy: req.user?.email || 'system',
+        updatedBy: req.user?.email || 'system'
+      };
+
+      // Add question image if exists
+      if (questionImageUrl) {
+        newMCQQuestion.mcqQuestion.questionImage = {
+          imageUrl: questionImageUrl,
+          alignment: questionData.mcqQuestionImageAlignment || 'center',
+          sizePercent: questionData.mcqQuestionImageSizePercent || 60
+        };
+      }
+
+
+      // Add the question
+      file.mcqQuestions.push(newMCQQuestion);
+      savedQuestions.push(newMCQQuestion);
+    }
+
+    // Update lastModified in fileSettings
+    updateFileLastModified(file);
+
+    // Mark the path as modified for Mongoose
+    if (parsedFolderPath.length > 0) {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`pedagogy.${tabType}.${subcategory}.files`);
+    }
+
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+
+    // Save the entity
+    await entity.save();
+
+    return res.status(200).json({
+      success: true,
+      message: [{ key: "success", value: `${savedQuestions.length} MCQ question(s) added successfully` }],
+      data: {
+        entityType: type,
+        entityId: id,
+        fileId: fileId,
+        folderPath: parsedFolderPath,
+        questions: savedQuestions,
+        totalQuestions: file.mcqQuestions.length
+      }
+    });
+
+  } catch (err) {
+    console.error("Error adding MCQ question:", err);
+
+    if (err.message.includes('not found')) {
+      return res.status(404).json({
+        success: false,
+        message: [{ key: "error", value: err.message }]
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: [{ key: "error", value: "Internal server error" }]
+    });
+  }
+};
+
+// ─── getExerciseSubmissionStatus ─────────────────────────────────────────────
+// GET /analytics/exercise-submission-status
+// Query params: courseId, tabType, subcategory, exerciseIds (comma-separated)
+// Returns { [exerciseId]: boolean } — true when ≥1 enrolled student has
+// submitted an answer for that exercise in the given tabType/subcategory.
+// Fully dynamic: works for ANY tabType and ANY subcategory key.
+exports.getExerciseSubmissionStatus = async (req, res) => {
+  try {
+    const { courseId, tabType, subcategory, exerciseIds } = req.query;
+
+    if (!courseId || !tabType || !subcategory || !exerciseIds) {
+      return res.status(400).json({
+        success: false,
+        message: 'courseId, tabType, subcategory, and exerciseIds are required',
+      });
+    }
+
+    const validTabs = ['I_Do', 'We_Do', 'You_Do'];
+    if (!validTabs.includes(tabType)) {
+      return res.status(400).json({
+        success: false,
+        message: `tabType must be one of: ${validTabs.join(', ')}`,
+      });
+    }
+
+    let courseObjectId;
+    try {
+      courseObjectId = new mongoose.Types.ObjectId(courseId);
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid courseId' });
+    }
+
+    // Parse the exercise IDs list
+    const idList = exerciseIds.split(',').map(id => id.trim()).filter(Boolean);
+    if (!idList.length) {
+      return res.status(200).json({ success: true, data: {} });
+    }
+
+    // Build the result map — default false for every requested ID
+    const statusMap = {};
+    const idStringSet = new Set();
+    idList.forEach(id => {
+      // Validate each ID is a valid ObjectId before adding
+      try {
+        new mongoose.Types.ObjectId(id);
+        statusMap[id] = false;
+        idStringSet.add(id);
+      } catch { /* skip invalid IDs */ }
+    });
+
+    if (!idStringSet.size) {
+      return res.status(200).json({ success: true, data: statusMap });
+    }
+
+    // Find all users enrolled in this course.
+    // We use .lean() so answers Map becomes a plain JS object with subcategory keys.
+    const users = await User.find(
+      { 'courses.courseId': courseObjectId },
+      { courses: 1 }
+    ).lean();
+
+    for (const user of users) {
+      const courseEntry = (user.courses || []).find(
+        c => c.courseId && c.courseId.toString() === courseId
+      );
+      if (!courseEntry || !courseEntry.answers) continue;
+
+      // tabType is dynamic: 'I_Do' | 'We_Do' | 'You_Do'
+      const tabAnswers = courseEntry.answers[tabType];
+      if (!tabAnswers) continue;
+
+      // subcategory is dynamic: 'assignments' | 'quizzes' | 'practice' | any key
+      // After .lean(), a Mongoose Map becomes a plain object
+      const subcategoryEntries = tabAnswers[subcategory];
+      if (!Array.isArray(subcategoryEntries)) continue;
+
+      for (const entry of subcategoryEntries) {
+        if (!entry.exerciseId) continue;
+        const entryIdStr = entry.exerciseId.toString();
+        if (idStringSet.has(entryIdStr)) {
+          statusMap[entryIdStr] = true;
+        }
+      }
+
+      // Early exit once every exercise has at least one submission
+      if (Object.values(statusMap).every(Boolean)) break;
+    }
+
+    return res.status(200).json({ success: true, data: statusMap });
+  } catch (error) {
+    console.error('Error fetching exercise submission status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message,
+    });
+  }
+};

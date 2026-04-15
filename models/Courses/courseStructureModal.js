@@ -1,8 +1,8 @@
+// models/CourseStructure.js
 const mongoose = require("mongoose");
 
-// Group Schema (unchanged)
+// Group Schema
 const groupSchema = new mongoose.Schema({
-
   groupName: {
     type: String,
     required: true,
@@ -33,19 +33,16 @@ const groupSchema = new mongoose.Schema({
   },
   createdBy: {
     type: String,
-   
   },
   updatedAt: {
     type: Date,
     default: Date.now,
   },
   updatedBy: {
-   type: String,
+    type: String,
   },
 });
 
-// Index for faster queries
-groupSchema.index({ course: 1, institution: 1 });
 groupSchema.index({ groupName: 1, course: 1 }, { unique: true });
 
 // Enrollment Schema for single participants
@@ -60,12 +57,10 @@ const enrollmentSchema = new mongoose.Schema({
     enum: ['active', 'suspended', 'completed', 'dropped'],
     default: 'active',
   },
-  // Flags to track if custom dates are enabled
   enableEnrolmentDates: {
     type: Boolean,
     default: false,
   },
-  // Custom enrollment dates (only used when enableEnrolmentDates is true)
   enrolmentStartsDate: {
     type: Date,
     default: null,
@@ -83,7 +78,48 @@ const enrollmentSchema = new mongoose.Schema({
     default: Date.now,
   },
 });
-// Course Structure Schema with updated singleParticipants
+
+const fileResourceSchema = new mongoose.Schema({
+  enabled: { type: Boolean, default: false },
+  maxSize: { type: Number, default: 0 },
+  aiChat: { type: Boolean, default: false },
+  aiSummary: { type: Boolean, default: false },
+  allowedFormats: [{ type: String }]
+}, { _id: false });
+
+const resourceConfigSchema = new mongoose.Schema({
+  video: fileResourceSchema,
+  ppt: fileResourceSchema,
+  pdf: fileResourceSchema,
+  url: { enabled: { type: Boolean, default: false } },
+  aiChat:  { enabled: { type: Boolean, default: false } },
+  aiSummary:  { enabled: { type: Boolean, default: false } },
+  notes: { enabled: { type: Boolean, default: false } }
+}, { _id: false });
+
+const pedagogyResourceSchema = new mongoose.Schema({
+  iDo: resourceConfigSchema,
+  weDo: resourceConfigSchema,
+  youDo: resourceConfigSchema
+}, { _id: false });
+
+// Programming Languages Schema for Test Configuration
+const programmingLanguagesSchema = new mongoose.Schema({
+  coreProgram: [{
+    type: String,
+    default: []
+  }],
+  frontend: [{
+    type: String,
+    default: []
+  }],
+  database: [{
+    type: String,
+    default: []
+  }]
+}, { _id: false });
+
+// Course Structure Schema
 const courseStructureSchema = new mongoose.Schema({
   institution: {
     type: mongoose.Schema.Types.ObjectId,
@@ -131,35 +167,34 @@ const courseStructureSchema = new mongoose.Schema({
     type: String,
   },
 
-  resourcesType: [
-    {
-      type: String,
-    },
-  ],
-  courseHierarchy: [
-    {
-      type: String,
-    },
-  ],
-  I_Do: [
-    {
-      type: String,
-    },
-  ],
-  We_Do: [
-    {
-      type: String,
-    },
-  ],
-  You_Do: [
-    {
-      type: String,
-    },
-  ],
-  
-  // Updated singleParticipants to be array of enrollment objects
-  singleParticipants: [enrollmentSchema],
+  // Resources Type - Now using the new pedagogy-based structure
+  resourcesType: {
+    type: pedagogyResourceSchema,
+  },
+  aiChatGlobal: { type: Boolean, default: false },
 
+  // Skill Set Configuration
+  testConfiguration: {
+    type: programmingLanguagesSchema,
+    default: () => ({})
+  },
+
+  courseHierarchy: [{
+    type: String,
+  }],
+  
+  // Pedagogy elements (keeping existing structure)
+  I_Do: [{
+    type: String,
+  }],
+  We_Do: [{
+    type: String,
+  }],
+  You_Do: [{
+    type: String,
+  }],
+  
+  singleParticipants: [enrollmentSchema],
   groups: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: "Course-Group",
@@ -181,7 +216,6 @@ const courseStructureSchema = new mongoose.Schema({
   },
 });
 
-// Pre-save middleware to calculate enrolmentEndsDate
 enrollmentSchema.pre('save', function(next) {
   if (!this.enrolmentEndsDate && this.enrolmentStartsDate && this.enrolmentDuration) {
     const endDate = new Date(this.enrolmentStartsDate);

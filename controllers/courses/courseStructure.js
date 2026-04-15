@@ -8,8 +8,177 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabase = createClient(supabaseUrl, supabaseKey);
 const User = require("../../models/UserModel");
 const { sendEmail } = require("../../utils/sendEmail");
+
+
 exports.createCourseStructure = async (req, res) => {
   try {
+    console.log('=== Create Course Request ===');
+    console.log('Has files:', !!req.files);
+    console.log('Files keys:', req.files ? Object.keys(req.files) : 'none');
+    
+    let resourcesType = { iDo: {}, weDo: {}, youDo: {} };
+    
+    // Helper function to parse nested object fields with proper AI handling
+    const parseNestedObject = (prefix) => {
+      const result = {
+        video: { 
+          enabled: false, 
+          maxSize: 50, 
+          allowedFormats: ['mp4', 'mov', 'avi', 'webm'],
+          aiChat: false,
+          aiSummary: false
+        },
+        ppt: { 
+          enabled: false, 
+          maxSize: 20, 
+          allowedFormats: ['ppt', 'pptx'],
+          aiChat: false,
+          aiSummary: false
+        },
+        pdf: { 
+          enabled: false, 
+          maxSize: 10, 
+          allowedFormats: ['pdf'],
+          aiChat: false,
+          aiSummary: false
+        },
+        url: { enabled: false },
+        aiChat: { enabled: false, config: { model: 'gpt-3.5-turbo', temperature: 0.7 } },
+        aiSummary: { enabled: false, config: { length: 'medium', language: 'en' } },
+        notes: { enabled: false }
+      };
+      
+      // Parse video fields
+      if (req.body[`${prefix}[video][enabled]`] !== undefined) {
+        result.video.enabled = req.body[`${prefix}[video][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[video][maxSize]`] !== undefined) {
+        result.video.maxSize = parseFloat(req.body[`${prefix}[video][maxSize]`]);
+      }
+      // Parse video AI Chat
+      if (req.body[`${prefix}[video][aiChat]`] !== undefined) {
+        result.video.aiChat = req.body[`${prefix}[video][aiChat]`] === 'true';
+      }
+      // Parse video AI Summary
+      if (req.body[`${prefix}[video][aiSummary]`] !== undefined) {
+        result.video.aiSummary = req.body[`${prefix}[video][aiSummary]`] === 'true';
+      }
+      
+      // Parse ppt fields
+      if (req.body[`${prefix}[ppt][enabled]`] !== undefined) {
+        result.ppt.enabled = req.body[`${prefix}[ppt][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[ppt][maxSize]`] !== undefined) {
+        result.ppt.maxSize = parseFloat(req.body[`${prefix}[ppt][maxSize]`]);
+      }
+      // Parse ppt AI Chat
+      if (req.body[`${prefix}[ppt][aiChat]`] !== undefined) {
+        result.ppt.aiChat = req.body[`${prefix}[ppt][aiChat]`] === 'true';
+      }
+      // Parse ppt AI Summary
+      if (req.body[`${prefix}[ppt][aiSummary]`] !== undefined) {
+        result.ppt.aiSummary = req.body[`${prefix}[ppt][aiSummary]`] === 'true';
+      }
+      
+      // Parse pdf fields
+      if (req.body[`${prefix}[pdf][enabled]`] !== undefined) {
+        result.pdf.enabled = req.body[`${prefix}[pdf][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[pdf][maxSize]`] !== undefined) {
+        result.pdf.maxSize = parseFloat(req.body[`${prefix}[pdf][maxSize]`]);
+      }
+      // Parse pdf AI Chat
+      if (req.body[`${prefix}[pdf][aiChat]`] !== undefined) {
+        result.pdf.aiChat = req.body[`${prefix}[pdf][aiChat]`] === 'true';
+      }
+      // Parse pdf AI Summary
+      if (req.body[`${prefix}[pdf][aiSummary]`] !== undefined) {
+        result.pdf.aiSummary = req.body[`${prefix}[pdf][aiSummary]`] === 'true';
+      }
+      
+      // Parse url
+      if (req.body[`${prefix}[url][enabled]`] !== undefined) {
+        result.url.enabled = req.body[`${prefix}[url][enabled]`] === 'true';
+      }
+      
+      // Parse aiChat (global for I_Do)
+      if (req.body[`${prefix}[aiChat][enabled]`] !== undefined) {
+        result.aiChat.enabled = req.body[`${prefix}[aiChat][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[aiChat][config][model]`] !== undefined) {
+        result.aiChat.config.model = req.body[`${prefix}[aiChat][config][model]`];
+      }
+      if (req.body[`${prefix}[aiChat][config][temperature]`] !== undefined) {
+        result.aiChat.config.temperature = parseFloat(req.body[`${prefix}[aiChat][config][temperature]`]);
+      }
+      
+      // Parse aiSummary (global for I_Do)
+      if (req.body[`${prefix}[aiSummary][enabled]`] !== undefined) {
+        result.aiSummary.enabled = req.body[`${prefix}[aiSummary][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[aiSummary][config][length]`] !== undefined) {
+        result.aiSummary.config.length = req.body[`${prefix}[aiSummary][config][length]`];
+      }
+      if (req.body[`${prefix}[aiSummary][config][language]`] !== undefined) {
+        result.aiSummary.config.language = req.body[`${prefix}[aiSummary][config][language]`];
+      }
+      
+      // Parse notes
+      if (req.body[`${prefix}[notes][enabled]`] !== undefined) {
+        result.notes.enabled = req.body[`${prefix}[notes][enabled]`] === 'true';
+      }
+      
+      return result;
+    };
+    
+    // Parse resources for each pedagogy type
+    resourcesType.iDo = parseNestedObject('resourcesType[iDo]');
+    resourcesType.weDo = parseNestedObject('resourcesType[weDo]');
+    resourcesType.youDo = parseNestedObject('resourcesType[youDo]');
+    
+    // Parse testConfiguration configuration (flat format: { coreProgram, frontend, database })
+    const parseTestConfigurationConfig = () => {
+      const result = { coreProgram: [], frontend: [], database: [] };
+      const coreProgramPattern = /^testConfiguration\[coreProgram\](?:\[(\d+)\])?$/;
+      const frontendPattern = /^testConfiguration\[frontend\](?:\[(\d+)\])?$/;
+      const databasePattern = /^testConfiguration\[database\](?:\[(\d+)\])?$/;
+
+      for (let key in req.body) {
+        const value = req.body[key];
+        if (!value) continue;
+        if (coreProgramPattern.test(key) && !result.coreProgram.includes(value)) {
+          result.coreProgram.push(value);
+        } else if (frontendPattern.test(key) && !result.frontend.includes(value)) {
+          result.frontend.push(value);
+        } else if (databasePattern.test(key) && !result.database.includes(value)) {
+          result.database.push(value);
+        }
+      }
+      return result;
+    };
+
+    const testConfigurationConfig = parseTestConfigurationConfig();
+    console.log('Parsed testConfiguration config:', JSON.stringify(testConfigurationConfig, null, 2));
+    
+    // Parse arrays from form data
+    const parseArrayField = (fieldName) => {
+      const values = [];
+      for (let key in req.body) {
+        if (key.startsWith(`${fieldName}[`) && key.endsWith(']')) {
+          values.push(req.body[key]);
+        }
+      }
+      if (req.body[fieldName] && Array.isArray(req.body[fieldName])) {
+        return req.body[fieldName];
+      }
+      return values.length > 0 ? values : (req.body[fieldName] || []);
+    };
+    
+    const courseHierarchy = parseArrayField('courseHierarchy');
+    const I_Do = parseArrayField('I_Do');
+    const We_Do = parseArrayField('We_Do');
+    const You_Do = parseArrayField('You_Do');
+    
     const {
       clientName,
       serviceType,
@@ -20,78 +189,368 @@ exports.createCourseStructure = async (req, res) => {
       courseDescription,
       courseDuration,
       courseLevel,
-      resourcesType,
-      courseHierarchy,
-      I_Do,
-      We_Do,
-      You_Do,
+      aiChatGlobal,
     } = req.body;
-
+    
+    console.log('Parsed resourcesType:', JSON.stringify(resourcesType, null, 2));
+    
     // Check if courseCode already exists
-    const existingCourse = await CourseStructure.findOne({ courseCode });
-    if (existingCourse) {
-      return res.status(403).json({
-        message: [{ key: "error", value: "Course Code already exists" }],
-      });
+    if (courseCode) {
+      const existingCourse = await CourseStructure.findOne({ courseCode });
+      if (existingCourse) {
+        return res.status(403).json({
+          message: [{ key: "error", value: "Course Code already exists" }],
+        });
+      }
     }
-
+    
     // Required fields check
-    if (
-      !clientName ||
-      !serviceType ||
-      !serviceModal ||
-      !category ||
-      !courseName
-    ) {
+    if (!clientName || !serviceType || !serviceModal || !category || !courseName) {
       return res.status(400).json({
         message: [{ key: "error", value: "Required fields are missing" }],
       });
     }
-
+    
     // Validate if clientName is a valid MongoDB ObjectId
     if (!mongoose.Types.ObjectId.isValid(clientName)) {
       return res.status(400).json({
         message: [{ key: "error", value: "Invalid client ID format" }],
       });
     }
-
-    // Check if the client exists in Course-Structure-Dynamic
+    
+    // Check if the client exists
     const dynamicStructure = await CourseStructureDynamic.findOne({
       "client._id": clientName,
       institution: req.user.institution,
     });
-
+    
     if (!dynamicStructure) {
       return res.status(404).json({
         message: [{ key: "error", value: "Client not found in the system" }],
       });
     }
-
-    // Image upload (completely optional - no default image will be set)
+    
+    // Image upload handler
     let imageUrl = undefined;
-    const imageFile = req.files?.courseImage;
-
-    if (imageFile) {
-      const uniqueFileName = `${Date.now()}_${imageFile.name}`;
-      const { error } = await supabase.storage
-        .from("smartlms")
-        .upload(`course/image/${uniqueFileName}`, imageFile.data);
-
-      if (error) {
-        console.error("Error uploading image to Supabase:", error);
-        return res.status(500).json({
-          message: [
-            { key: "error", value: "Error uploading image to Supabase" },
-          ],
-        });
+    
+    const extractFileData = (fileInput) => {
+      let fileObj = fileInput;
+      if (Array.isArray(fileInput)) {
+        fileObj = fileInput[0];
       }
-
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/course/image/${uniqueFileName}`;
+      
+      if (!fileObj) return null;
+      
+      let fileData = null;
+      let fileName = null;
+      let mimeType = null;
+      
+      if (fileObj.data) {
+        fileData = fileObj.data;
+        fileName = fileObj.name || fileObj.originalname || 'image';
+        mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+      } 
+      else if (fileObj.buffer) {
+        fileData = fileObj.buffer;
+        fileName = fileObj.originalname || fileObj.name || 'image';
+        mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+      }
+      else if (fileObj.path) {
+        const fs = require('fs');
+        if (fs.existsSync(fileObj.path)) {
+          fileData = fs.readFileSync(fileObj.path);
+          fileName = fileObj.originalname || fileObj.name || 'image';
+          mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+        }
+      }
+      
+      return fileData ? { fileData, fileName, mimeType } : null;
+    };
+    
+    if (req.files && req.files.courseImage) {
+      try {
+        const extracted = extractFileData(req.files.courseImage);
+        
+        if (extracted) {
+          const { fileData, fileName, mimeType } = extracted;
+          
+          console.log('Processing image:', {
+            fileName: fileName,
+            fileSize: fileData.length,
+            fileType: mimeType,
+          });
+          
+          if (fileData.length > 5 * 1024 * 1024) {
+            return res.status(400).json({
+              message: [{ key: "error", value: "Image size should be less than 5MB" }],
+            });
+          }
+          
+          const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+          if (!validTypes.includes(mimeType)) {
+            return res.status(400).json({
+              message: [{ key: "error", value: "Only JPEG, JPG, PNG, WebP, and GIF formats are allowed" }],
+            });
+          }
+          
+          const timestamp = Date.now();
+          const extension = mimeType.split('/')[1] || 'jpg';
+          const baseFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const uniqueFileName = `${timestamp}_${baseFileName}`;
+          
+          console.log('Uploading to Supabase:', uniqueFileName);
+          
+          const { error: uploadError } = await supabase.storage
+            .from("smartlms")
+            .upload(`course/image/${uniqueFileName}`, fileData, {
+              contentType: mimeType,
+              cacheControl: '3600',
+              upsert: false
+            });
+          
+          if (!uploadError) {
+            const { data: publicUrlData } = supabase.storage
+              .from("smartlms")
+              .getPublicUrl(`course/image/${uniqueFileName}`);
+            
+            imageUrl = publicUrlData.publicUrl;
+            console.log('Image URL generated:', imageUrl);
+          }
+        }
+      } catch (error) {
+        console.error("Error processing image:", error);
+      }
     }
-
-    // Save course
+    
+    // Create and save course with testConfiguration configuration
     const newCourse = new CourseStructure({
       institution: req.user.institution,
+      clientName,
+      serviceType,
+      serviceModal,
+      category,
+      courseCode,
+      courseName,
+      courseDescription: courseDescription || "",
+      courseDuration: courseDuration || "",
+      courseLevel,
+      aiChatGlobal: aiChatGlobal === 'true' || aiChatGlobal === true,
+      resourcesType: resourcesType,
+      testConfiguration: testConfigurationConfig,
+      courseHierarchy: courseHierarchy,
+      I_Do: I_Do,
+      We_Do: We_Do,
+      You_Do: You_Do,
+      courseImage: imageUrl,
+      createdBy: req.user.email,
+    });
+    
+    const savedCourse = await newCourse.save();
+    
+    console.log("Course saved successfully:", {
+      id: savedCourse._id,
+      courseName: savedCourse.courseName,
+      testConfiguration: savedCourse.testConfiguration,
+      resourcesType: {
+        iDo: {
+          video: { aiChat: savedCourse.resourcesType.iDo.video?.aiChat, aiSummary: savedCourse.resourcesType.iDo.video?.aiSummary },
+          ppt: { aiChat: savedCourse.resourcesType.iDo.ppt?.aiChat, aiSummary: savedCourse.resourcesType.iDo.ppt?.aiSummary },
+          pdf: { aiChat: savedCourse.resourcesType.iDo.pdf?.aiChat, aiSummary: savedCourse.resourcesType.iDo.pdf?.aiSummary }
+        },
+        weDo: {
+          aiChat: savedCourse.resourcesType.weDo.aiChat?.enabled,
+          aiSummary: savedCourse.resourcesType.weDo.aiSummary?.enabled,
+          notes: savedCourse.resourcesType.weDo.notes?.enabled
+        },
+        youDo: {
+          aiChat: savedCourse.resourcesType.youDo.aiChat?.enabled,
+          aiSummary: savedCourse.resourcesType.youDo.aiSummary?.enabled,
+          notes: savedCourse.resourcesType.youDo.notes?.enabled
+        }
+      }
+    });
+    
+    return res.status(201).json({
+      message: [{ key: "success", value: "Course structure created successfully" }],
+      data: savedCourse,
+    });
+    
+  } catch (error) {
+    console.error("Error adding course structure:", error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Server error while adding course structure: " + error.message }],
+    });
+  }
+};
+exports.updateCourseStructure = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    
+    console.log('=== Update Course Request ===');
+    console.log('Course ID:', courseId);
+    console.log('Has files:', !!req.files);
+    console.log('Files keys:', req.files ? Object.keys(req.files) : 'none');
+    
+    // Parse nested resourcesType configuration from form data (same as create)
+    let resourcesType = { iDo: {}, weDo: {}, youDo: {} };
+    
+    // Helper function to parse nested object fields with proper AI handling
+    const parseNestedObject = (prefix) => {
+      const result = {
+        video: { 
+          enabled: false, 
+          maxSize: 50, 
+          allowedFormats: ['mp4', 'mov', 'avi', 'webm'],
+          aiChat: false,
+          aiSummary: false
+        },
+        ppt: { 
+          enabled: false, 
+          maxSize: 20, 
+          allowedFormats: ['ppt', 'pptx'],
+          aiChat: false,
+          aiSummary: false
+        },
+        pdf: { 
+          enabled: false, 
+          maxSize: 10, 
+          allowedFormats: ['pdf'],
+          aiChat: false,
+          aiSummary: false
+        },
+        url: { enabled: false },
+        aiChat: { enabled: false, config: { model: 'gpt-3.5-turbo', temperature: 0.7 } },
+        aiSummary: { enabled: false, config: { length: 'medium', language: 'en' } },
+        notes: { enabled: false }
+      };
+      
+      // Parse video fields
+      if (req.body[`${prefix}[video][enabled]`] !== undefined) {
+        result.video.enabled = req.body[`${prefix}[video][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[video][maxSize]`] !== undefined) {
+        result.video.maxSize = parseFloat(req.body[`${prefix}[video][maxSize]`]);
+      }
+      if (req.body[`${prefix}[video][aiChat]`] !== undefined) {
+        result.video.aiChat = req.body[`${prefix}[video][aiChat]`] === 'true';
+      }
+      if (req.body[`${prefix}[video][aiSummary]`] !== undefined) {
+        result.video.aiSummary = req.body[`${prefix}[video][aiSummary]`] === 'true';
+      }
+      
+      // Parse ppt fields
+      if (req.body[`${prefix}[ppt][enabled]`] !== undefined) {
+        result.ppt.enabled = req.body[`${prefix}[ppt][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[ppt][maxSize]`] !== undefined) {
+        result.ppt.maxSize = parseFloat(req.body[`${prefix}[ppt][maxSize]`]);
+      }
+      if (req.body[`${prefix}[ppt][aiChat]`] !== undefined) {
+        result.ppt.aiChat = req.body[`${prefix}[ppt][aiChat]`] === 'true';
+      }
+      if (req.body[`${prefix}[ppt][aiSummary]`] !== undefined) {
+        result.ppt.aiSummary = req.body[`${prefix}[ppt][aiSummary]`] === 'true';
+      }
+      
+      // Parse pdf fields
+      if (req.body[`${prefix}[pdf][enabled]`] !== undefined) {
+        result.pdf.enabled = req.body[`${prefix}[pdf][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[pdf][maxSize]`] !== undefined) {
+        result.pdf.maxSize = parseFloat(req.body[`${prefix}[pdf][maxSize]`]);
+      }
+      if (req.body[`${prefix}[pdf][aiChat]`] !== undefined) {
+        result.pdf.aiChat = req.body[`${prefix}[pdf][aiChat]`] === 'true';
+      }
+      if (req.body[`${prefix}[pdf][aiSummary]`] !== undefined) {
+        result.pdf.aiSummary = req.body[`${prefix}[pdf][aiSummary]`] === 'true';
+      }
+      
+      // Parse url
+      if (req.body[`${prefix}[url][enabled]`] !== undefined) {
+        result.url.enabled = req.body[`${prefix}[url][enabled]`] === 'true';
+      }
+      
+      // Parse aiChat
+      if (req.body[`${prefix}[aiChat][enabled]`] !== undefined) {
+        result.aiChat.enabled = req.body[`${prefix}[aiChat][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[aiChat][config][model]`] !== undefined) {
+        result.aiChat.config.model = req.body[`${prefix}[aiChat][config][model]`];
+      }
+      if (req.body[`${prefix}[aiChat][config][temperature]`] !== undefined) {
+        result.aiChat.config.temperature = parseFloat(req.body[`${prefix}[aiChat][config][temperature]`]);
+      }
+      
+      // Parse aiSummary
+      if (req.body[`${prefix}[aiSummary][enabled]`] !== undefined) {
+        result.aiSummary.enabled = req.body[`${prefix}[aiSummary][enabled]`] === 'true';
+      }
+      if (req.body[`${prefix}[aiSummary][config][length]`] !== undefined) {
+        result.aiSummary.config.length = req.body[`${prefix}[aiSummary][config][length]`];
+      }
+      if (req.body[`${prefix}[aiSummary][config][language]`] !== undefined) {
+        result.aiSummary.config.language = req.body[`${prefix}[aiSummary][config][language]`];
+      }
+      
+      // Parse notes
+      if (req.body[`${prefix}[notes][enabled]`] !== undefined) {
+        result.notes.enabled = req.body[`${prefix}[notes][enabled]`] === 'true';
+      }
+      
+      return result;
+    };
+    
+    // Parse resources for each pedagogy type
+    resourcesType.iDo = parseNestedObject('resourcesType[iDo]');
+    resourcesType.weDo = parseNestedObject('resourcesType[weDo]');
+    resourcesType.youDo = parseNestedObject('resourcesType[youDo]');
+    
+    // ========== Parse testConfiguration configuration (flat format) ==========
+    const parseTestConfigurationConfig = () => {
+      const result = { coreProgram: [], frontend: [], database: [] };
+      const coreProgramPattern = /^testConfiguration\[coreProgram\](?:\[(\d+)\])?$/;
+      const frontendPattern = /^testConfiguration\[frontend\](?:\[(\d+)\])?$/;
+      const databasePattern = /^testConfiguration\[database\](?:\[(\d+)\])?$/;
+
+      for (let key in req.body) {
+        const value = req.body[key];
+        if (!value) continue;
+        if (coreProgramPattern.test(key) && !result.coreProgram.includes(value)) {
+          result.coreProgram.push(value);
+        } else if (frontendPattern.test(key) && !result.frontend.includes(value)) {
+          result.frontend.push(value);
+        } else if (databasePattern.test(key) && !result.database.includes(value)) {
+          result.database.push(value);
+        }
+      }
+      return result;
+    };
+
+    const testConfigurationConfig = parseTestConfigurationConfig();
+    console.log('Update - Parsed testConfiguration config:', JSON.stringify(testConfigurationConfig, null, 2));
+    // ========== END ==========
+    
+    // Parse arrays from form data
+    const parseArrayField = (fieldName) => {
+      const values = [];
+      for (let key in req.body) {
+        if (key.startsWith(`${fieldName}[`) && key.endsWith(']')) {
+          values.push(req.body[key]);
+        }
+      }
+      if (req.body[fieldName] && Array.isArray(req.body[fieldName])) {
+        return req.body[fieldName];
+      }
+      return values.length > 0 ? values : (req.body[fieldName] || []);
+    };
+    
+    const courseHierarchy = parseArrayField('courseHierarchy');
+    const I_Do = parseArrayField('I_Do');
+    const We_Do = parseArrayField('We_Do');
+    const You_Do = parseArrayField('You_Do');
+    
+    const {
       clientName,
       serviceType,
       serviceModal,
@@ -101,29 +560,278 @@ exports.createCourseStructure = async (req, res) => {
       courseDescription,
       courseDuration,
       courseLevel,
-      resourcesType,
-      courseHierarchy,
-      I_Do,
-      We_Do,
-      You_Do,
-      courseImage: imageUrl, // will be undefined if no image was uploaded
-      createdBy: req.user.email,
+      removeImage,
+      aiChatGlobal
+    } = req.body;
+    
+    console.log('Update - Parsed resourcesType:', JSON.stringify(resourcesType, null, 2));
+    console.log('Update - Received I_Do:', I_Do);
+    console.log('Update - Received We_Do:', We_Do);
+    console.log('Update - Received You_Do:', You_Do);
+    console.log('Update - Received courseHierarchy:', courseHierarchy);
+    console.log('Update - Remove Image Flag:', removeImage);
+    
+    // Check if course exists
+    const existingCourse = await CourseStructure.findById(courseId);
+    if (!existingCourse) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Course not found" }],
+      });
+    }
+    
+    // Check if courseCode already exists (excluding current course)
+    if (courseCode && courseCode !== existingCourse.courseCode) {
+      const courseWithSameCode = await CourseStructure.findOne({ 
+        courseCode, 
+        _id: { $ne: courseId } 
+      });
+      if (courseWithSameCode) {
+        return res.status(403).json({
+          message: [{ key: "error", value: "Course Code already exists" }],
+        });
+      }
+    }
+    
+    // Required fields check
+    if (!clientName || !serviceType || !serviceModal || !category || !courseName) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Required fields are missing" }],
+      });
+    }
+    
+    // Validate if clientName is a valid MongoDB ObjectId
+    if (clientName && !mongoose.Types.ObjectId.isValid(clientName)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid client ID format" }],
+      });
+    }
+    
+    // Check if the client exists in Course-Structure-Dynamic (if client changed)
+    if (clientName && clientName !== existingCourse.clientName.toString()) {
+      const dynamicStructure = await CourseStructureDynamic.findOne({
+        "client._id": clientName,
+        institution: req.user.institution,
+      });
+      
+      if (!dynamicStructure) {
+        return res.status(404).json({
+          message: [{ key: "error", value: "Client not found in the system" }],
+        });
+      }
+    }
+    
+    // Helper function to extract file data from various formats
+    const extractFileData = (fileInput) => {
+      let fileObj = fileInput;
+      if (Array.isArray(fileInput)) {
+        fileObj = fileInput[0];
+      }
+      
+      if (!fileObj) return null;
+      
+      let fileData = null;
+      let fileName = null;
+      let mimeType = null;
+      
+      if (fileObj.data) {
+        fileData = fileObj.data;
+        fileName = fileObj.name || fileObj.originalname || 'image';
+        mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+      } 
+      else if (fileObj.buffer) {
+        fileData = fileObj.buffer;
+        fileName = fileObj.originalname || fileObj.name || 'image';
+        mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+      }
+      else if (fileObj.path) {
+        const fs = require('fs');
+        if (fs.existsSync(fileObj.path)) {
+          fileData = fs.readFileSync(fileObj.path);
+          fileName = fileObj.originalname || fileObj.name || 'image';
+          mimeType = fileObj.mimetype || fileObj.type || 'image/jpeg';
+        }
+      }
+      
+      return fileData ? { fileData, fileName, mimeType } : null;
+    };
+    
+    // Handle image upload/removal
+    let imageUrl = existingCourse.courseImage;
+    const imageFile = req.files?.courseImage;
+    
+    // If removeImage flag is true, remove the image
+    if (removeImage === 'true') {
+      imageUrl = undefined;
+      console.log('Image removal requested');
+      
+      if (existingCourse.courseImage) {
+        try {
+          const oldImagePath = existingCourse.courseImage.split('/').pop();
+          if (oldImagePath) {
+            await supabase.storage.from("smartlms").remove([`course/image/${oldImagePath}`]);
+            console.log('Old image deleted on removal:', oldImagePath);
+          }
+        } catch (deleteError) {
+          console.error('Error deleting old image on removal:', deleteError);
+        }
+      }
+    }
+    
+    // If new image is uploaded, upload it
+    if (imageFile && removeImage !== 'true') {
+      try {
+        const extracted = extractFileData(imageFile);
+        
+        if (extracted) {
+          const { fileData, fileName, mimeType } = extracted;
+          
+          console.log('Processing new image for update:', {
+            fileName: fileName,
+            fileSize: fileData.length,
+            fileType: mimeType
+          });
+          
+          if (fileData.length > 5 * 1024 * 1024) {
+            return res.status(400).json({
+              message: [{ key: "error", value: "Image size should be less than 5MB" }],
+            });
+          }
+          
+          const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+          if (!validTypes.includes(mimeType)) {
+            return res.status(400).json({
+              message: [{ key: "error", value: "Only JPEG, JPG, PNG, WebP, and GIF formats are allowed" }],
+            });
+          }
+          
+          const timestamp = Date.now();
+          const baseFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const uniqueFileName = `${timestamp}_${baseFileName}`;
+          
+          console.log('Uploading new image to Supabase:', uniqueFileName);
+          
+          const { error: uploadError } = await supabase.storage
+            .from("smartlms")
+            .upload(`course/image/${uniqueFileName}`, fileData, {
+              contentType: mimeType,
+              cacheControl: '3600',
+              upsert: false
+            });
+          
+          if (uploadError) {
+            console.error("Error uploading image to Supabase:", uploadError);
+            return res.status(500).json({
+              message: [{ key: "error", value: "Error uploading image to Supabase: " + uploadError.message }],
+            });
+          }
+          
+          const { data: publicUrlData } = supabase.storage
+            .from("smartlms")
+            .getPublicUrl(`course/image/${uniqueFileName}`);
+          
+          imageUrl = publicUrlData.publicUrl;
+          console.log('New image URL generated:', imageUrl);
+          
+          // Delete old image if it exists
+          if (existingCourse.courseImage) {
+            try {
+              const oldImagePath = existingCourse.courseImage.split('/').pop();
+              if (oldImagePath) {
+                await supabase.storage.from("smartlms").remove([`course/image/${oldImagePath}`]);
+                console.log('Old image deleted:', oldImagePath);
+              }
+            } catch (deleteError) {
+              console.error('Error deleting old image:', deleteError);
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Error processing image update:", error);
+        imageUrl = existingCourse.courseImage;
+      }
+    }
+    
+    // Prepare update data
+    const updateData = {
+      clientName,
+      serviceType,
+      serviceModal,
+      category,
+      courseCode,
+      courseName,
+      courseDescription: courseDescription || "",
+      courseDuration: courseDuration || "",
+      courseLevel,
+      aiChatGlobal: aiChatGlobal === 'true' || aiChatGlobal === true,
+      resourcesType: resourcesType,
+      testConfiguration: testConfigurationConfig, // ADDED: Include testConfiguration in update
+      courseHierarchy: courseHierarchy,
+      I_Do: I_Do,
+      We_Do: We_Do,
+      You_Do: You_Do,
+      updatedBy: req.user.email,
+      updatedAt: new Date()
+    };
+    
+    // Only update image if it was changed
+    if (imageUrl !== existingCourse.courseImage) {
+      updateData.courseImage = imageUrl;
+    }
+    
+    // Remove undefined fields to avoid overwriting with undefined
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] === undefined) {
+        delete updateData[key];
+      }
     });
-
-    const savedCourse = await newCourse.save();
-
-    return res.status(201).json({
-      message: [
-        { key: "success", value: "Course structure created successfully" },
-      ],
-      data: savedCourse,
+    
+    // Update course
+    const updatedCourse = await CourseStructure.findByIdAndUpdate(
+      courseId,
+      updateData,
+      { new: true, runValidators: true }
+    );
+    
+    if (!updatedCourse) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "Course not found" }],
+      });
+    }
+    
+    console.log("Course updated successfully:", {
+      id: updatedCourse._id,
+      courseName: updatedCourse.courseName,
+      courseCode: updatedCourse.courseCode,
+      hasImage: !!updatedCourse.courseImage,
+      testConfiguration: updatedCourse.testConfiguration,
+      resourcesType: {
+        iDo: {
+          video: { aiChat: updatedCourse.resourcesType.iDo.video?.aiChat, aiSummary: updatedCourse.resourcesType.iDo.video?.aiSummary },
+          ppt: { aiChat: updatedCourse.resourcesType.iDo.ppt?.aiChat, aiSummary: updatedCourse.resourcesType.iDo.ppt?.aiSummary },
+          pdf: { aiChat: updatedCourse.resourcesType.iDo.pdf?.aiChat, aiSummary: updatedCourse.resourcesType.iDo.pdf?.aiSummary }
+        },
+        weDo: {
+          aiChat: updatedCourse.resourcesType.weDo.aiChat?.enabled,
+          aiSummary: updatedCourse.resourcesType.weDo.aiSummary?.enabled,
+          notes: updatedCourse.resourcesType.weDo.notes?.enabled
+        },
+        youDo: {
+          aiChat: updatedCourse.resourcesType.youDo.aiChat?.enabled,
+          aiSummary: updatedCourse.resourcesType.youDo.aiSummary?.enabled,
+          notes: updatedCourse.resourcesType.youDo.notes?.enabled
+        }
+      }
     });
+    
+    return res.status(200).json({
+      message: [{ key: "success", value: "Course structure updated successfully" }],
+      data: updatedCourse,
+    });
+    
   } catch (error) {
-    console.error("Error adding course structure:", error);
+    console.error("Error updating course structure:", error);
     return res.status(500).json({
-      message: [
-        { key: "error", value: "Server error while adding course structure" },
-      ],
+      message: [{ key: "error", value: "Server error while updating course structure: " + error.message }],
     });
   }
 };
@@ -410,233 +1118,7 @@ exports.getCourseStructureById = async (req, res) => {
     });
   }
 };
-
-exports.updateCourseStructure = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      clientName,
-      serviceType,
-      serviceModal,
-      category,
-      courseCode,
-      courseName,
-      courseDescription,
-      courseDuration,
-      courseLevel,
-      resourcesType,
-      courseHierarchy,
-      I_Do,
-      We_Do,
-      You_Do,
-      removeImage,
-    } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        message: [{ key: "error", value: "Invalid course ID format" }],
-      });
-    }
-
-    const existingCourse = await CourseStructure.findOne({
-      _id: id,
-      institution: req.user.institution,
-    });
-
-    if (!existingCourse) {
-      return res.status(404).json({
-        message: [{ key: "error", value: "Course structure not found" }],
-      });
-    }
-
-    // Check if courseCode already exists (only if it's being changed)
-    if (courseCode && courseCode !== existingCourse.courseCode) {
-      const duplicateCourse = await CourseStructure.findOne({
-        courseCode,
-        _id: { $ne: id },
-      });
-
-      if (duplicateCourse) {
-        return res.status(403).json({
-          message: [{ key: "error", value: "Course Code already exists" }],
-        });
-      }
-    }
-
-    // Validate clientName if provided
-    if (clientName) {
-      if (!mongoose.Types.ObjectId.isValid(clientName)) {
-        return res.status(400).json({
-          message: [{ key: "error", value: "Invalid client ID format" }],
-        });
-      }
-
-      const dynamicStructure = await CourseStructureDynamic.findOne({
-        "client._id": clientName,
-        institution: req.user.institution,
-      });
-
-      if (!dynamicStructure) {
-        return res.status(404).json({
-          message: [{ key: "error", value: "Client not found in the system" }],
-        });
-      }
-    }
-
-    // Handle image operations
-    let imageUrl;
-    const imageFile = req.files?.courseImage;
-
-    // If removeImage flag is true, we'll remove the existing image
-    if (removeImage === "true" && existingCourse.courseImage) {
-      try {
-        const oldImagePath = existingCourse.courseImage.split("/").pop();
-        const { error: deleteError } = await supabase.storage
-          .from("smartlms")
-          .remove([`course/image/${oldImagePath}`]);
-
-        if (deleteError) {
-          console.error("Error deleting old image:", deleteError);
-        }
-        imageUrl = undefined;
-      } catch (deleteErr) {
-        console.error("Error deleting image:", deleteErr);
-      }
-    }
-    // If a new image is uploaded
-    else if (imageFile) {
-      // Delete old image if it exists
-      if (existingCourse.courseImage) {
-        try {
-          const oldImagePath = existingCourse.courseImage.split("/").pop();
-          const { error: deleteError } = await supabase.storage
-            .from("smartlms")
-            .remove([`course/image/${oldImagePath}`]);
-
-          if (deleteError) {
-            console.error("Error deleting old image:", deleteError);
-          }
-        } catch (deleteErr) {
-          console.error("Error deleting old image:", deleteErr);
-        }
-      }
-
-      // Upload new image
-      const uniqueFileName = `${Date.now()}_${imageFile.name}`;
-      const { error } = await supabase.storage
-        .from("smartlms")
-        .upload(`course/image/${uniqueFileName}`, imageFile.data);
-
-      if (error) {
-        console.error("Error uploading image to Supabase:", error);
-        return res.status(500).json({
-          message: [
-            { key: "error", value: "Error uploading image to Supabase" },
-          ],
-        });
-      }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/course/image/${uniqueFileName}`;
-    }
-
-    // Prepare update data
-    const updateData = {
-      updatedAt: new Date(),
-      updatedBy: req.user.email,
-    };
-
-    // Build the $set object dynamically
-    const setData = {};
-    
-    // Only add fields that are explicitly provided in the request
-    if (clientName !== undefined) setData.clientName = clientName;
-    if (serviceType !== undefined) setData.serviceType = serviceType;
-    if (serviceModal !== undefined) setData.serviceModal = serviceModal;
-    if (category !== undefined) setData.category = category;
-    if (courseCode !== undefined) setData.courseCode = courseCode;
-    if (courseName !== undefined) setData.courseName = courseName;
-    if (courseDescription !== undefined) setData.courseDescription = courseDescription;
-    if (courseDuration !== undefined) setData.courseDuration = courseDuration;
-    if (courseLevel !== undefined) setData.courseLevel = courseLevel;
-    if (resourcesType !== undefined) setData.resourcesType = resourcesType;
-    if (courseHierarchy !== undefined) setData.courseHierarchy = courseHierarchy;
-    if (I_Do !== undefined) setData.I_Do = I_Do;
-    if (We_Do !== undefined) setData.We_Do = We_Do;
-    if (You_Do !== undefined) setData.You_Do = You_Do;
-
-    // Handle image updates
-    if (removeImage === "true") {
-      setData.courseImage = undefined;
-    } else if (imageUrl) {
-      setData.courseImage = imageUrl;
-    } else if (!imageFile && !removeImage) {
-      // If no image operation is performed, preserve existing image
-      setData.courseImage = existingCourse.courseImage;
-    }
-
-    // Use $set to only update the specified fields
-    updateData.$set = setData;
-
-    // For array fields that are not provided, we need to explicitly remove them
-    const unsetData = {};
-    
-    // Remove array fields that are not provided in the request
-    if (I_Do === undefined) unsetData.I_Do = 1;
-    if (We_Do === undefined) unsetData.We_Do = 1;
-    if (You_Do === undefined) unsetData.You_Do = 1;
-    if (resourcesType === undefined) unsetData.resourcesType = 1;
-    if (courseHierarchy === undefined) unsetData.courseHierarchy = 1;
-
-    // Only add $unset if there are fields to remove
-    if (Object.keys(unsetData).length > 0) {
-      updateData.$unset = unsetData;
-    }
-
-    // Update the course
-    const updatedCourse = await CourseStructure.findByIdAndUpdate(
-      id,
-      updateData,
-      { new: true, runValidators: true }
-    );
-
-    // Populate client data for response
-    const dynamicStructure = await CourseStructureDynamic.findOne({
-      "client._id": updatedCourse.clientName,
-    });
-
-    let populatedCourse = updatedCourse.toObject();
-
-    if (dynamicStructure) {
-      const client = dynamicStructure.client.find(
-        (client) =>
-          client._id.toString() === updatedCourse.clientName.toString()
-      );
-
-      if (client) {
-        populatedCourse = {
-          ...populatedCourse,
-          clientId: populatedCourse.clientName,
-          clientName: client.clientCompany,
-          clientData: client,
-        };
-      }
-    }
-
-
-    return res.status(200).json({
-      message: [
-        { key: "success", value: "Course structure updated successfully" },
-      ],
-      data: populatedCourse,
-    });
-  } catch (error) {
-    console.error("Error updating course structure:", error);
-    return res.status(500).json({
-      message: [
-        { key: "error", value: "Server error while updating course structure" },
-      ],
-    });
-  }
-};
+;
 
 exports.deleteCourseStructure = async (req, res) => {
   try {
@@ -733,6 +1215,51 @@ exports.singleAddParticipants = async (req, res) => {
       });
     }
 
+    // CRITICAL FIX: Ensure resourcesType has proper structure before saving
+    // This fixes the validation error by ensuring resourcesType is an object, not an array
+    if (course.resourcesType) {
+      // Check if any of the pedagogy sections are arrays instead of objects
+      const needsFix = 
+        Array.isArray(course.resourcesType.iDo) ||
+        Array.isArray(course.resourcesType.weDo) ||
+        Array.isArray(course.resourcesType.youDo);
+      
+      if (needsFix) {
+        console.log('Fixing malformed resourcesType data...');
+        
+        // Default resource config structure
+        const defaultResourceConfig = {
+          video: { enabled: false, maxSize: 50, allowedFormats: [], aiChat: false, aiSummary: false },
+          ppt: { enabled: false, maxSize: 20, allowedFormats: [], aiChat: false, aiSummary: false },
+          pdf: { enabled: false, maxSize: 10, allowedFormats: [], aiChat: false, aiSummary: false },
+          url: { enabled: false },
+          aiChat: { enabled: false },
+          aiSummary: { enabled: false },
+          notes: { enabled: false }
+        };
+        
+        // Fix each pedagogy section
+        if (Array.isArray(course.resourcesType.iDo)) {
+          console.log('Fixing iDo: converting from array to object');
+          course.resourcesType.iDo = { ...defaultResourceConfig };
+        }
+        
+        if (Array.isArray(course.resourcesType.weDo)) {
+          console.log('Fixing weDo: converting from array to object');
+          course.resourcesType.weDo = { ...defaultResourceConfig };
+        }
+        
+        if (Array.isArray(course.resourcesType.youDo)) {
+          console.log('Fixing youDo: converting from array to object');
+          course.resourcesType.youDo = { ...defaultResourceConfig };
+        }
+        
+        // Save the fixed structure immediately
+        await course.save();
+        console.log('Fixed and saved malformed resourcesType');
+      }
+    }
+
     // Find all valid participants
     const participants = await User.find({
       _id: { $in: validParticipantIds }
@@ -761,9 +1288,9 @@ exports.singleAddParticipants = async (req, res) => {
         enrollmentToAdd.push({
           user: participant._id,
           status: enrollmentData.status || 'active',
-          enableEnrolmentDates: false,
-          enrolmentStartsDate: null,
-          enrolmentEndsDate: null,
+          enableEnrolmentDates: enrollmentData.enableEnrolmentDates || false,
+          enrolmentStartsDate: enrollmentData.enrolmentStartsDate || null,
+          enrolmentEndsDate: enrollmentData.enrolmentEndsDate || null,
           createdAt: new Date(),
           updatedAt: new Date()
         });
@@ -777,9 +1304,9 @@ exports.singleAddParticipants = async (req, res) => {
           relatedEntityId: courseId,
           enrolledBy: req.user?.id,
           metadata: new Map([
-            ['Course Name',   course.courseName],
-            ['Course Code',   course.courseCode],
-            ['Enrollment Date',   new Date().toISOString()],
+            ['Course Name', course.courseName],
+            ['Course Code', course.courseCode || 'N/A'],
+            ['Enrollment Date', new Date().toISOString()],
           ]),
         };
 
@@ -793,11 +1320,11 @@ exports.singleAddParticipants = async (req, res) => {
           email: participant.email,
           name: `${participant.firstName} ${participant.lastName || ''}`.trim(),
           courseName: course.courseName,
-          courseCode: course.courseCode,
+          courseCode: course.courseCode || 'N/A',
           enrollmentDate: new Date().toLocaleDateString(),
           institutionId: course.institution,
-          userId: participant._id, // Store user ID for reference
-          user: participant // Store the user object
+          userId: participant._id,
+          user: participant
         });
       }
     }
@@ -815,6 +1342,40 @@ exports.singleAddParticipants = async (req, res) => {
     course.updatedAt = new Date();
     course.updatedBy = req.user?.id || 'system';
 
+    // Validate the document before saving
+    try {
+      await course.validate();
+    } catch (validationError) {
+      console.error('Validation error before save:', validationError);
+      
+      // If validation fails due to resourcesType, try to reset it
+      if (validationError.errors && validationError.errors['resourcesType.iDo']) {
+        console.log('Resetting resourcesType to fix validation');
+        
+        // Reset to default structure
+        const defaultResourceConfig = {
+          video: { enabled: false, maxSize: 50, allowedFormats: [], aiChat: false, aiSummary: false },
+          ppt: { enabled: false, maxSize: 20, allowedFormats: [], aiChat: false, aiSummary: false },
+          pdf: { enabled: false, maxSize: 10, allowedFormats: [], aiChat: false, aiSummary: false },
+          url: { enabled: false },
+          aiChat: { enabled: false },
+          aiSummary: { enabled: false },
+          notes: { enabled: false }
+        };
+        
+        course.resourcesType = {
+          iDo: { ...defaultResourceConfig },
+          weDo: { ...defaultResourceConfig },
+          youDo: { ...defaultResourceConfig }
+        };
+        
+        // Save with fixed structure
+        await course.save();
+      } else {
+        throw validationError;
+      }
+    }
+
     await course.save();
 
     // Add notifications to users' profiles
@@ -831,51 +1392,48 @@ exports.singleAddParticipants = async (req, res) => {
 
     await Promise.all(notificationPromises);
 
-    
-    // Check if emails should be sent
- if (emailsToSend.length > 0) {
-  const emailPromises = emailsToSend.map(async (emailData) => {
-    try {
-      
-      const emailSubject = `Enrollment Confirmation: ${emailData.courseName}`;
-      const emailBody = `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <h2 style="color: #2c3e50;">Course Enrollment Confirmation</h2>
-          <p>Dear ${emailData.name},</p>
-          <p>You have been successfully enrolled in the following course:</p>
-          <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-            <h3 style="margin-top: 0;">${emailData.courseName}</h3>
-            <p><strong>Course Code:</strong> ${emailData.courseCode}</p>
-            <p><strong>Enrollment Date:</strong> ${emailData.enrollmentDate}</p>
-          </div>
-          <p>You can access the course material by logging into your LMS account.</p>
-          <p>If you have any questions, please contact your course instructor or system administrator.</p>
-          <br>
-          <p>Best regards,<br>LMS Team</p>
-        </div>
-      `;
+    // Send emails in background
+    if (emailsToSend.length > 0) {
+      const emailPromises = emailsToSend.map(async (emailData) => {
+        try {
+          const emailSubject = `Enrollment Confirmation: ${emailData.courseName}`;
+          const emailBody = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <h2 style="color: #2c3e50;">Course Enrollment Confirmation</h2>
+              <p>Dear ${emailData.name},</p>
+              <p>You have been successfully enrolled in the following course:</p>
+              <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <h3 style="margin-top: 0;">${emailData.courseName}</h3>
+                <p><strong>Course Code:</strong> ${emailData.courseCode}</p>
+                <p><strong>Enrollment Date:</strong> ${emailData.enrollmentDate}</p>
+              </div>
+              <p>You can access the course material by logging into your LMS account.</p>
+              <p>If you have any questions, please contact your course instructor or system administrator.</p>
+              <br>
+              <p>Best regards,<br>LMS Team</p>
+            </div>
+          `;
 
-      // Send the email using your existing function
-      const emailSent = await sendEmail(
-        [emailData.email],  // to
-        emailSubject,       // subject
-        emailBody,          // body
-        []                  // cc (empty array)
-      );
+          const emailSent = await sendEmail(
+            [emailData.email],
+            emailSubject,
+            emailBody,
+            []
+          );
 
-      return { success: emailSent };
-    } catch (error) {
-      console.error(`Failed to send email to ${emailData.email}:`, error);
-      return { success: false, error: error.message };
-    }
-  });
+          return { success: emailSent };
+        } catch (error) {
+          console.error(`Failed to send email to ${emailData.email}:`, error);
+          return { success: false, error: error.message };
+        }
+      });
+
       // Send emails in background (don't wait for completion)
       Promise.all(emailPromises)
         .then(results => {
           const successful = results.filter(r => r && r.success).length;
           const failed = results.filter(r => !r || !r.success).length;
           
-          // Log details for debugging
           results.forEach((result, index) => {
             if (!result || !result.success) {
               console.error(`Failed to send email to ${emailsToSend[index]?.email}:`, result?.error || 'Unknown error');
@@ -885,7 +1443,6 @@ exports.singleAddParticipants = async (req, res) => {
         .catch(error => {
           console.error('Error in email sending process:', error);
         });
-    } else {
     }
 
     // Populate user details for response
@@ -895,7 +1452,6 @@ exports.singleAddParticipants = async (req, res) => {
         select: 'firstName lastName email phone role status degree department year semester batch gender profile createdAt'
       });
 
-    // Also populate user details with notifications count
     const enrolledUsers = await User.find({
       _id: { $in: enrollmentToAdd.map(e => e.user) }
     }).select('firstName lastName email notifications unreadNotificationCount');

@@ -14,6 +14,7 @@ exports.createSubTopic = async (req, res) => {
       description,
       duration,
       level,
+      testConfiguration
     } = req.body;
  
     // Validation
@@ -32,6 +33,7 @@ exports.createSubTopic = async (req, res) => {
       description,
       duration,
       level,
+      testConfiguration: testConfiguration || { coreProgram: [], frontend: [], database: [] },
       createdBy: req.user.email
     });
  

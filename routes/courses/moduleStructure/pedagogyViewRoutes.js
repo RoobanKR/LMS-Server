@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { userAuth } = require("../../../middlewares/userAuth");
 const {
+
   createPedagogyView,
   getAllPedagogyViews,
   getPedagogyViewById,
@@ -10,14 +11,17 @@ const {
   deleteDocument,
   getAllCoursesData,
   duplicateCourseHierarchy,
-  updateEntity,
-  updateFileSettings,
- 
+  updateEntity,          // ← must be here
+  updateFileSettings,    // ← keep this too
   getAllCoursesDataWithoutAINotes,
   studentDashboardAnalyticsOptimized,
-  staffDashboardAnalytics,
   getStudentCourseProgress,
   staffStudentAnalytics,
+  createPage,
+  updatePage,
+  deletePage,
+  addMCQQuestionToFile,
+  getExerciseSubmissionStatus,
 
 } = require("../../../controllers/courses/moduleStructure/pedagogyView");
 
@@ -60,11 +64,22 @@ router.get(
 
 router.post("/dupicate-date", userAuth, duplicateCourseHierarchy);
 
-router.put("/uploadResourses/:type/:id", updateEntity);
+// ✅ ONLY these two lines for uploadResourses — no duplicates
+router.put("/uploadResourses/:type/:id",          userAuth, updateEntity);
+router.put("/uploadResourses/:type/:id/settings", userAuth, updateFileSettings);
 
-router.put("/uploadResourses/:type/:id", userAuth, updateFileSettings);
+// Pages routes
+router.post(  "/pages/:type/:id/pages",         userAuth, createPage);
+router.put(   "/pages/:type/:id/pages/:pageId", userAuth, updatePage);
+router.delete("/pages/:type/:id/pages/:pageId", userAuth, deletePage);
 
-// We Do Routes can be added here in future
+router.post('/file-mcq-add/:type/:id', userAuth, addMCQQuestionToFile);
 
+// Check which exercises have at least one student submission
+// Query: courseId, tabType, subcategory, exerciseIds (comma-separated)
+router.get('/analytics/exercise-submission-status', userAuth, getExerciseSubmissionStatus);
+// In your routes file, update the two page routes:
+
+// All three must have the same /pages/ prefix
 
 module.exports = router;
