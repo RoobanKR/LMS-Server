@@ -384,15 +384,44 @@ const configurationTypeSettSchema = new mongoose.Schema({
   mcqMode: { type: Boolean, default: false },
   programmingMode: { type: Boolean, default: false },
   combinedMode: { type: Boolean, default: false },
+  otherMode: { type: Boolean, default: false },
 });
+
+// ─── OTHERS QUESTION CONFIG SCHEMA ───────────────────────────────────────────
+const othersQuestionConfigSchema = new mongoose.Schema(
+  {
+    totalQuestions: { type: Number, default: 0, min: 0 },
+    scoringType: {
+      type: String,
+      enum: ["equalDistribution", "questionSpecific", "levelBased"],
+      default: "equalDistribution",
+    },
+    marksPerQuestion: { type: Number, default: 0, min: 0 },
+    totalMarks: { type: Number, default: 0, min: 0 },
+    levelBasedCounts: {
+      easy:   { type: Number, default: 0, min: 0 },
+      medium: { type: Number, default: 0, min: 0 },
+      hard:   { type: Number, default: 0, min: 0 },
+    },
+    levelBasedMarks: {
+      easy:   { type: Number, default: 0, min: 0 },
+      medium: { type: Number, default: 0, min: 0 },
+      hard:   { type: Number, default: 0, min: 0 },
+    },
+    attemptLimitEnabled: { type: Boolean, default: false },
+    submissionAttempts: { type: Number, default: 1, min: 1, max: 10 },
+  },
+  { _id: false }
+);
 
 // ─── QUESTION CONFIGURATION SCHEMA ───────────────────────────────────────────
 const questionConfigurationSchema = new mongoose.Schema(
   {
     mcqQuestionConfiguration: { type: mcqQuestionConfigSchema },
     programmingQuestionConfiguration: { type: programmingQuestionConfigSchema },
+    othersQuestionConfiguration: { type: othersQuestionConfigSchema },
   },
-  { _id: false }
+  { _id: false, strict: false }
 );
 
 // ─── EXERCISE SCHEMA ──────────────────────────────────────────────────────────
@@ -415,7 +444,7 @@ const exerciseSchema = new mongoose.Schema(
     updatedBy: String,
     version: { type: Number, default: 1 },
   },
-  { _id: true }
+  { _id: true, strict: false }
 );
 
 // Pre-save middleware for exerciseSchema

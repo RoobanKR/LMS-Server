@@ -271,9 +271,9 @@ const computeAutoGrades = (exerciseType, exerciseInfo, gradeSettingsRaw) => {
       : null;
   }
 
-  if (exerciseType === 'Programming' || exerciseType === 'Combined') {
+  if (exerciseType === 'Programming' || exerciseType === 'Other' || exerciseType === 'Combined') {
     result.programmingGrade = exerciseInfo.totalMarksProgramming || exerciseInfo.totalMarks || 0;
-    result.programmingGradeToPass = (gradeSettingsRaw.programmingGradeToPass !== undefined && 
+    result.programmingGradeToPass = (gradeSettingsRaw.programmingGradeToPass !== undefined &&
                                      gradeSettingsRaw.programmingGradeToPass !== null)
       ? Number(gradeSettingsRaw.programmingGradeToPass)
       : null;
@@ -447,11 +447,13 @@ exports.addExercise = async (req, res) => {
       mcqMode:         exerciseTypeParsed === 'MCQ'         || exerciseTypeParsed === 'Combined',
       programmingMode: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined',
       combinedMode:    exerciseTypeParsed === 'Combined',
+      otherMode:       exerciseTypeParsed === 'Other',
     };
 
     // ── Build MCQ / Programming question configurations ───────────────────
     let mcqQuestionConfig         = null;
     let programmingQuestionConfig = null;
+    let othersQuestionConfig      = null;
     let mcqTotalMarks             = 0;
     let progTotalMarks            = 0;
 
@@ -586,6 +588,33 @@ exports.addExercise = async (req, res) => {
       }
     }
 
+    if (exerciseTypeParsed === 'Other') {
+      if (quesConfig.othersConfig) {
+        const othersCfg = quesConfig.othersConfig;
+        const scoringType = othersCfg.scoringType || 'equalDistribution';
+        const totalQ = othersCfg.totalQuestions || 0;
+        const totalMarksVal = scoringType === 'levelBased'
+          ? (othersCfg.totalMarks || 0)
+          : (exerciseInfo.totalMarks || 0);
+        const marksPerQ = scoringType === 'equalDistribution' && totalQ > 0
+          ? totalMarksVal / totalQ
+          : (othersCfg.marksPerQuestion || 0);
+        othersQuestionConfig = {
+          totalQuestions: totalQ,
+          scoringType,
+          marksPerQuestion: marksPerQ,
+          totalMarks: totalMarksVal,
+          attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
+          submissionAttempts: othersCfg.submissionAttempts || 1,
+        };
+        if (scoringType === 'levelBased') {
+          othersQuestionConfig.levelBasedCounts = othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
+          othersQuestionConfig.levelBasedMarks  = othersCfg.levelBasedMarks  || { easy: 0, medium: 0, hard: 0 };
+        }
+        progTotalMarks = othersQuestionConfig.totalMarks;
+      }
+    }
+
     // ── Build availabilityPeriod (endDate always stored) ──────────────────
     const availabilityPeriodData = buildAvailabilityPeriod(availPeriod);
 
@@ -604,7 +633,7 @@ exports.addExercise = async (req, res) => {
     const exerciseInfoForGrade = {
       totalMarks:            exerciseInfo.totalMarks            || 0,
       totalMarksMCQ:         exerciseInfo.totalMarksMCQ         || (exerciseTypeParsed === 'MCQ' ? (exerciseInfo.totalMarks || 0) : 0),
-      totalMarksProgramming: exerciseInfo.totalMarksProgramming || (exerciseTypeParsed === 'Programming' ? (exerciseInfo.totalMarks || 0) : 0),
+      totalMarksProgramming: exerciseInfo.totalMarksProgramming || ((exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other') ? (exerciseInfo.totalMarks || 0) : 0),
     };
     const gradeSettingsData = computeAutoGrades(exerciseTypeParsed, exerciseInfoForGrade, gradeSettingsRaw);
 
@@ -633,7 +662,7 @@ exports.addExercise = async (req, res) => {
         totalDuration:          exerciseInfo.totalDuration          || 1,
         totalMarksMCQ:          exerciseTypeParsed === 'MCQ'         || exerciseTypeParsed === 'Combined'
                                   ? (exerciseInfo.totalMarksMCQ !== undefined ? exerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
-        totalMarksProgramming:  exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined'
+        totalMarksProgramming:  exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
                                   ? (exerciseInfo.totalMarksProgramming !== undefined ? exerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
         totalMarks:             exerciseInfo.totalMarks || totalMarksForInfo,
       },
@@ -676,6 +705,7 @@ exports.addExercise = async (req, res) => {
     // ── Attach question configurations ─────────────────────────────────────
     if (mcqQuestionConfig)         newExercise.questionConfiguration.mcqQuestionConfiguration         = mcqQuestionConfig;
     if (programmingQuestionConfig) newExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
+    if (othersQuestionConfig)      newExercise.questionConfiguration.othersQuestionConfiguration      = othersQuestionConfig;
 
     // ── Persist ────────────────────────────────────────────────────────────
     exercises.push(newExercise);
@@ -687,9 +717,10 @@ exports.addExercise = async (req, res) => {
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
-    if (exerciseTypeParsed === 'MCQ')         responseConfig = { mode: 'mcq',         config: mcqQuestionConfig };
+    if (exerciseTypeParsed === 'MCQ')              responseConfig = { mode: 'mcq',         config: mcqQuestionConfig };
     else if (exerciseTypeParsed === 'Programming') responseConfig = { mode: 'programming', config: programmingQuestionConfig };
-    else if (exerciseTypeParsed === 'Combined')    responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
+    else if (exerciseTypeParsed === 'Other')       responseConfig = { mode: 'other',       config: othersQuestionConfig };
+    else if (exerciseTypeParsed === 'Combined')    responseConfig = { mode: 'combined',    mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
 
     return res.status(201).json({
       message: [{ key: 'success', value: `Exercise added successfully to ${subcategory}` }],
@@ -818,11 +849,13 @@ exports.updateExercise = async (req, res) => {
       mcqMode:         finalExerciseType === 'MCQ'         || finalExerciseType === 'Combined',
       programmingMode: finalExerciseType === 'Programming' || finalExerciseType === 'Combined',
       combinedMode:    finalExerciseType === 'Combined',
+      otherMode:       finalExerciseType === 'Other',
     };
 
     // ── Re-use question config builders (same logic as addExercise) ────────
     let mcqQuestionConfig         = existingExercise.questionConfiguration?.mcqQuestionConfiguration         || null;
     let programmingQuestionConfig = existingExercise.questionConfiguration?.programmingQuestionConfiguration || null;
+    let othersQuestionConfig      = existingExercise.questionConfiguration?.othersQuestionConfiguration      || null;
     let mcqTotalMarks             = existingExercise.exerciseInformation?.totalMarksMCQ         || 0;
     let progTotalMarks            = existingExercise.exerciseInformation?.totalMarksProgramming || 0;
 
@@ -933,6 +966,33 @@ exports.updateExercise = async (req, res) => {
         }
       }
 
+      // ── Others config ─────────────────────────────────────────────────────
+      if (parsedQuesConfig.othersConfig) {
+        const othersCfg = parsedQuesConfig.othersConfig;
+        const scoringType = othersCfg.scoringType || 'equalDistribution';
+        const totalQ = othersCfg.totalQuestions || 0;
+        const exInfo = parsedExerciseInfo || existingExercise.exerciseInformation || {};
+        const baseMarks = exInfo.totalMarks || existingExercise.exerciseInformation?.totalMarks || 0;
+        const totalMarksVal = scoringType === 'levelBased'
+          ? (othersCfg.totalMarks || 0)
+          : baseMarks;
+        const marksPerQ = scoringType === 'equalDistribution' && totalQ > 0
+          ? totalMarksVal / totalQ
+          : (othersCfg.marksPerQuestion || 0);
+        othersQuestionConfig = {
+          totalQuestions: totalQ,
+          scoringType,
+          marksPerQuestion: marksPerQ,
+          totalMarks: totalMarksVal,
+          attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
+          submissionAttempts: othersCfg.submissionAttempts || 1,
+        };
+        if (scoringType === 'levelBased') {
+          othersQuestionConfig.levelBasedCounts = othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
+          othersQuestionConfig.levelBasedMarks  = othersCfg.levelBasedMarks  || { easy: 0, medium: 0, hard: 0 };
+        }
+      }
+
       // Direct overrides (if frontend sends already-formatted config objects)
       if (parsedQuesConfig.mcqQuestionConfiguration) {
         mcqQuestionConfig = parsedQuesConfig.mcqQuestionConfiguration;
@@ -973,7 +1033,7 @@ exports.updateExercise = async (req, res) => {
         totalDuration:          parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
         totalMarksMCQ:          finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
                                   ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
-        totalMarksProgramming:  finalExerciseType === 'Programming' || finalExerciseType === 'Combined'
+        totalMarksProgramming:  finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
                                   ? (parsedExerciseInfo.totalMarksProgramming !== undefined ? parsedExerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
         totalMarks:             parsedExerciseInfo.totalMarks || (mcqTotalMarks + progTotalMarks),
       };
@@ -992,6 +1052,7 @@ exports.updateExercise = async (req, res) => {
       if (!updatedExercise.questionConfiguration) updatedExercise.questionConfiguration = {};
       if (mcqQuestionConfig)         updatedExercise.questionConfiguration.mcqQuestionConfiguration         = mcqQuestionConfig;
       if (programmingQuestionConfig) updatedExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
+      if (othersQuestionConfig)      updatedExercise.questionConfiguration.othersQuestionConfiguration      = othersQuestionConfig;
       if (parsedQuesConfig.questions) updatedExercise.questions = parsedQuesConfig.questions;
     }
 
@@ -1130,6 +1191,7 @@ const merged = {
     let responseConfig = {};
     if (finalExerciseType === 'MCQ')         responseConfig = { mode: 'mcq',         config: mcqQuestionConfig };
     else if (finalExerciseType === 'Programming') responseConfig = { mode: 'programming', config: programmingQuestionConfig };
+    else if (finalExerciseType === 'Other')       responseConfig = { mode: 'other',       config: othersQuestionConfig };
     else if (finalExerciseType === 'Combined')    responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
 
     return res.status(200).json({
@@ -1755,7 +1817,7 @@ exports.addQuestion = async (req, res) => {
 
       // Get question type
       const qType = questionData.questionType || questionType;
-      const validQuestionTypes = ['mcq', 'programming', 'database'];
+      const validQuestionTypes = ['mcq', 'programming', 'database', 'others'];
 
       if (!qType || !validQuestionTypes.includes(qType)) {
         return res.status(400).json({
@@ -2177,6 +2239,17 @@ Object.assign(newQuestion, {
             }))
             : undefined,
         });
+      } else if (qType === 'others') {
+        Object.assign(newQuestion, {
+          title: typeof questionData.title === 'string' ? questionData.title.trim() : '',
+          description: questionData.description || '',
+          difficulty: questionData.difficulty || 'medium',
+          score: questionData.score || 0,
+          isRequired: questionData.isRequired || false,
+          othersQuestionType: questionData.othersQuestionType || '',
+          notionSettings: questionData.notionSettings || undefined,
+          fileUploadSettings: questionData.fileUploadSettings || undefined,
+        });
       }
       // Add question to exercise
       foundExercise.questions.push(newQuestion);
@@ -2304,7 +2377,7 @@ exports.updateQuestion = async (req, res) => {
     // FIX: Rename this variable to avoid conflict with the parameter
     const questionTypeValue = updateData.questionType;  // ← CHANGED: was 'questionType'
 
-    const validQuestionTypes = ['mcq', 'programming', 'database'];
+    const validQuestionTypes = ['mcq', 'programming', 'database', 'others'];
 
     if (questionTypeValue && !validQuestionTypes.includes(questionTypeValue)) {
       return res.status(400).json({
@@ -2789,6 +2862,31 @@ exports.updateQuestion = async (req, res) => {
       // Preserve database flags
       updatedQuestion.isDatabase = true;
       updatedQuestion.moduleType = 'Database';
+    } else if (finalQuestionType === 'others') {
+      if (updateData.title !== undefined) {
+        updatedQuestion.title = typeof updateData.title === 'string' ? updateData.title.trim() : '';
+      }
+      if (updateData.description !== undefined) {
+        updatedQuestion.description = updateData.description;
+      }
+      if (updateData.difficulty !== undefined) {
+        updatedQuestion.difficulty = updateData.difficulty;
+      }
+      if (updateData.score !== undefined) {
+        updatedQuestion.score = updateData.score;
+      }
+      if (updateData.isRequired !== undefined) {
+        updatedQuestion.isRequired = updateData.isRequired;
+      }
+      if (updateData.othersQuestionType !== undefined) {
+        updatedQuestion.othersQuestionType = updateData.othersQuestionType;
+      }
+      if (updateData.notionSettings !== undefined) {
+        updatedQuestion.notionSettings = updateData.notionSettings;
+      }
+      if (updateData.fileUploadSettings !== undefined) {
+        updatedQuestion.fileUploadSettings = updateData.fileUploadSettings;
+      }
     }
 
     // Update timestamp

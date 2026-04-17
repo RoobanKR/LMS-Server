@@ -68,15 +68,15 @@ const questionSchema = new mongoose.Schema(
     //MCQ Specific Fields
     mcqQuestionTitle: { type: String },
     mcqQuestionDescription: { type: String, default: '' },
-    mcqQuestionType: { 
-      type: String, 
-      enum: ['multiple_choice', 'dropdown', 'short_answer', 'essay', 'checkboxes'],
+    mcqQuestionType: {
+      type: String,
+      enum: ['multiple_choice', 'multiple_select', 'true_false', 'short_answer', 'essay', 'dropdown', 'matching', 'ordering', 'numeric', 'checkboxes'],
     },
-    
-    mcqQuestionDifficulty: { 
-      type: String, 
+
+    mcqQuestionDifficulty: {
+      type: String,
       enum: ['easy', 'medium', 'hard'],
-      default: 'medium' 
+      default: 'medium'
     },
     mcqQuestionScore: { type: Number },
     mcqQuestionTimeLimit: { type: Number },
@@ -172,10 +172,52 @@ const notificationGradeSchema = new mongoose.Schema(
 const availabilityPeriodSchema = new mongoose.Schema({
   startDate: { type: Date },
   endDate: { type: Date },
+  cutOffDate: { type: Date },
+  cutOffEnabled: { type: Boolean, default: false },
+  remindGradeBy: { type: Date },
+  remindGradeByEnabled: { type: Boolean, default: false },
   gracePeriodAllowed: { type: Boolean, default: false },
+  gracePeriodEnabled: { type: Boolean, default: false },
   gracePeriodDate: { type: Date },
   extendedDays: { type: Number, default: 0 },
 });
+
+// ─── NOTIFICATION SETTINGS SCHEMA
+const notificationSettingsSchema = new mongoose.Schema(
+  {
+    notifyUsers: { type: Boolean, default: false },
+    notifyGmail: { type: Boolean, default: false },
+    notifyWhatsApp: { type: Boolean, default: false },
+    gradeSheet: { type: Boolean, default: true },
+    notifyGradersSubmissions: { type: Boolean, default: false },
+    notifyGradersLateSubmissions: { type: Boolean, default: false },
+    notifyStudent: { type: Boolean, default: true },
+  },
+  { _id: false }
+);
+
+// ─── GRADE SETTINGS SCHEMA
+const gradeSettingsSchema = new mongoose.Schema(
+  {
+    mcqGrade: { type: Number, default: null },
+    mcqGradeToPass: { type: Number, default: null },
+    programmingGrade: { type: Number, default: null },
+    programmingGradeToPass: { type: Number, default: null },
+    combinedGrade: { type: Number, default: null },
+    combinedGradeToPass: { type: Number, default: null },
+    separateMarks: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
+// ─── ADDITIONAL OPTIONS SCHEMA
+const additionalOptionsSchema = new mongoose.Schema(
+  {
+    anonymousSubmissions: { type: Boolean, default: false },
+    hideGraderIdentity: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
 
 const mcqQuestionConfigSchema = new mongoose.Schema(
   {
@@ -238,14 +280,42 @@ const configurationTypeSettSchema = new mongoose.Schema({
   mcqMode: { type: Boolean, default: false },
   programmingMode: { type: Boolean, default: false },
   combinedMode: { type: Boolean, default: false },
+  otherMode: { type: Boolean, default: false },
 });
+
+const othersQuestionConfigSchema = new mongoose.Schema(
+  {
+    totalQuestions: { type: Number, default: 0, min: 0 },
+    scoringType: {
+      type: String,
+      enum: ["equalDistribution", "questionSpecific", "levelBased"],
+      default: "equalDistribution",
+    },
+    marksPerQuestion: { type: Number, default: 0, min: 0 },
+    totalMarks: { type: Number, default: 0, min: 0 },
+    levelBasedCounts: {
+      easy:   { type: Number, default: 0, min: 0 },
+      medium: { type: Number, default: 0, min: 0 },
+      hard:   { type: Number, default: 0, min: 0 },
+    },
+    levelBasedMarks: {
+      easy:   { type: Number, default: 0, min: 0 },
+      medium: { type: Number, default: 0, min: 0 },
+      hard:   { type: Number, default: 0, min: 0 },
+    },
+    attemptLimitEnabled: { type: Boolean, default: false },
+    submissionAttempts: { type: Number, default: 1, min: 1, max: 10 },
+  },
+  { _id: false }
+);
 
 const questionConfiguration = new mongoose.Schema(
   {
     mcqQuestionConfiguration: { type: mcqQuestionConfigSchema },
     programmingQuestionConfiguration: { type: programmingQuestionConfigSchema },
+    othersQuestionConfiguration: { type: othersQuestionConfigSchema },
   },
-  { _id: false }
+  { _id: false, strict: false }
 );
 
 // Main Exercise Schema
@@ -257,6 +327,10 @@ const exerciseSchema = new mongoose.Schema(
     exerciseInformation: exerciseInformationSchema,
     questionConfiguration: questionConfiguration,
     availabilityPeriod: availabilityPeriodSchema,
+    notificationSettings: { type: notificationSettingsSchema },
+    gradeSettings: { type: gradeSettingsSchema },
+    additionalOptions: { type: additionalOptionsSchema },
+    // legacy field kept so old data reads correctly
     notificatonandGradeSettings: notificationGradeSchema,
     questions: [questionSchema],
     createdAt: { type: Date, default: Date.now },
@@ -265,7 +339,7 @@ const exerciseSchema = new mongoose.Schema(
     updatedBy: String,
     version: { type: Number, default: 1 },
   },
-  { _id: true }
+  { _id: true, strict: false }
 );
 
 // Pre-save middleware for exerciseSchema
