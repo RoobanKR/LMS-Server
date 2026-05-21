@@ -2623,6 +2623,10 @@ exports.updateEntity = async (req, res) => {
       selectedFileType,
       fileDescription,
       tags,
+      groupId,
+      groupName,
+      parentGroupId,
+      groupDescription,
     } = req.body;
 
     // Update simple fields
@@ -2854,7 +2858,32 @@ if (isUpdate === 'true' && updateFileId) {
         filesArray[fileIndex] = updatedFile;
 
       } else {
-        const uniqueFileName = `${Date.now()}_${fileToUpdate.name}`;
+        // Derive correct extension from MIME type so .docx never lands as .ocx
+        const UPDATE_MIME_TO_EXT = {
+          'application/pdf': '.pdf',
+          'application/msword': '.doc',
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+          'application/vnd.ms-powerpoint': '.ppt',
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+          'application/vnd.ms-excel': '.xls',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+          'application/zip': '.zip',
+          'application/x-zip-compressed': '.zip',
+          'image/jpeg': '.jpg',
+          'image/png': '.png',
+          'image/gif': '.gif',
+          'image/webp': '.webp',
+          'image/svg+xml': '.svg',
+          'text/plain': '.txt',
+          'text/html': '.html',
+        };
+        const rawUpdExt = (fileToUpdate.name || '').includes('.') ? '.' + (fileToUpdate.name || '').split('.').pop() : '';
+        const correctUpdExt = UPDATE_MIME_TO_EXT[fileToUpdate.mimetype] || rawUpdExt || '';
+        const rawUpdStem = (fileToUpdate.name || 'upload').replace(/(\.[^.]+)+$/, '');
+        const cleanUpdStem = rawUpdStem.replace(/[^a-zA-Z0-9_\-]/g, '_').replace(/_+/g, '_').slice(0, 120);
+        const cleanUpdName = cleanUpdStem + correctUpdExt;
+
+        const uniqueFileName = `${Date.now()}_${cleanUpdName}`;
         const storageFolderPath = parsedFolderPath.length > 0 ? parsedFolderPath.join('/') : (fileFolderPath.length > 0 ? fileFolderPath.join('/') : "root");
         const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
 
@@ -2880,7 +2909,7 @@ if (isUpdate === 'true' && updateFileId) {
 
         const updatedFile = {
           _id: file._id,
-          fileName: fileToUpdate.name,
+          fileName: cleanUpdName,
           fileType: fileToUpdate.mimetype,
           fileUrl: fileUrlMap,
           size: fileToUpdate.size.toString(),
@@ -2959,7 +2988,14 @@ if (isUpdate === 'true' && updateFileId) {
         }
       }
 
-      const existingFolder = targetFolders.find(f => f.name === folderName);
+      // Scope uniqueness check per group:
+      // – grouped folder  → only conflict with folders that share the same parentGroupId
+      // – standalone folder → only conflict with other ungrouped folders (no parentGroupId)
+      const existingFolder = targetFolders.find(f => {
+        if (f.name !== folderName) return false;
+        if (parentGroupId) return f.parentGroupId === parentGroupId;
+        return !f.parentGroupId;
+      });
       if (existingFolder) {
         return res.status(400).json({
           message: [{ key: "error", value: `Folder '${folderName}' already exists` }]
@@ -2990,8 +3026,12 @@ if (isUpdate === 'true' && updateFileId) {
         subfolders: [],
         tags: parsedTags,
         pages: [],
+        uploadedAt: new Date(),
         createdAt: new Date(),
-        updatedAt: new Date()
+        updatedAt: new Date(),
+        ...(parentGroupId ? { parentGroupId } : {}),
+        ...(groupName ? { groupName } : {}),
+        ...(groupDescription ? { groupDescription } : {}),
       };
 
       targetFolders.push(newFolder);
@@ -3362,6 +3402,8 @@ if (action === 'updateFolder' && folderName) {
               }),
               fileDescription: fileDescription || "",
               tags: parsedTags,
+              groupId: groupId || "",
+              groupName: groupName || "",
               fileSettings: {
                 showToStudents: showToStudentsValue,
                 allowDownload: allowDownloadValue,
@@ -3378,8 +3420,37 @@ if (action === 'updateFolder' && folderName) {
           }
 
         } else {
-          // Non-video upload — unchanged from doc 8
-          const uniqueFileName = `${Date.now()}_${file.name}`;
+          // Non-video upload
+          // ── Derive the correct extension from MIME type so filenames like
+          // "file.docx.docx" or "file.ocx" (Windows docx mangling) are fixed.
+          const MIME_TO_EXT = {
+            'application/pdf': '.pdf',
+            'application/msword': '.doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+            'application/vnd.ms-excel': '.xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+            'application/vnd.ms-powerpoint': '.ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+            'text/plain': '.txt',
+            'text/csv': '.csv',
+            'image/jpeg': '.jpg',
+            'image/png': '.png',
+            'image/gif': '.gif',
+            'image/webp': '.webp',
+            'image/svg+xml': '.svg',
+            'application/zip': '.zip',
+            'application/x-zip-compressed': '.zip',
+          };
+          // Fallback: take extension from original filename (strip double extensions)
+          const rawOrigExt = (file.name || '').includes('.')
+            ? '.' + (file.name || '').split('.').pop()
+            : '';
+          const correctExt = MIME_TO_EXT[file.mimetype] || rawOrigExt || '';
+          // Build a clean stem (strip ALL extensions from the original name)
+          const rawStem = (file.name || 'upload').replace(/(\.[^.]+)+$/, '');
+          const cleanStem = rawStem.replace(/[^a-zA-Z0-9_\-]/g, '_').replace(/_+/g, '_').slice(0, 120);
+          const cleanName = cleanStem + correctExt;
+          const uniqueFileName = `${Date.now()}_${cleanName}`;
           const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
           const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
 
@@ -3398,16 +3469,17 @@ if (action === 'updateFolder' && folderName) {
 
           const newFile = {
             _id: new mongoose.Types.ObjectId(),
-            fileName: file.name,
+            fileName: cleanName,          // use the sanitised name with correct extension
             fileType: file.mimetype,
             fileUrl: fileUrlMap,
             size: file.size.toString(),
             uploadedAt: new Date(),
             isVideo: false,
-              isReference: selectedFileType === "reference" ? true : false,
-
+            isReference: selectedFileType === "reference" ? true : false,
             fileDescription: fileDescription || "",
             tags: parsedTags,
+            groupId: groupId || "",
+            groupName: groupName || "",
             fileSettings: {
               showToStudents: showToStudentsValue,
               allowDownload: allowDownloadValue,
@@ -3416,7 +3488,7 @@ if (action === 'updateFolder' && folderName) {
           };
 
           targetFolder.files.push(newFile);
-          console.log('📁 Added file with tags:', parsedTags);
+          console.log('📁 Added file:', cleanName, 'mime:', file.mimetype);
         }
       }
 
@@ -3511,6 +3583,8 @@ if (action === 'updateFolder' && folderName) {
 
         fileDescription: fileDescription || "",
         tags: parsedTags,
+        groupId: groupId || "",
+        groupName: groupName || "",
         fileSettings: {
           showToStudents: showToStudentsValue,
           allowDownload: allowDownloadValue,
@@ -3740,7 +3814,17 @@ exports.createPage = async (req, res) => {
       tabType,
       subcategory,
       folderPath,
+      // Group context — when the resource picker was opened from a group
+      // row's "Add" action, the frontend forwards these so the new page
+      // can be attached to that group (rendered inside the group row).
+      groupId,
+      groupName,
     } = req.body;
+
+    // Allow these to be supplied via hierarchyInfo too (the frontend sends
+    // them in both places for resilience). req.body wins when explicit.
+    const resolvedGroupId = (groupId ?? hierarchyInfo?.groupId) || null;
+    const resolvedGroupName = (groupName ?? hierarchyInfo?.groupName) || null;
 
     // ── 2. Resolve fields defensively — no duplicate const ───────────────────
     const resolvedTitle = req.body.title || pages?.[0]?.name || "Untitled";
@@ -3885,6 +3969,10 @@ exports.createPage = async (req, res) => {
       version: "1.0.0",
       folderId: targetFolderId,
       folderPath: folderPathArray,
+      // Group context — null when the page is not part of a group; set to
+      // the group's id/name when created from a group row's "Add" action.
+      groupId: resolvedGroupId,
+      groupName: resolvedGroupName,
       createdAt: new Date(),
       updatedAt: new Date(),
       createdBy: req.user?.email || "system",

@@ -25,6 +25,9 @@ cloudinary.config({
 });
 
 
+
+
+
 const modelMap = {
   modules: { model: Module1, path: "modules" },
   submodules: { model: SubModule1, path: "submodules" },
@@ -43,7 +46,7 @@ const modelMap = {
 exports.getExerciseById = async (req, res) => {
   try {
     const { exerciseId } = req.params;
-    const { 
+    const {
       type,       // Optional: entity type (modules, submodules, topics, subtopics)
       id,         // Optional: entity ID
     } = req.query;
@@ -70,7 +73,7 @@ exports.getExerciseById = async (req, res) => {
         ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
           if (entity.pedagogy[section]) {
             const sectionData = entity.pedagogy[section];
-            
+
             // Handle Map and object formats
             let subcategories = [];
             if (sectionData instanceof Map) {
@@ -89,19 +92,19 @@ exports.getExerciseById = async (req, res) => {
                 exercisesArray = [exercises];
               }
 
-              const exercise = exercisesArray.find(ex => 
+              const exercise = exercisesArray.find(ex =>
                 ex._id && ex._id.toString() === exerciseId
               );
 
               if (exercise) {
                 // Return the FULL exercise object as-is
                 foundExercise = exercise;
-                
+
                 // Convert Mongoose document to plain object if needed
                 if (foundExercise.toObject) {
                   foundExercise = foundExercise.toObject();
                 }
-                
+
                 foundEntity = {
                   type: type,
                   id: entity._id,
@@ -118,11 +121,11 @@ exports.getExerciseById = async (req, res) => {
           }
         });
       }
-    } 
+    }
     // Otherwise, search across all entities
     else {
       console.log(`🔍 Searching across all entities for exercise: ${exerciseId}`);
-      
+
       // Define models to search
       const modelsToSearch = [
         { name: 'modules', model: Module1, type: 'module' },
@@ -134,8 +137,8 @@ exports.getExerciseById = async (req, res) => {
       for (const { model, type } of modelsToSearch) {
         try {
           // Search all entities with pedagogy
-          const entities = await model.find({ 
-            'pedagogy': { $exists: true, $ne: null } 
+          const entities = await model.find({
+            'pedagogy': { $exists: true, $ne: null }
           }).lean();
 
           for (const entity of entities) {
@@ -144,7 +147,7 @@ exports.getExerciseById = async (req, res) => {
               ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
                 if (entity.pedagogy[section]) {
                   const sectionData = entity.pedagogy[section];
-                  
+
                   let subcategories = [];
                   if (sectionData instanceof Map) {
                     subcategories = Array.from(sectionData.entries());
@@ -162,19 +165,19 @@ exports.getExerciseById = async (req, res) => {
                       exercisesArray = [exercises];
                     }
 
-                    const exercise = exercisesArray.find(ex => 
+                    const exercise = exercisesArray.find(ex =>
                       ex._id && ex._id.toString() === exerciseId
                     );
 
                     if (exercise) {
                       // Return the FULL exercise object as-is
                       foundExercise = exercise;
-                      
+
                       // Convert Mongoose document to plain object if needed
                       if (foundExercise.toObject) {
                         foundExercise = foundExercise.toObject();
                       }
-                      
+
                       foundEntity = {
                         type: type,
                         id: entity._id,
@@ -210,7 +213,7 @@ exports.getExerciseById = async (req, res) => {
     // This includes ALL fields: questions, options, correctAnswer, etc.
     const completeExerciseData = {
       ...foundExercise,  // Spread ALL properties from the found exercise
-      
+
       // Add location info as additional metadata
       entity: foundEntity,
       location: foundLocation
@@ -264,9 +267,8 @@ const computeAutoGrades = (exerciseType, exerciseInfo, gradeSettingsRaw) => {
 
   if (exerciseType === 'MCQ' || exerciseType === 'Combined') {
     result.mcqGrade = exerciseInfo.totalMarksMCQ || exerciseInfo.totalMarks || 0;
-    // preserve user value — only fall back to null if truly not provided
-    result.mcqGradeToPass = (gradeSettingsRaw.mcqGradeToPass !== undefined && 
-                             gradeSettingsRaw.mcqGradeToPass !== null)
+    result.mcqGradeToPass = (gradeSettingsRaw.mcqGradeToPass !== undefined &&
+      gradeSettingsRaw.mcqGradeToPass !== null)
       ? Number(gradeSettingsRaw.mcqGradeToPass)
       : null;
   }
@@ -274,24 +276,42 @@ const computeAutoGrades = (exerciseType, exerciseInfo, gradeSettingsRaw) => {
   if (exerciseType === 'Programming' || exerciseType === 'Other' || exerciseType === 'Combined') {
     result.programmingGrade = exerciseInfo.totalMarksProgramming || exerciseInfo.totalMarks || 0;
     result.programmingGradeToPass = (gradeSettingsRaw.programmingGradeToPass !== undefined &&
-                                     gradeSettingsRaw.programmingGradeToPass !== null)
+      gradeSettingsRaw.programmingGradeToPass !== null)
       ? Number(gradeSettingsRaw.programmingGradeToPass)
       : null;
   }
 
   if (exerciseType === 'Combined') {
-    result.combinedGrade = (exerciseInfo.totalMarksMCQ || 0) + 
-                           (exerciseInfo.totalMarksProgramming || 0);
-    result.combinedGradeToPass = (gradeSettingsRaw.combinedGradeToPass !== undefined && 
-                                  gradeSettingsRaw.combinedGradeToPass !== null)
+    result.combinedGrade = (exerciseInfo.totalMarksMCQ || 0) +
+      (exerciseInfo.totalMarksProgramming || 0);
+    result.combinedGradeToPass = (gradeSettingsRaw.combinedGradeToPass !== undefined &&
+      gradeSettingsRaw.combinedGradeToPass !== null)
       ? Number(gradeSettingsRaw.combinedGradeToPass)
       : null;
   }
 
   result.separateMarks = gradeSettingsRaw.separateMarks ?? false;
+
+  // Difficulty-based pass marks
+  result.difficultyPassEnabled = gradeSettingsRaw.difficultyPassEnabled ?? false;
+  result.easyPassMark = (gradeSettingsRaw.easyPassMark !== undefined && gradeSettingsRaw.easyPassMark !== null)
+    ? Number(gradeSettingsRaw.easyPassMark)
+    : null;
+  result.mediumPassMark = (gradeSettingsRaw.mediumPassMark !== undefined && gradeSettingsRaw.mediumPassMark !== null)
+    ? Number(gradeSettingsRaw.mediumPassMark)
+    : null;
+  result.hardPassMark = (gradeSettingsRaw.hardPassMark !== undefined && gradeSettingsRaw.hardPassMark !== null)
+    ? Number(gradeSettingsRaw.hardPassMark)
+    : null;
+
+  // Overall mark to pass (optional)
+  result.overallMarkToPassEnabled = gradeSettingsRaw.overallMarkToPassEnabled ?? false;
+  result.overallMarkToPass = (gradeSettingsRaw.overallMarkToPass !== undefined && gradeSettingsRaw.overallMarkToPass !== null)
+    ? Number(gradeSettingsRaw.overallMarkToPass)
+    : null;
+
   return result;
 };
-
 /**
  * Build a clean availabilityPeriod object from the raw frontend payload.
  * endDate = submission deadline (stored when provided).
@@ -305,8 +325,8 @@ const buildAvailabilityPeriod = (avail) => {
   };
 
   const ap = {};
-  if (safeD(avail.startDate))  ap.startDate = safeD(avail.startDate);
-  if (safeD(avail.endDate))    ap.endDate   = safeD(avail.endDate);   // submission deadline
+  if (safeD(avail.startDate)) ap.startDate = safeD(avail.startDate);
+  if (safeD(avail.endDate)) ap.endDate = safeD(avail.endDate);   // submission deadline
 
   ap.cutOffEnabled = !!avail.cutOffEnabled;
   if (ap.cutOffEnabled && safeD(avail.cutOffDate)) ap.cutOffDate = safeD(avail.cutOffDate);
@@ -338,9 +358,12 @@ exports.addExercise = async (req, res) => {
       exerciseInformation,
       availabilityPeriod,
       questionConfiguration,
+      questionBehavior,       // allQuestionsRequired flag
       notificationSettings,   // from frontend buildFullPayload
       gradeSettings,          // NEW — from frontend buildFullPayload
       additionalOptions,      // NEW — from frontend buildFullPayload
+      isGraded,               // Graded / Non-Graded toggle
+      stepsSaved,             // Array of step titles explicitly saved by user
     } = req.body;
 
     // ── Validate entity type ───────────────────────────────────────────────
@@ -384,13 +407,13 @@ exports.addExercise = async (req, res) => {
 
     // ── Parse all incoming data ────────────────────────────────────────────
     let exerciseTypeParsed = parseIfNeeded(exerciseType);
-    let exerciseInfo       = parseIfNeeded(exerciseInformation);
-    let progSettings       = programmingSettings  ? parseIfNeeded(programmingSettings)  : null;
-    let availPeriod        = availabilityPeriod   ? parseIfNeeded(availabilityPeriod)   : {};
-    let quesConfig         = questionConfiguration ? parseIfNeeded(questionConfiguration) : {};
-    let notifSettings      = notificationSettings  ? parseIfNeeded(notificationSettings)  : {};
-    let gradeSettingsRaw   = gradeSettings         ? parseIfNeeded(gradeSettings)         : {};
-    let additOptions       = additionalOptions     ? parseIfNeeded(additionalOptions)     : {};
+    let exerciseInfo = parseIfNeeded(exerciseInformation);
+    let progSettings = programmingSettings ? parseIfNeeded(programmingSettings) : null;
+    let availPeriod = availabilityPeriod ? parseIfNeeded(availabilityPeriod) : {};
+    let quesConfig = questionConfiguration ? parseIfNeeded(questionConfiguration) : {};
+    let notifSettings = notificationSettings ? parseIfNeeded(notificationSettings) : {};
+    let gradeSettingsRaw = gradeSettings ? parseIfNeeded(gradeSettings) : {};
+    let additOptions = additionalOptions ? parseIfNeeded(additionalOptions) : {};
 
     exerciseInfo = transformExerciseInfo(exerciseInfo);
 
@@ -444,18 +467,18 @@ exports.addExercise = async (req, res) => {
 
     // ── Configuration type flags ──────────────────────────────────────────
     const configTypeSettings = {
-      mcqMode:         exerciseTypeParsed === 'MCQ'         || exerciseTypeParsed === 'Combined',
+      mcqMode: exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined',
       programmingMode: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined',
-      combinedMode:    exerciseTypeParsed === 'Combined',
-      otherMode:       exerciseTypeParsed === 'Other',
+      combinedMode: exerciseTypeParsed === 'Combined',
+      otherMode: exerciseTypeParsed === 'Other',
     };
 
     // ── Build MCQ / Programming question configurations ───────────────────
-    let mcqQuestionConfig         = null;
+    let mcqQuestionConfig = null;
     let programmingQuestionConfig = null;
-    let othersQuestionConfig      = null;
-    let mcqTotalMarks             = 0;
-    let progTotalMarks            = 0;
+    let othersQuestionConfig = null;
+    let mcqTotalMarks = 0;
+    let progTotalMarks = 0;
 
     // ── MCQ config builder ─────────────────────────────────────────────────
     const buildMCQConfig = (mcqCfg) => {
@@ -470,13 +493,13 @@ exports.addExercise = async (req, res) => {
       }
       return {
         cfg: {
-          totalMcqQuestions:    mcqCfg.generalQuestionCount || 0,
+          totalMcqQuestions: mcqCfg.generalQuestionCount || 0,
           marksPerQuestion,
-          mcqTotalMarks:        total,
-          attemptLimitEnabled:  mcqCfg.attemptLimitEnabled  || false,
-          submissionAttempts:   mcqCfg.submissionAttempts   || 1,
-          shuffleQuestions:     true,
-          scoringType:          scoreType,
+          mcqTotalMarks: total,
+          attemptLimitEnabled: mcqCfg.attemptLimitEnabled || false,
+          submissionAttempts: mcqCfg.submissionAttempts || 1,
+          shuffleQuestions: true,
+          scoringType: scoreType,
         },
         total,
       };
@@ -487,9 +510,9 @@ exports.addExercise = async (req, res) => {
       const qConfigType = progCfg.questionConfigType || 'general';
       let backendType;
       switch (qConfigType) {
-        case 'levelBased':     backendType = 'levelBased';     break;
+        case 'levelBased': backendType = 'levelBased'; break;
         case 'selectionLevel': backendType = 'selectionLevel'; break;
-        default:               backendType = qConfigType;
+        default: backendType = qConfigType;
       }
 
       let total = 0;
@@ -504,7 +527,7 @@ exports.addExercise = async (req, res) => {
             if (!c) return;
             const s = levelScoring[l];
             if (!s) return;
-            if (s.type === 'level_specific' && s.marksPerQuestion)  total += c * s.marksPerQuestion;
+            if (s.type === 'level_specific' && s.marksPerQuestion) total += c * s.marksPerQuestion;
             else if (s.type === 'question_specific' && s.totalMarks) total += s.totalMarks;
           });
         }
@@ -516,10 +539,10 @@ exports.addExercise = async (req, res) => {
         backendScoreType = 'levelBasedMarks';
       } else {
         switch (progCfg.scoreSettings?.scoreType) {
-          case 'equalDistribution': backendScoreType = 'evenMarks';       break;
-          case 'questionSpecific':  backendScoreType = 'separateMarks';   break;
-          case 'levelSpecific':     backendScoreType = 'levelBasedMarks'; break;
-          default:                  backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
+          case 'equalDistribution': backendScoreType = 'evenMarks'; break;
+          case 'questionSpecific': backendScoreType = 'separateMarks'; break;
+          case 'levelSpecific': backendScoreType = 'levelBasedMarks'; break;
+          default: backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
         }
       }
 
@@ -543,25 +566,26 @@ exports.addExercise = async (req, res) => {
       }
 
       const cfg = {
-        questionConfigType:   backendType || 'general',
-        attemptLimitEnabled:  progCfg.attemptLimitEnabled  || false,
-        submissionAttempts:   progCfg.submissionAttempts   || 1,
-        questionFlow:         progCfg.questionFlow         || 'freeFlow',
-        allowCodeExecution:   true,
-        enableTestCases:      true,
-        showSampleCases:      true,
+        questionConfigType: backendType || 'general',
+        attemptLimitEnabled: progCfg.attemptLimitEnabled || false,
+        submissionAttempts: progCfg.submissionAttempts || 1,
+        questionFlow: progCfg.questionFlow || 'freeFlow',
+        compilerFileMode: progCfg.compilerFileMode || 'single',
+        allowCodeExecution: true,
+        enableTestCases: true,
+        showSampleCases: true,
         scoreSettings: {
-          scoreType:                backendScoreType,
-          evenMarks:                progCfg.scoreSettings?.scoreType === 'equalDistribution' ? (progCfg.scoreSettings.equalDistribution || 0) : 0,
-          separateMarks:            progCfg.scoreSettings?.questionSpecific || { general: [], levelBased: { easy: [], medium: [], hard: [] } },
+          scoreType: backendScoreType,
+          evenMarks: progCfg.scoreSettings?.scoreType === 'equalDistribution' ? (progCfg.scoreSettings.equalDistribution || 0) : 0,
+          separateMarks: progCfg.scoreSettings?.questionSpecific || { general: [], levelBased: { easy: [], medium: [], hard: [] } },
           levelBasedMarks,
           levelScoringConfiguration: levelScoringConfig,
-          totalMarks:               total,
+          totalMarks: total,
         },
       };
 
       if (qConfigType === 'general') {
-        cfg.generalQuestionCount   = progCfg.generalQuestionCount || 0;
+        cfg.generalQuestionCount = progCfg.generalQuestionCount || 0;
         cfg.generalMarksPerQuestion = progCfg.scoreSettings?.equalDistribution || progCfg.scoreSettings?.evenMarks || 0;
       } else if (qConfigType === 'levelBased') {
         cfg.levelBasedCounts = progCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
@@ -577,62 +601,170 @@ exports.addExercise = async (req, res) => {
       if (quesConfig.mcqConfig) {
         const { cfg, total } = buildMCQConfig(quesConfig.mcqConfig);
         mcqQuestionConfig = cfg;
-        mcqTotalMarks     = total;
+        mcqTotalMarks = total;
       }
     }
     if (exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined') {
       if (quesConfig.programmingConfig) {
         const { cfg, total } = buildProgConfig(quesConfig.programmingConfig);
         programmingQuestionConfig = cfg;
-        progTotalMarks            = total;
+        progTotalMarks = total;
       }
     }
 
     if (exerciseTypeParsed === 'Other') {
-      if (quesConfig.othersConfig) {
-        const othersCfg = quesConfig.othersConfig;
-        const scoringType = othersCfg.scoringType || 'equalDistribution';
-        const totalQ = othersCfg.totalQuestions || 0;
-        const totalMarksVal = scoringType === 'levelBased'
-          ? (othersCfg.totalMarks || 0)
-          : (exerciseInfo.totalMarks || 0);
-        const marksPerQ = scoringType === 'equalDistribution' && totalQ > 0
-          ? totalMarksVal / totalQ
-          : (othersCfg.marksPerQuestion || 0);
+      // Frontend sends it as othersQuestionConfiguration (from buildFullPayload)
+      const othersCfg = quesConfig.othersQuestionConfiguration
+        || quesConfig.othersConfig  // fallback for older payloads
+        || null;
+
+      if (othersCfg) {
+        const qConfigType = othersCfg.questionConfigType || 'general';
+
+        let othersTotal = 0;
+
+        if (qConfigType === 'general') {
+          const evenMarks = othersCfg.generalMarksPerQuestion
+            || othersCfg.scoreSettings?.evenMarks
+            || othersCfg.scoreSettings?.equalDistribution
+            || 0;
+          const qCount = othersCfg.generalQuestionCount || 0;
+          othersTotal = qCount * evenMarks;
+        } else {
+          // levelBased or selectionLevel — sum from levelScoringConfiguration
+          const counts = qConfigType === 'selectionLevel'
+            ? othersCfg.selectionLevelCounts
+            : othersCfg.levelBasedCounts;
+          const levelScoring = othersCfg.scoreSettings?.levelScoringConfiguration;
+
+          if (levelScoring) {
+            ['easy', 'medium', 'hard'].forEach(l => {
+              const c = counts?.[l] || 0;
+              if (!c) return;
+              const s = levelScoring[l];
+              if (!s) return;
+              if (s.type === 'level_specific' && s.marksPerQuestion) othersTotal += c * s.marksPerQuestion;
+              else if (s.type === 'question_specific' && s.totalMarks) othersTotal += s.totalMarks;
+            });
+          } else if (othersCfg.scoreSettings?.levelBasedMarks) {
+            const lbm = othersCfg.scoreSettings.levelBasedMarks;
+            ['easy', 'medium', 'hard'].forEach(l => {
+              othersTotal += (counts?.[l] || 0) * (lbm[l] || 0);
+            });
+          }
+        }
+
+        // Use the totalMarks from scoreSettings if calculated value is 0 (fallback)
+        if (!othersTotal) {
+          othersTotal = othersCfg.scoreSettings?.totalMarks
+            || exerciseInfo.totalMarks
+            || 0;
+        }
+
+        // Build levelBasedMarks for storage
+        let levelBasedMarks = { easy: 0, medium: 0, hard: 0 };
+        const levelScoringConfig = othersCfg.scoreSettings?.levelScoringConfiguration;
+
+        if (levelScoringConfig && (qConfigType === 'levelBased' || qConfigType === 'selectionLevel')) {
+          const counts = qConfigType === 'selectionLevel'
+            ? othersCfg.selectionLevelCounts
+            : othersCfg.levelBasedCounts;
+          ['easy', 'medium', 'hard'].forEach(l => {
+            const c = counts?.[l] || 0;
+            if (!c) return;
+            const s = levelScoringConfig[l];
+            if (s?.type === 'level_specific' && s.marksPerQuestion) {
+              levelBasedMarks[l] = s.marksPerQuestion;
+              if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+            } else if (s?.type === 'question_specific' && s.totalMarks) {
+              levelBasedMarks[l] = c > 0 ? s.totalMarks / c : 0;
+              if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+            }
+          });
+        }
+
         othersQuestionConfig = {
-          totalQuestions: totalQ,
-          scoringType,
-          marksPerQuestion: marksPerQ,
-          totalMarks: totalMarksVal,
+          questionConfigType: qConfigType,
+          ...(qConfigType === 'general' && {
+            generalQuestionCount: othersCfg.generalQuestionCount || 0,
+            generalMarksPerQuestion: othersCfg.generalMarksPerQuestion
+              || othersCfg.scoreSettings?.evenMarks
+              || 0,
+          }),
+          ...(qConfigType === 'levelBased' && {
+            levelBasedCounts: othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          ...(qConfigType === 'selectionLevel' && {
+            selectionLevelCounts: othersCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          scoreSettings: {
+            scoreType: qConfigType === 'general' ? 'evenMarks' : 'levelBasedMarks',
+            evenMarks: othersCfg.scoreSettings?.evenMarks
+              || othersCfg.generalMarksPerQuestion
+              || 0,
+            levelBasedMarks,
+            levelScoringConfiguration: levelScoringConfig || undefined,
+            totalMarks: othersTotal,
+          },
+          questionFlow: othersCfg.questionFlow || 'freeFlow',
           attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
           submissionAttempts: othersCfg.submissionAttempts || 1,
         };
-        if (scoringType === 'levelBased') {
-          othersQuestionConfig.levelBasedCounts = othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
-          othersQuestionConfig.levelBasedMarks  = othersCfg.levelBasedMarks  || { easy: 0, medium: 0, hard: 0 };
-        }
-        progTotalMarks = othersQuestionConfig.totalMarks;
+
+        progTotalMarks = othersTotal;
       }
     }
-
     // ── Build availabilityPeriod (endDate always stored) ──────────────────
     const availabilityPeriodData = buildAvailabilityPeriod(availPeriod);
 
     // ── Build notificationSettings (full, separate from grades) ───────────
+    // const notificationSettingsData = {
+    //   notifyUsers: notifSettings.notifyUsers || false,
+    //   notifyGmail: notifSettings.notifyGmail || false,
+    //   notifyWhatsApp: notifSettings.notifyWhatsApp || false,
+    //   gradeSheet: notifSettings.gradeSheet !== undefined ? notifSettings.gradeSheet : true,
+    //   notifyGradersSubmissions: notifSettings.notifyGradersSubmissions || false,
+    //   notifyGradersLateSubmissions: notifSettings.notifyGradersLateSubmissions || false,
+    //   notifyStudent: notifSettings.notifyStudent !== undefined ? notifSettings.notifyStudent : true,
+    // };
+
+    // ── Build notificationSettings (full, separate from grades) ───────────
     const notificationSettingsData = {
-      notifyUsers:                  notifSettings.notifyUsers                   || false,
-      notifyGmail:                  notifSettings.notifyGmail                   || false,
-      notifyWhatsApp:               notifSettings.notifyWhatsApp                || false,
-      gradeSheet:                   notifSettings.gradeSheet !== undefined       ? notifSettings.gradeSheet : true,
-      notifyGradersSubmissions:     notifSettings.notifyGradersSubmissions      || false,
-      notifyGradersLateSubmissions: notifSettings.notifyGradersLateSubmissions  || false,
-      notifyStudent:                notifSettings.notifyStudent !== undefined    ? notifSettings.notifyStudent : true,
+      // Global notification settings
+      notifyUsers: notifSettings.notifyUsers || false,
+      notifyGmail: notifSettings.notifyGmail || false,
+      notifyWhatsApp: notifSettings.notifyWhatsApp || false,
+      gradeSheet: notifSettings.gradeSheet !== undefined ? notifSettings.gradeSheet : true,
+
+      // Grader submission notifications with channel support
+      notifyGradersSubmissions: notifSettings.notifyGradersSubmissions || false,
+      notifyGradersSubmissionsChannels: {
+        dashboard: notifSettings.notifyGradersSubmissionsChannels?.dashboard ?? false,
+        gmail: notifSettings.notifyGradersSubmissionsChannels?.gmail ?? false,
+        whatsapp: notifSettings.notifyGradersSubmissionsChannels?.whatsapp ?? false,
+      },
+
+      // Grader late submission notifications with channel support
+      notifyGradersLateSubmissions: notifSettings.notifyGradersLateSubmissions || false,
+      notifyGradersLateSubmissionsChannels: {
+        dashboard: notifSettings.notifyGradersLateSubmissionsChannels?.dashboard ?? false,
+        gmail: notifSettings.notifyGradersLateSubmissionsChannels?.gmail ?? false,
+        whatsapp: notifSettings.notifyGradersLateSubmissionsChannels?.whatsapp ?? false,
+      },
+
+      // Student notifications with channel support
+      notifyStudent: notifSettings.notifyStudent !== undefined ? notifSettings.notifyStudent : true,
+      notifyStudentChannels: {
+        dashboard: notifSettings.notifyStudentChannels?.dashboard ?? false,
+        gmail: notifSettings.notifyStudentChannels?.gmail ?? false,
+        whatsapp: notifSettings.notifyStudentChannels?.whatsapp ?? false,
+      },
     };
 
     // ── Build gradeSettings with auto-computed values ──────────────────────
     const exerciseInfoForGrade = {
-      totalMarks:            exerciseInfo.totalMarks            || 0,
-      totalMarksMCQ:         exerciseInfo.totalMarksMCQ         || (exerciseTypeParsed === 'MCQ' ? (exerciseInfo.totalMarks || 0) : 0),
+      totalMarks: exerciseInfo.totalMarks || 0,
+      totalMarksMCQ: exerciseInfo.totalMarksMCQ || (exerciseTypeParsed === 'MCQ' ? (exerciseInfo.totalMarks || 0) : 0),
       totalMarksProgramming: exerciseInfo.totalMarksProgramming || ((exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other') ? (exerciseInfo.totalMarks || 0) : 0),
     };
     const gradeSettingsData = computeAutoGrades(exerciseTypeParsed, exerciseInfoForGrade, gradeSettingsRaw);
@@ -640,7 +772,7 @@ exports.addExercise = async (req, res) => {
     // ── Build additionalOptions ────────────────────────────────────────────
     const additionalOptionsData = {
       anonymousSubmissions: additOptions.anonymousSubmissions || false,
-      hideGraderIdentity:   additOptions.hideGraderIdentity   || false,
+      hideGraderIdentity: additOptions.hideGraderIdentity || false,
     };
 
     // ── Assemble the new exercise document ────────────────────────────────
@@ -651,20 +783,22 @@ exports.addExercise = async (req, res) => {
     const newExercise = {
       _id: new mongoose.Types.ObjectId(),
 
-      exerciseType:      exerciseTypeParsed,
+      exerciseType: exerciseTypeParsed,
+      isGraded: isGraded !== false,
+      stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : [],
       configurationType: configTypeSettings,
 
       exerciseInformation: {
-        exerciseId:             exerciseId,
-        exerciseName:           exerciseInfo.exerciseName           || '',
-        description:            exerciseInfo.description            || '',
-        exerciseLevel:          exerciseInfo.exerciseLevel          || 'intermediate',
-        totalDuration:          exerciseInfo.totalDuration          || 1,
-        totalMarksMCQ:          exerciseTypeParsed === 'MCQ'         || exerciseTypeParsed === 'Combined'
-                                  ? (exerciseInfo.totalMarksMCQ !== undefined ? exerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
-        totalMarksProgramming:  exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
-                                  ? (exerciseInfo.totalMarksProgramming !== undefined ? exerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
-        totalMarks:             exerciseInfo.totalMarks || totalMarksForInfo,
+        exerciseId: exerciseId,
+        exerciseName: exerciseInfo.exerciseName || '',
+        description: exerciseInfo.description || '',
+        exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
+        totalDuration: exerciseInfo.totalDuration || 1,
+        totalMarksMCQ: exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined'
+          ? (exerciseInfo.totalMarksMCQ !== undefined ? exerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
+        totalMarksProgramming: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
+          ? (exerciseInfo.totalMarksProgramming !== undefined ? exerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
+        totalMarks: exerciseInfo.totalMarks || totalMarksForInfo,
       },
 
       questionConfiguration: {},
@@ -676,10 +810,10 @@ exports.addExercise = async (req, res) => {
       notificationSettings: notificationSettingsData,
       // Keep legacy field populated for backward compatibility
       notificatonandGradeSettings: {
-        notifyUsers:    notifSettings.notifyUsers    || false,
-        notifyGmail:    notifSettings.notifyGmail    || false,
+        notifyUsers: notifSettings.notifyUsers || false,
+        notifyGmail: notifSettings.notifyGmail || false,
         notifyWhatsApp: notifSettings.notifyWhatsApp || false,
-        gradeSheet:     notifSettings.gradeSheet !== undefined ? notifSettings.gradeSheet : true,
+        gradeSheet: notifSettings.gradeSheet !== undefined ? notifSettings.gradeSheet : true,
       },
 
       // Grade settings (auto-computed + user-entered)
@@ -688,24 +822,31 @@ exports.addExercise = async (req, res) => {
       // Additional options
       additionalOptions: additionalOptionsData,
 
-      questions:  quesConfig.questions || [],
-      createdAt:  new Date(),
-      createdBy:  req.user?.email || 'system',
-      version:    1,
+      // Question behavior flags
+      questionBehavior: {
+        allQuestionsRequired: questionBehavior?.allQuestionsRequired !== undefined
+          ? questionBehavior.allQuestionsRequired
+          : true,
+      },
+
+      questions: quesConfig.questions || [],
+      createdAt: new Date(),
+      createdBy: req.user?.email || 'system',
+      version: 1,
     };
 
     // ── Attach programming settings ────────────────────────────────────────
     if ((exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined') && progSettings) {
       newExercise.programmingSettings = {
-        selectedModule:    progSettings.selectedModule    || null,
+        selectedModule: progSettings.selectedModule || null,
         selectedLanguages: progSettings.selectedLanguages || [],
       };
     }
 
     // ── Attach question configurations ─────────────────────────────────────
-    if (mcqQuestionConfig)         newExercise.questionConfiguration.mcqQuestionConfiguration         = mcqQuestionConfig;
+    if (mcqQuestionConfig) newExercise.questionConfiguration.mcqQuestionConfiguration = mcqQuestionConfig;
     if (programmingQuestionConfig) newExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
-    if (othersQuestionConfig)      newExercise.questionConfiguration.othersQuestionConfiguration      = othersQuestionConfig;
+    if (othersQuestionConfig) newExercise.questionConfiguration.othersQuestionConfiguration = othersQuestionConfig;
 
     // ── Persist ────────────────────────────────────────────────────────────
     exercises.push(newExercise);
@@ -717,24 +858,24 @@ exports.addExercise = async (req, res) => {
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
-    if (exerciseTypeParsed === 'MCQ')              responseConfig = { mode: 'mcq',         config: mcqQuestionConfig };
+    if (exerciseTypeParsed === 'MCQ') responseConfig = { mode: 'mcq', config: mcqQuestionConfig };
     else if (exerciseTypeParsed === 'Programming') responseConfig = { mode: 'programming', config: programmingQuestionConfig };
-    else if (exerciseTypeParsed === 'Other')       responseConfig = { mode: 'other',       config: othersQuestionConfig };
-    else if (exerciseTypeParsed === 'Combined')    responseConfig = { mode: 'combined',    mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
+    else if (exerciseTypeParsed === 'Other') responseConfig = { mode: 'other', config: othersQuestionConfig };
+    else if (exerciseTypeParsed === 'Combined') responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
 
     return res.status(201).json({
       message: [{ key: 'success', value: `Exercise added successfully to ${subcategory}` }],
       data: {
-        exercise:           newExercise,
-        configuration:      responseConfig,
-        gradeSettings:      gradeSettingsData,
+        exercise: newExercise,
+        configuration: responseConfig,
+        gradeSettings: gradeSettingsData,
         notificationSettings: notificationSettingsData,
-        additionalOptions:  additionalOptionsData,
+        additionalOptions: additionalOptionsData,
         subcategory,
         tabType,
-        entityType:         type,
-        entityId:           id,
-        totalExercises:     exercises.length,
+        entityType: type,
+        entityId: id,
+        totalExercises: exercises.length,
         generatedExerciseId: exerciseId,
         location: { section: tabType, subcategory, index: exercises.length - 1 },
       },
@@ -769,10 +910,13 @@ exports.updateExercise = async (req, res) => {
       exerciseInformation,
       availabilityPeriod,
       questionConfiguration,
+      questionBehavior,       // allQuestionsRequired flag
       notificationSettings,   // from frontend
       notificationGradeSettings, // legacy field name (keep support)
       gradeSettings,          // NEW
       additionalOptions,      // NEW
+      isGraded,               // Graded / Non-Graded toggle
+      stepsSaved,             // Array of step titles explicitly saved by user
     } = req.body;
 
     // ── Validate ──────────────────────────────────────────────────────────
@@ -805,25 +949,25 @@ exports.updateExercise = async (req, res) => {
     };
 
     // ── Parse all incoming ─────────────────────────────────────────────────
-    const parsedExerciseType    = exerciseType         ? parseIfNeeded(exerciseType)         : null;
-    const parsedExerciseInfo    = exerciseInformation  ? parseIfNeeded(exerciseInformation)  : null;
-    const parsedProgSettings    = programmingSettings  ? parseIfNeeded(programmingSettings)  : null;
-    const parsedAvailPeriod     = availabilityPeriod   ? parseIfNeeded(availabilityPeriod)   : null;
-    const parsedQuesConfig      = questionConfiguration ? parseIfNeeded(questionConfiguration) : null;
+    const parsedExerciseType = exerciseType ? parseIfNeeded(exerciseType) : null;
+    const parsedExerciseInfo = exerciseInformation ? parseIfNeeded(exerciseInformation) : null;
+    const parsedProgSettings = programmingSettings ? parseIfNeeded(programmingSettings) : null;
+    const parsedAvailPeriod = availabilityPeriod ? parseIfNeeded(availabilityPeriod) : null;
+    const parsedQuesConfig = questionConfiguration ? parseIfNeeded(questionConfiguration) : null;
     // Accept either field name for notifications
-    const parsedNotifSettings   = notificationSettings
+    const parsedNotifSettings = notificationSettings
       ? parseIfNeeded(notificationSettings)
       : (notificationGradeSettings ? parseIfNeeded(notificationGradeSettings) : null);
-    const parsedGradeSettings   = gradeSettings    ? parseIfNeeded(gradeSettings)    : null;
-    const parsedAdditOptions    = additionalOptions ? parseIfNeeded(additionalOptions) : null;
+    const parsedGradeSettings = gradeSettings ? parseIfNeeded(gradeSettings) : null;
+    const parsedAdditOptions = additionalOptions ? parseIfNeeded(additionalOptions) : null;
 
     // ── Find entity ───────────────────────────────────────────────────────
     const { model } = modelMap[type];
     const entity = await model.findById(id);
 
-    if (!entity)                     return res.status(404).json({ message: [{ key: 'error', value: `${type} with ID ${id} not found` }] });
-    if (!entity.pedagogy)            return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
-    if (!entity.pedagogy[tabType])   return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
+    if (!entity) return res.status(404).json({ message: [{ key: 'error', value: `${type} with ID ${id} not found` }] });
+    if (!entity.pedagogy) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
+    if (!entity.pedagogy[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
     if (!entity.pedagogy[tabType].has(subcategory))
       return res.status(404).json({ message: [{ key: 'error', value: `Subcategory '${subcategory}' not found in ${tabType}` }] });
 
@@ -846,23 +990,23 @@ exports.updateExercise = async (req, res) => {
     const finalExerciseType = parsedExerciseType || existingExercise.exerciseType;
 
     const configTypeSettings = {
-      mcqMode:         finalExerciseType === 'MCQ'         || finalExerciseType === 'Combined',
+      mcqMode: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined',
       programmingMode: finalExerciseType === 'Programming' || finalExerciseType === 'Combined',
-      combinedMode:    finalExerciseType === 'Combined',
-      otherMode:       finalExerciseType === 'Other',
+      combinedMode: finalExerciseType === 'Combined',
+      otherMode: finalExerciseType === 'Other',
     };
 
     // ── Re-use question config builders (same logic as addExercise) ────────
-    let mcqQuestionConfig         = existingExercise.questionConfiguration?.mcqQuestionConfiguration         || null;
+    let mcqQuestionConfig = existingExercise.questionConfiguration?.mcqQuestionConfiguration || null;
     let programmingQuestionConfig = existingExercise.questionConfiguration?.programmingQuestionConfiguration || null;
-    let othersQuestionConfig      = existingExercise.questionConfiguration?.othersQuestionConfiguration      || null;
-    let mcqTotalMarks             = existingExercise.exerciseInformation?.totalMarksMCQ         || 0;
-    let progTotalMarks            = existingExercise.exerciseInformation?.totalMarksProgramming || 0;
+    let othersQuestionConfig = existingExercise.questionConfiguration?.othersQuestionConfiguration || null;
+    let mcqTotalMarks = existingExercise.exerciseInformation?.totalMarksMCQ || 0;
+    let progTotalMarks = existingExercise.exerciseInformation?.totalMarksProgramming || 0;
 
     if (parsedQuesConfig) {
       // ── MCQ config ───────────────────────────────────────────────────────
       if (parsedQuesConfig.mcqConfig) {
-        const mcqCfg   = parsedQuesConfig.mcqConfig;
+        const mcqCfg = parsedQuesConfig.mcqConfig;
         const scoreType = mcqCfg.scoreSettings?.scoreType || 'equalDistribution';
         let marksPerQuestion = 0;
         if (scoreType === 'equalDistribution') {
@@ -872,25 +1016,25 @@ exports.updateExercise = async (req, res) => {
           mcqTotalMarks = mcqCfg.scoreSettings?.totalMarks || 0;
         }
         mcqQuestionConfig = {
-          totalMcqQuestions:   mcqCfg.generalQuestionCount || 0,
+          totalMcqQuestions: mcqCfg.generalQuestionCount || 0,
           marksPerQuestion,
           mcqTotalMarks,
           attemptLimitEnabled: mcqCfg.attemptLimitEnabled || false,
-          submissionAttempts:  mcqCfg.submissionAttempts  || 1,
-          shuffleQuestions:    true,
-          scoringType:         scoreType,
+          submissionAttempts: mcqCfg.submissionAttempts || 1,
+          shuffleQuestions: true,
+          scoringType: scoreType,
         };
       }
 
       // ── Programming config ───────────────────────────────────────────────
       if (parsedQuesConfig.programmingConfig) {
-        const progCfg   = parsedQuesConfig.programmingConfig;
+        const progCfg = parsedQuesConfig.programmingConfig;
         const qConfigType = progCfg.questionConfigType || 'general';
         let backendType;
         switch (qConfigType) {
-          case 'levelBased':     backendType = 'levelBased';     break;
+          case 'levelBased': backendType = 'levelBased'; break;
           case 'selectionLevel': backendType = 'selectionLevel'; break;
-          default:               backendType = qConfigType;
+          default: backendType = qConfigType;
         }
 
         // Recalculate total marks
@@ -904,7 +1048,7 @@ exports.updateExercise = async (req, res) => {
             ['easy', 'medium', 'hard'].forEach(l => {
               const c = counts?.[l] || 0; if (!c) return;
               const s = levelScoring[l]; if (!s) return;
-              if (s.type === 'level_specific' && s.marksPerQuestion)   progTotalMarks += c * s.marksPerQuestion;
+              if (s.type === 'level_specific' && s.marksPerQuestion) progTotalMarks += c * s.marksPerQuestion;
               else if (s.type === 'question_specific' && s.totalMarks) progTotalMarks += s.totalMarks;
             });
           }
@@ -915,10 +1059,10 @@ exports.updateExercise = async (req, res) => {
           backendScoreType = 'levelBasedMarks';
         } else {
           switch (progCfg.scoreSettings?.scoreType) {
-            case 'equalDistribution': backendScoreType = 'evenMarks';       break;
-            case 'questionSpecific':  backendScoreType = 'separateMarks';   break;
-            case 'levelSpecific':     backendScoreType = 'levelBasedMarks'; break;
-            default:                  backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
+            case 'equalDistribution': backendScoreType = 'evenMarks'; break;
+            case 'questionSpecific': backendScoreType = 'separateMarks'; break;
+            case 'levelSpecific': backendScoreType = 'levelBasedMarks'; break;
+            default: backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
           }
         }
 
@@ -940,24 +1084,25 @@ exports.updateExercise = async (req, res) => {
         }
 
         programmingQuestionConfig = {
-          questionConfigType:   backendType || 'general',
-          attemptLimitEnabled:  progCfg.attemptLimitEnabled || false,
-          submissionAttempts:   progCfg.submissionAttempts  || 1,
-          questionFlow:         progCfg.questionFlow        || 'freeFlow',
-          allowCodeExecution:   true,
-          enableTestCases:      true,
-          showSampleCases:      true,
+          questionConfigType: backendType || 'general',
+          attemptLimitEnabled: progCfg.attemptLimitEnabled || false,
+          submissionAttempts: progCfg.submissionAttempts || 1,
+          questionFlow: progCfg.questionFlow || 'freeFlow',
+          compilerFileMode: progCfg.compilerFileMode || 'single',
+          allowCodeExecution: true,
+          enableTestCases: true,
+          showSampleCases: true,
           scoreSettings: {
-            scoreType:                 backendScoreType,
-            evenMarks:                 progCfg.scoreSettings?.scoreType === 'equalDistribution' ? (progCfg.scoreSettings.equalDistribution || 0) : 0,
-            separateMarks:             progCfg.scoreSettings?.questionSpecific || { general: [], levelBased: { easy: [], medium: [], hard: [] } },
+            scoreType: backendScoreType,
+            evenMarks: progCfg.scoreSettings?.scoreType === 'equalDistribution' ? (progCfg.scoreSettings.equalDistribution || 0) : 0,
+            separateMarks: progCfg.scoreSettings?.questionSpecific || { general: [], levelBased: { easy: [], medium: [], hard: [] } },
             levelBasedMarks,
             levelScoringConfiguration: levelScoringConfig,
-            totalMarks:                progTotalMarks,
+            totalMarks: progTotalMarks,
           },
         };
         if (qConfigType === 'general') {
-          programmingQuestionConfig.generalQuestionCount    = progCfg.generalQuestionCount || 0;
+          programmingQuestionConfig.generalQuestionCount = progCfg.generalQuestionCount || 0;
           programmingQuestionConfig.generalMarksPerQuestion = progCfg.scoreSettings?.equalDistribution || progCfg.scoreSettings?.evenMarks || 0;
         } else if (qConfigType === 'levelBased') {
           programmingQuestionConfig.levelBasedCounts = progCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
@@ -966,37 +1111,73 @@ exports.updateExercise = async (req, res) => {
         }
       }
 
-      // ── Others config ─────────────────────────────────────────────────────
-      if (parsedQuesConfig.othersConfig) {
-        const othersCfg = parsedQuesConfig.othersConfig;
-        const scoringType = othersCfg.scoringType || 'equalDistribution';
-        const totalQ = othersCfg.totalQuestions || 0;
-        const exInfo = parsedExerciseInfo || existingExercise.exerciseInformation || {};
-        const baseMarks = exInfo.totalMarks || existingExercise.exerciseInformation?.totalMarks || 0;
-        const totalMarksVal = scoringType === 'levelBased'
-          ? (othersCfg.totalMarks || 0)
-          : baseMarks;
-        const marksPerQ = scoringType === 'equalDistribution' && totalQ > 0
-          ? totalMarksVal / totalQ
-          : (othersCfg.marksPerQuestion || 0);
+      // ── Others config (NEW schema, replaces the old flat one) ──────────────────
+      if (parsedQuesConfig.othersQuestionConfiguration || parsedQuesConfig.othersConfig) {
+        const othersCfg = parsedQuesConfig.othersQuestionConfiguration
+          || parsedQuesConfig.othersConfig;
+        const qConfigType = othersCfg.questionConfigType || 'general';
+
+        let othersTotal = 0;
+        if (qConfigType === 'general') {
+          const evenMarks = othersCfg.generalMarksPerQuestion
+            || othersCfg.scoreSettings?.evenMarks || 0;
+          othersTotal = (othersCfg.generalQuestionCount || 0) * evenMarks;
+        } else {
+          const counts = qConfigType === 'selectionLevel'
+            ? othersCfg.selectionLevelCounts
+            : othersCfg.levelBasedCounts;
+          const levelScoring = othersCfg.scoreSettings?.levelScoringConfiguration;
+          if (levelScoring) {
+            ['easy', 'medium', 'hard'].forEach(l => {
+              const c = counts?.[l] || 0; if (!c) return;
+              const s = levelScoring[l]; if (!s) return;
+              if (s.type === 'level_specific' && s.marksPerQuestion)
+                othersTotal += c * s.marksPerQuestion;
+              else if (s.type === 'question_specific' && s.totalMarks)
+                othersTotal += s.totalMarks;
+            });
+          }
+        }
+
+        if (!othersTotal) {
+          othersTotal = othersCfg.scoreSettings?.totalMarks
+            || parsedExerciseInfo?.totalMarks
+            || existingExercise.exerciseInformation?.totalMarks || 0;
+        }
+
         othersQuestionConfig = {
-          totalQuestions: totalQ,
-          scoringType,
-          marksPerQuestion: marksPerQ,
-          totalMarks: totalMarksVal,
+          questionConfigType: qConfigType,
+          ...(qConfigType === 'general' && {
+            generalQuestionCount: othersCfg.generalQuestionCount || 0,
+            generalMarksPerQuestion: othersCfg.generalMarksPerQuestion
+              || othersCfg.scoreSettings?.evenMarks || 0,
+          }),
+          ...(qConfigType === 'levelBased' && {
+            levelBasedCounts: othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          ...(qConfigType === 'selectionLevel' && {
+            selectionLevelCounts: othersCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          scoreSettings: {
+            scoreType: qConfigType === 'general' ? 'evenMarks' : 'levelBasedMarks',
+            evenMarks: othersCfg.generalMarksPerQuestion
+              || othersCfg.scoreSettings?.evenMarks || 0,
+            levelBasedMarks: othersCfg.scoreSettings?.levelBasedMarks
+              || { easy: 0, medium: 0, hard: 0 },
+            // ✅ Preserved on update
+            levelScoringConfiguration: othersCfg.scoreSettings?.levelScoringConfiguration,
+            totalMarks: othersTotal,
+          },
+          questionFlow: othersCfg.questionFlow || 'freeFlow',
           attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
           submissionAttempts: othersCfg.submissionAttempts || 1,
         };
-        if (scoringType === 'levelBased') {
-          othersQuestionConfig.levelBasedCounts = othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
-          othersQuestionConfig.levelBasedMarks  = othersCfg.levelBasedMarks  || { easy: 0, medium: 0, hard: 0 };
-        }
+        progTotalMarks = othersTotal;
       }
-
       // Direct overrides (if frontend sends already-formatted config objects)
       if (parsedQuesConfig.mcqQuestionConfiguration) {
         mcqQuestionConfig = parsedQuesConfig.mcqQuestionConfiguration;
-        mcqTotalMarks     = mcqQuestionConfig.mcqTotalMarks || 0;
+        mcqTotalMarks = mcqQuestionConfig.mcqTotalMarks || 0;
       }
       if (parsedQuesConfig.programmingQuestionConfiguration) {
         programmingQuestionConfig = parsedQuesConfig.programmingQuestionConfiguration;
@@ -1016,6 +1197,8 @@ exports.updateExercise = async (req, res) => {
     const updatedExercise = {
       ...existingExercise,
       ...(parsedExerciseType && { exerciseType: finalExerciseType }),
+      isGraded: isGraded !== undefined ? isGraded !== false : (existingExercise.isGraded !== false),
+      stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : (existingExercise.stepsSaved || []),
       configurationType: configTypeSettings,
       updatedAt: new Date(),
       updatedBy: req.user?.email || 'system',
@@ -1026,23 +1209,23 @@ exports.updateExercise = async (req, res) => {
     if (parsedExerciseInfo) {
       updatedExercise.exerciseInformation = {
         ...existingExercise.exerciseInformation,
-        exerciseId:             parsedExerciseInfo.exerciseId    || existingExercise.exerciseInformation?.exerciseId,
-        exerciseName:           parsedExerciseInfo.exerciseName  || existingExercise.exerciseInformation?.exerciseName,
-        description:            parsedExerciseInfo.description   !== undefined ? parsedExerciseInfo.description : existingExercise.exerciseInformation?.description,
-        exerciseLevel:          parsedExerciseInfo.exerciseLevel || existingExercise.exerciseInformation?.exerciseLevel,
-        totalDuration:          parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
-        totalMarksMCQ:          finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
-                                  ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
-        totalMarksProgramming:  finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
-                                  ? (parsedExerciseInfo.totalMarksProgramming !== undefined ? parsedExerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
-        totalMarks:             parsedExerciseInfo.totalMarks || (mcqTotalMarks + progTotalMarks),
+        exerciseId: parsedExerciseInfo.exerciseId || existingExercise.exerciseInformation?.exerciseId,
+        exerciseName: parsedExerciseInfo.exerciseName || existingExercise.exerciseInformation?.exerciseName,
+        description: parsedExerciseInfo.description !== undefined ? parsedExerciseInfo.description : existingExercise.exerciseInformation?.description,
+        exerciseLevel: parsedExerciseInfo.exerciseLevel || existingExercise.exerciseInformation?.exerciseLevel,
+        totalDuration: parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
+        totalMarksMCQ: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
+          ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
+        totalMarksProgramming: finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
+          ? (parsedExerciseInfo.totalMarksProgramming !== undefined ? parsedExerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
+        totalMarks: parsedExerciseInfo.totalMarks || (mcqTotalMarks + progTotalMarks),
       };
     }
 
     // ── Programming settings ───────────────────────────────────────────────
     if (parsedProgSettings) {
       updatedExercise.programmingSettings = {
-        selectedModule:    parsedProgSettings.selectedModule    || existingExercise.programmingSettings?.selectedModule,
+        selectedModule: parsedProgSettings.selectedModule || existingExercise.programmingSettings?.selectedModule,
         selectedLanguages: parsedProgSettings.selectedLanguages || existingExercise.programmingSettings?.selectedLanguages || [],
       };
     }
@@ -1050,10 +1233,21 @@ exports.updateExercise = async (req, res) => {
     // ── Question configuration ─────────────────────────────────────────────
     if (parsedQuesConfig) {
       if (!updatedExercise.questionConfiguration) updatedExercise.questionConfiguration = {};
-      if (mcqQuestionConfig)         updatedExercise.questionConfiguration.mcqQuestionConfiguration         = mcqQuestionConfig;
+      if (mcqQuestionConfig) updatedExercise.questionConfiguration.mcqQuestionConfiguration = mcqQuestionConfig;
       if (programmingQuestionConfig) updatedExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
-      if (othersQuestionConfig)      updatedExercise.questionConfiguration.othersQuestionConfiguration      = othersQuestionConfig;
+      if (othersQuestionConfig) updatedExercise.questionConfiguration.othersQuestionConfiguration = othersQuestionConfig;
       if (parsedQuesConfig.questions) updatedExercise.questions = parsedQuesConfig.questions;
+    }
+
+    // ── Question behavior ──────────────────────────────────────────────────
+    if (questionBehavior !== undefined) {
+      updatedExercise.questionBehavior = {
+        allQuestionsRequired: questionBehavior?.allQuestionsRequired !== undefined
+          ? questionBehavior.allQuestionsRequired
+          : (existingExercise.questionBehavior?.allQuestionsRequired !== undefined
+            ? existingExercise.questionBehavior.allQuestionsRequired
+            : true),
+      };
     }
 
     // ── Availability period ────────────────────────────────────────────────
@@ -1066,14 +1260,14 @@ exports.updateExercise = async (req, res) => {
       const existAvail = existingExercise.availabilityPeriod || {};
       const prev = (f) => existAvail[f] ? new Date(existAvail[f]) : undefined;
 
-      const startDate    = safeD(parsedAvailPeriod.startDate) || prev('startDate');
+      const startDate = safeD(parsedAvailPeriod.startDate) || prev('startDate');
       // endDate = submission deadline; fall back to existing
-      const endDate      = safeD(parsedAvailPeriod.endDate)   || prev('endDate');
+      const endDate = safeD(parsedAvailPeriod.endDate) || prev('endDate');
       const cutOffEnabled = parsedAvailPeriod.cutOffEnabled !== undefined
         ? !!parsedAvailPeriod.cutOffEnabled
         : !!(existAvail.cutOffEnabled ?? false);
       // cutOffDate: only keep when toggle is ON
-      const cutOffDate   = cutOffEnabled
+      const cutOffDate = cutOffEnabled
         ? (safeD(parsedAvailPeriod.cutOffDate) || prev('cutOffDate'))
         : undefined;
       const remindEnabled = parsedAvailPeriod.remindGradeByEnabled !== undefined
@@ -1091,11 +1285,11 @@ exports.updateExercise = async (req, res) => {
 
       if (startDate) {
         const ap = {};
-        ap.startDate         = startDate;
-        if (endDate)         ap.endDate         = endDate;
-        if (cutOffDate)      ap.cutOffDate      = cutOffDate;
-        ap.cutOffEnabled     = cutOffEnabled;
-        if (remindGradeBy)   ap.remindGradeBy   = remindGradeBy;
+        ap.startDate = startDate;
+        if (endDate) ap.endDate = endDate;
+        if (cutOffDate) ap.cutOffDate = cutOffDate;
+        ap.cutOffEnabled = cutOffEnabled;
+        if (remindGradeBy) ap.remindGradeBy = remindGradeBy;
         ap.remindGradeByEnabled = remindEnabled;
         ap.gracePeriodAllowed = gracePeriodOn;
         ap.gracePeriodEnabled = gracePeriodOn;
@@ -1107,59 +1301,112 @@ exports.updateExercise = async (req, res) => {
       }
     }
     // ── Notification settings (separate from grades) ───────────────────────
+    // ── Notification settings (separate from grades) ───────────────────────
     if (parsedNotifSettings) {
       const ex = existingExercise.notificationSettings || existingExercise.notificatonandGradeSettings || {};
+
       updatedExercise.notificationSettings = {
-        notifyUsers:                  parsedNotifSettings.notifyUsers                  !== undefined ? parsedNotifSettings.notifyUsers                  : (ex.notifyUsers                  ?? false),
-        notifyGmail:                  parsedNotifSettings.notifyGmail                  !== undefined ? parsedNotifSettings.notifyGmail                  : (ex.notifyGmail                  ?? false),
-        notifyWhatsApp:               parsedNotifSettings.notifyWhatsApp               !== undefined ? parsedNotifSettings.notifyWhatsApp               : (ex.notifyWhatsApp               ?? false),
-        gradeSheet:                   parsedNotifSettings.gradeSheet                   !== undefined ? parsedNotifSettings.gradeSheet                   : (ex.gradeSheet                   ?? true),
-        notifyGradersSubmissions:     parsedNotifSettings.notifyGradersSubmissions     !== undefined ? parsedNotifSettings.notifyGradersSubmissions     : (ex.notifyGradersSubmissions     ?? false),
-        notifyGradersLateSubmissions: parsedNotifSettings.notifyGradersLateSubmissions !== undefined ? parsedNotifSettings.notifyGradersLateSubmissions : (ex.notifyGradersLateSubmissions ?? false),
-        notifyStudent:                parsedNotifSettings.notifyStudent                !== undefined ? parsedNotifSettings.notifyStudent                : (ex.notifyStudent                ?? true),
+        // Global settings
+        notifyUsers: parsedNotifSettings.notifyUsers !== undefined ? parsedNotifSettings.notifyUsers : (ex.notifyUsers ?? false),
+        notifyGmail: parsedNotifSettings.notifyGmail !== undefined ? parsedNotifSettings.notifyGmail : (ex.notifyGmail ?? false),
+        notifyWhatsApp: parsedNotifSettings.notifyWhatsApp !== undefined ? parsedNotifSettings.notifyWhatsApp : (ex.notifyWhatsApp ?? false),
+        gradeSheet: parsedNotifSettings.gradeSheet !== undefined ? parsedNotifSettings.gradeSheet : (ex.gradeSheet ?? true),
+
+        // Grader submission notifications
+        notifyGradersSubmissions: parsedNotifSettings.notifyGradersSubmissions !== undefined
+          ? parsedNotifSettings.notifyGradersSubmissions
+          : (ex.notifyGradersSubmissions ?? false),
+        notifyGradersSubmissionsChannels: {
+          dashboard: parsedNotifSettings.notifyGradersSubmissionsChannels?.dashboard ?? ex.notifyGradersSubmissionsChannels?.dashboard ?? false,
+          gmail: parsedNotifSettings.notifyGradersSubmissionsChannels?.gmail ?? ex.notifyGradersSubmissionsChannels?.gmail ?? false,
+          whatsapp: parsedNotifSettings.notifyGradersSubmissionsChannels?.whatsapp ?? ex.notifyGradersSubmissionsChannels?.whatsapp ?? false,
+        },
+
+        // Grader late submission notifications
+        notifyGradersLateSubmissions: parsedNotifSettings.notifyGradersLateSubmissions !== undefined
+          ? parsedNotifSettings.notifyGradersLateSubmissions
+          : (ex.notifyGradersLateSubmissions ?? false),
+        notifyGradersLateSubmissionsChannels: {
+          dashboard: parsedNotifSettings.notifyGradersLateSubmissionsChannels?.dashboard ?? ex.notifyGradersLateSubmissionsChannels?.dashboard ?? false,
+          gmail: parsedNotifSettings.notifyGradersLateSubmissionsChannels?.gmail ?? ex.notifyGradersLateSubmissionsChannels?.gmail ?? false,
+          whatsapp: parsedNotifSettings.notifyGradersLateSubmissionsChannels?.whatsapp ?? ex.notifyGradersLateSubmissionsChannels?.whatsapp ?? false,
+        },
+
+        // Student notifications
+        notifyStudent: parsedNotifSettings.notifyStudent !== undefined
+          ? parsedNotifSettings.notifyStudent
+          : (ex.notifyStudent ?? true),
+        notifyStudentChannels: {
+          dashboard: parsedNotifSettings.notifyStudentChannels?.dashboard ?? ex.notifyStudentChannels?.dashboard ?? false,
+          gmail: parsedNotifSettings.notifyStudentChannels?.gmail ?? ex.notifyStudentChannels?.gmail ?? false,
+          whatsapp: parsedNotifSettings.notifyStudentChannels?.whatsapp ?? ex.notifyStudentChannels?.whatsapp ?? false,
+        },
       };
+
       // Keep legacy field in sync
       updatedExercise.notificatonandGradeSettings = {
-        notifyUsers:    updatedExercise.notificationSettings.notifyUsers,
-        notifyGmail:    updatedExercise.notificationSettings.notifyGmail,
+        notifyUsers: updatedExercise.notificationSettings.notifyUsers,
+        notifyGmail: updatedExercise.notificationSettings.notifyGmail,
         notifyWhatsApp: updatedExercise.notificationSettings.notifyWhatsApp,
-        gradeSheet:     updatedExercise.notificationSettings.gradeSheet,
+        gradeSheet: updatedExercise.notificationSettings.gradeSheet,
       };
     }
 
     // ── Grade settings — merge then auto-compute ───────────────────────────
     if (parsedGradeSettings !== null) {
       const exGrade = existingExercise.gradeSettings || {};
-    // FIXED
-const merged = {
-  mcqGrade: parsedGradeSettings?.mcqGrade !== undefined 
-    ? Number(parsedGradeSettings.mcqGrade) 
-    : exGrade.mcqGrade,
-  mcqGradeToPass: parsedGradeSettings?.mcqGradeToPass !== undefined 
-    ? (parsedGradeSettings.mcqGradeToPass !== null 
-        ? Number(parsedGradeSettings.mcqGradeToPass) 
-        : null)
-    : exGrade.mcqGradeToPass,
-  programmingGrade: parsedGradeSettings?.programmingGrade !== undefined 
-    ? Number(parsedGradeSettings.programmingGrade) 
-    : exGrade.programmingGrade,
-  programmingGradeToPass: parsedGradeSettings?.programmingGradeToPass !== undefined 
-    ? (parsedGradeSettings.programmingGradeToPass !== null 
-        ? Number(parsedGradeSettings.programmingGradeToPass) 
-        : null)
-    : exGrade.programmingGradeToPass,
-  combinedGrade: parsedGradeSettings?.combinedGrade !== undefined 
-    ? Number(parsedGradeSettings.combinedGrade) 
-    : exGrade.combinedGrade,
-  combinedGradeToPass: parsedGradeSettings?.combinedGradeToPass !== undefined 
-    ? (parsedGradeSettings.combinedGradeToPass !== null 
-        ? Number(parsedGradeSettings.combinedGradeToPass) 
-        : null)
-    : exGrade.combinedGradeToPass,
-  separateMarks: parsedGradeSettings?.separateMarks !== undefined 
-    ? parsedGradeSettings.separateMarks 
-    : (exGrade.separateMarks ?? false),
-};
+      // FIXED
+      const merged = {
+        mcqGrade: parsedGradeSettings?.mcqGrade !== undefined
+          ? Number(parsedGradeSettings.mcqGrade)
+          : exGrade.mcqGrade,
+        mcqGradeToPass: parsedGradeSettings?.mcqGradeToPass !== undefined
+          ? (parsedGradeSettings.mcqGradeToPass !== null
+            ? Number(parsedGradeSettings.mcqGradeToPass)
+            : null)
+          : exGrade.mcqGradeToPass,
+        programmingGrade: parsedGradeSettings?.programmingGrade !== undefined
+          ? Number(parsedGradeSettings.programmingGrade)
+          : exGrade.programmingGrade,
+        programmingGradeToPass: parsedGradeSettings?.programmingGradeToPass !== undefined
+          ? (parsedGradeSettings.programmingGradeToPass !== null
+            ? Number(parsedGradeSettings.programmingGradeToPass)
+            : null)
+          : exGrade.programmingGradeToPass,
+        combinedGrade: parsedGradeSettings?.combinedGrade !== undefined
+          ? Number(parsedGradeSettings.combinedGrade)
+          : exGrade.combinedGrade,
+        combinedGradeToPass: parsedGradeSettings?.combinedGradeToPass !== undefined
+          ? (parsedGradeSettings.combinedGradeToPass !== null
+            ? Number(parsedGradeSettings.combinedGradeToPass)
+            : null)
+          : exGrade.combinedGradeToPass,
+        separateMarks: parsedGradeSettings?.separateMarks !== undefined
+          ? parsedGradeSettings.separateMarks
+          : (exGrade.separateMarks ?? false),
+
+        // Difficulty-based pass marks — merge from incoming or fall back to existing
+        difficultyPassEnabled: parsedGradeSettings?.difficultyPassEnabled !== undefined
+          ? parsedGradeSettings.difficultyPassEnabled
+          : (exGrade.difficultyPassEnabled ?? false),
+        easyPassMark: parsedGradeSettings?.easyPassMark !== undefined
+          ? (parsedGradeSettings.easyPassMark !== null ? Number(parsedGradeSettings.easyPassMark) : null)
+          : exGrade.easyPassMark ?? null,
+        mediumPassMark: parsedGradeSettings?.mediumPassMark !== undefined
+          ? (parsedGradeSettings.mediumPassMark !== null ? Number(parsedGradeSettings.mediumPassMark) : null)
+          : exGrade.mediumPassMark ?? null,
+        hardPassMark: parsedGradeSettings?.hardPassMark !== undefined
+          ? (parsedGradeSettings.hardPassMark !== null ? Number(parsedGradeSettings.hardPassMark) : null)
+          : exGrade.hardPassMark ?? null,
+
+        // Overall mark to pass (optional)
+        overallMarkToPassEnabled: parsedGradeSettings?.overallMarkToPassEnabled !== undefined
+          ? parsedGradeSettings.overallMarkToPassEnabled
+          : (exGrade.overallMarkToPassEnabled ?? false),
+        overallMarkToPass: parsedGradeSettings?.overallMarkToPass !== undefined
+          ? (parsedGradeSettings.overallMarkToPass !== null ? Number(parsedGradeSettings.overallMarkToPass) : null)
+          : exGrade.overallMarkToPass ?? null,
+      };
 
       // Re-run auto-compute so grade fields always reflect current totalMarks
       const infoForGrade = updatedExercise.exerciseInformation || existingExercise.exerciseInformation || {};
@@ -1174,7 +1421,7 @@ const merged = {
       const exAddit = existingExercise.additionalOptions || {};
       updatedExercise.additionalOptions = {
         anonymousSubmissions: parsedAdditOptions.anonymousSubmissions !== undefined ? parsedAdditOptions.anonymousSubmissions : (exAddit.anonymousSubmissions ?? false),
-        hideGraderIdentity:   parsedAdditOptions.hideGraderIdentity   !== undefined ? parsedAdditOptions.hideGraderIdentity   : (exAddit.hideGraderIdentity   ?? false),
+        hideGraderIdentity: parsedAdditOptions.hideGraderIdentity !== undefined ? parsedAdditOptions.hideGraderIdentity : (exAddit.hideGraderIdentity ?? false),
       };
     }
 
@@ -1189,25 +1436,25 @@ const merged = {
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
-    if (finalExerciseType === 'MCQ')         responseConfig = { mode: 'mcq',         config: mcqQuestionConfig };
+    if (finalExerciseType === 'MCQ') responseConfig = { mode: 'mcq', config: mcqQuestionConfig };
     else if (finalExerciseType === 'Programming') responseConfig = { mode: 'programming', config: programmingQuestionConfig };
-    else if (finalExerciseType === 'Other')       responseConfig = { mode: 'other',       config: othersQuestionConfig };
-    else if (finalExerciseType === 'Combined')    responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
+    else if (finalExerciseType === 'Other') responseConfig = { mode: 'other', config: othersQuestionConfig };
+    else if (finalExerciseType === 'Combined') responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
 
     return res.status(200).json({
       message: [{ key: 'success', value: `Exercise updated successfully in ${subcategory}` }],
       data: {
-        exercise:             cleanExercise,
-        configuration:        responseConfig,
-        gradeSettings:        cleanExercise.gradeSettings,
+        exercise: cleanExercise,
+        configuration: responseConfig,
+        gradeSettings: cleanExercise.gradeSettings,
         notificationSettings: cleanExercise.notificationSettings,
-        additionalOptions:    cleanExercise.additionalOptions,
+        additionalOptions: cleanExercise.additionalOptions,
         subcategory,
         tabType,
-        entityType:           type,
-        entityId:             id,
+        entityType: type,
+        entityId: id,
         exerciseId,
-        totalExercises:       exercises.length,
+        totalExercises: exercises.length,
         location: { section: tabType, subcategory, index: exerciseIndex },
       },
     });
@@ -1223,24 +1470,24 @@ const merged = {
 exports.getExercises = async (req, res) => {
   try {
     const { type, id } = req.params;
-    const { 
-      section , 
-      subcategory 
+    const {
+      section,
+      subcategory
     } = req.query;
 
 
     if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: `Invalid entity type: ${type}` }] 
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}` }]
       });
     }
 
     const { model } = modelMap[type];
     const entity = await model.findById(id);
-    
+
     if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} not found` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }]
       });
     }
 
@@ -1248,7 +1495,7 @@ exports.getExercises = async (req, res) => {
     if (!entity.pedagogy || !entity.pedagogy[section]) {
       return res.json({
         message: [{ key: "success", value: "No exercises found" }],
-        data: { 
+        data: {
           exercises: [],
           section: section,
           subcategory: subcategory,
@@ -1279,7 +1526,7 @@ exports.getExercises = async (req, res) => {
 
     return res.json({
       message: [{ key: "success", value: "Exercises retrieved successfully" }],
-      data: { 
+      data: {
         exercises,
         section: section,
         subcategory: subcategory,
@@ -1291,8 +1538,8 @@ exports.getExercises = async (req, res) => {
 
   } catch (err) {
     console.error("❌ Get exercises error:", err);
-    res.status(500).json({ 
-      message: [{ key: "error", value: "Internal server error" }] 
+    res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }]
     });
   }
 };
@@ -1304,52 +1551,52 @@ exports.getExercises = async (req, res) => {
 exports.deleteExercise = async (req, res) => {
   try {
     const { type, id, exerciseId } = req.params;
-    const { 
-      tabType ,
+    const {
+      tabType,
       subcategory
     } = req.query;
 
     // Validate entity type
     if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }] 
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}. Valid types: modules, submodules, topics, subtopics` }]
       });
     }
 
     // Validate required parameters
     if (!subcategory) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "Subcategory is required as query parameter. Valid values: 'exercises', 'practical', 'Project Development', etc." }] 
+      return res.status(400).json({
+        message: [{ key: "error", value: "Subcategory is required as query parameter. Valid values: 'exercises', 'practical', 'Project Development', etc." }]
       });
     }
 
     // Validate tabType
     if (!tabType || !['I_Do', 'We_Do', 'You_Do'].includes(tabType)) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "tabType is required and must be one of: 'I_Do', 'We_Do', 'You_Do'" }] 
+      return res.status(400).json({
+        message: [{ key: "error", value: "tabType is required and must be one of: 'I_Do', 'We_Do', 'You_Do'" }]
       });
     }
 
     const { model } = modelMap[type];
     const entity = await model.findById(id);
-    
+
     if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} with ID ${id} not found` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
 
     // Check if pedagogy exists
     if (!entity.pedagogy) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: "Pedagogy structure not found for this entity" }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: "Pedagogy structure not found for this entity" }]
       });
     }
 
     // Check if tabType exists
     if (!entity.pedagogy[tabType]) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Pedagogy tab '${tabType}' not found` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `Pedagogy tab '${tabType}' not found` }]
       });
     }
 
@@ -1361,8 +1608,8 @@ exports.deleteExercise = async (req, res) => {
 
     // Check if subcategory exists
     if (!tabData[subcategory] || !Array.isArray(tabData[subcategory])) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Subcategory '${subcategory}' not found in ${tabType}` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `Subcategory '${subcategory}' not found in ${tabType}` }]
       });
     }
 
@@ -1372,8 +1619,8 @@ exports.deleteExercise = async (req, res) => {
     );
 
     if (exerciseIndex === -1) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `Exercise with ID ${exerciseId} not found in subcategory '${subcategory}'` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `Exercise with ID ${exerciseId} not found in subcategory '${subcategory}'` }]
       });
     }
 
@@ -1381,7 +1628,7 @@ exports.deleteExercise = async (req, res) => {
     const exerciseToDelete = tabData[subcategory][exerciseIndex];
     const exerciseName = exerciseToDelete?.exerciseInformation?.exerciseName || 'Unknown Exercise';
     const exerciseIdValue = exerciseToDelete?.exerciseInformation?.exerciseId || exerciseId;
-    
+
     // Store deleted exercise data for response (including security settings)
     const deletedExerciseData = {
       exerciseId: exerciseIdValue,
@@ -1389,7 +1636,7 @@ exports.deleteExercise = async (req, res) => {
       securitySettings: exerciseToDelete?.securitySettings || null,
       deletedAt: new Date()
     };
-    
+
     // Remove exercise from array
     tabData[subcategory].splice(exerciseIndex, 1);
 
@@ -1410,7 +1657,7 @@ exports.deleteExercise = async (req, res) => {
 
     // Save entity
     await entity.save();
-    
+
 
     return res.status(200).json({
       message: [{ key: "success", value: `Exercise "${exerciseName}" deleted successfully from ${subcategory}` }],
@@ -1432,8 +1679,8 @@ exports.deleteExercise = async (req, res) => {
   } catch (err) {
     console.error("❌ Delete exercise error:", err);
     console.error("❌ Error stack:", err.stack);
-    res.status(500).json({ 
-      message: [{ key: "error", value: `Internal server error: ${err.message}` }] 
+    res.status(500).json({
+      message: [{ key: "error", value: `Internal server error: ${err.message}` }]
     });
   }
 };
@@ -1445,17 +1692,17 @@ exports.getSubcategories = async (req, res) => {
 
 
     if (!modelMap[type]) {
-      return res.status(400).json({ 
-        message: [{ key: "error", value: "Invalid entity type" }] 
+      return res.status(400).json({
+        message: [{ key: "error", value: "Invalid entity type" }]
       });
     }
 
     const { model } = modelMap[type];
     const entity = await model.findById(id);
-    
+
     if (!entity) {
-      return res.status(404).json({ 
-        message: [{ key: "error", value: `${type} not found` }] 
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }]
       });
     }
 
@@ -1463,7 +1710,7 @@ exports.getSubcategories = async (req, res) => {
     if (!entity.pedagogy || !entity.pedagogy[section]) {
       return res.json({
         message: [{ key: "success", value: "No subcategories found" }],
-        data: { 
+        data: {
           subcategories: [],
           section: section,
           total: 0
@@ -1480,15 +1727,15 @@ exports.getSubcategories = async (req, res) => {
       return {
         name: subcat,
         exerciseCount: exercises.length,
-        lastUpdated: exercises.length > 0 
-          ? exercises[exercises.length - 1].updatedAt 
+        lastUpdated: exercises.length > 0
+          ? exercises[exercises.length - 1].updatedAt
           : null
       };
     });
 
     return res.json({
       message: [{ key: "success", value: "Subcategories retrieved successfully" }],
-      data: { 
+      data: {
         subcategories: subcategoryDetails,
         section: section,
         total: subcategories.length,
@@ -1499,8 +1746,8 @@ exports.getSubcategories = async (req, res) => {
 
   } catch (err) {
     console.error("❌ Get subcategories error:", err);
-    res.status(500).json({ 
-      message: [{ key: "error", value: "Internal server error" }] 
+    res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }]
     });
   }
 };
@@ -1530,7 +1777,7 @@ exports.lockExercise = async (req, res) => {
 
     // 1. Find Course Index
     const courseIndex = user.courses.findIndex(c => c.courseId && c.courseId.toString() === courseId);
-    
+
     if (courseIndex === -1) {
       return res.status(404).json({ message: [{ key: "error", value: "Course not enrolled" }] });
     }
@@ -1539,24 +1786,24 @@ exports.lockExercise = async (req, res) => {
 
     // 2. Ensure Path Exists
     if (!userCourse.answers) userCourse.answers = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
-    
+
     const categoryKey = category;
     if (!userCourse.answers[categoryKey]) userCourse.answers[categoryKey] = new Map();
-    
+
     const categoryMap = userCourse.answers[categoryKey];
-    
+
     // 3. Get Exercises Array
     let exercisesArray = categoryMap.get(subcategory) || [];
     if (exercisesArray.toObject) exercisesArray = exercisesArray.toObject();
 
     // 4. Handle Screen Recording Upload from Form-Data
     let screenRecordingUrl = null;
-    
+
     // Check if file exists in the request (for form-data uploads)
     if (req.files && req.files.screenRecording) {
       try {
         const screenRecordingFile = req.files.screenRecording;
-        
+
         // Upload to Cloudinary from buffer
         const uploadResult = await new Promise((resolve, reject) => {
           // Create upload stream to Cloudinary
@@ -1579,15 +1826,15 @@ exports.lockExercise = async (req, res) => {
               }
             }
           );
-          
+
           // Create readable stream from buffer
           const bufferStream = new stream.PassThrough();
           bufferStream.end(screenRecordingFile.data);
-          
+
           // Pipe buffer to Cloudinary upload stream
           bufferStream.pipe(uploadStream);
         });
-        
+
         screenRecordingUrl = uploadResult.secure_url;
       } catch (uploadError) {
         console.error("❌ Error uploading screen recording to Cloudinary:", uploadError);
@@ -1598,14 +1845,14 @@ exports.lockExercise = async (req, res) => {
     else if (req.body.screenRecording && req.body.screenRecording.startsWith('data:video/')) {
       try {
         const base64Data = req.body.screenRecording;
-        
+
         const uploadResult = await cloudinary.uploader.upload(base64Data, {
           resource_type: 'video',
           folder: `lms/pedagogy/${category}/${subcategory}/screen-recordings`,
           overwrite: true,
           chunk_size: 6000000
         });
-        
+
         screenRecordingUrl = uploadResult.secure_url;
       } catch (uploadError) {
         console.error("❌ Error uploading Base64 screen recording:", uploadError);
@@ -1621,12 +1868,12 @@ exports.lockExercise = async (req, res) => {
       if (status) exercisesArray[exerciseIndex].status = status;
       if (isLocked !== undefined) exercisesArray[exerciseIndex].isLocked = isLocked;
       else if (status === 'terminated') exercisesArray[exerciseIndex].isLocked = true;
-      
+
       // Add screen recording URL if uploaded
       if (screenRecordingUrl) {
         exercisesArray[exerciseIndex].screenRecording = screenRecordingUrl;
       }
-      
+
       updatedExercise = exercisesArray[exerciseIndex];
     } else {
       // Create New
@@ -1643,12 +1890,12 @@ exports.lockExercise = async (req, res) => {
 
     // 6. Save to Database
     categoryMap.set(subcategory, exercisesArray);
-    
+
     // Mark the SPECIFIC path modified
     user.markModified(`courses.${courseIndex}.answers.${categoryKey}`);
-    
+
     await user.save();
-    console.log("✅ Exercise status updated successfully",updatedExercise);
+    console.log("✅ Exercise status updated successfully", updatedExercise);
     return res.status(200).json({
       message: [{ key: "success", value: "Exercise status updated successfully" }],
       data: updatedExercise
@@ -1656,47 +1903,47 @@ exports.lockExercise = async (req, res) => {
 
   } catch (error) {
     console.error("Lock Exercise Error:", error);
-    return res.status(500).json({ 
+    return res.status(500).json({
       message: [{ key: "error", value: "Internal server error" }],
-      error: error.message 
+      error: error.message
     });
   }
 };
 
- 
+
 // 2. Get Exercise Status (Debugged)
 exports.getExerciseStatus = async (req, res) => {
   try {
     const userId = req.query.targetUserId || req.user._id;
     const { courseId, exerciseId, category = 'We_Do', subcategory } = req.query;
- 
+
     // console.log(`🔍 STATUS REQ: User: ${userId} | Ex: ${exerciseId}`);
- 
+
     if (!courseId || !exerciseId || !subcategory) {
       return res.status(400).json({ message: [{ key: "error", value: "Missing parameters" }] });
     }
- 
+
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: [{ key: "error", value: "User not found" }] });
- 
+
     const userCourse = user.courses ? user.courses.find(c => c.courseId && c.courseId.toString() === courseId) : null;
- 
+
     if (!userCourse || !userCourse.answers) {
       return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
     }
- 
+
     const categoryKey = category || 'We_Do';
     const categoryMap = userCourse.answers[categoryKey];
- 
+
     if (!categoryMap) {
       return res.status(200).json({ success: true, data: { isLocked: false, status: 'new' } });
     }
- 
+
     const exercisesArray = categoryMap.get(subcategory) || [];
- 
+
     // Find the exercise
     const exercise = exercisesArray.find(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
- 
+
     if (exercise) {
       // console.log("👉 Found Status:", exercise.isLocked, exercise.status);
       return res.status(200).json({
@@ -1705,24 +1952,24 @@ exports.getExerciseStatus = async (req, res) => {
           isLocked: exercise.isLocked || false,
           status: exercise.status || 'in-progress',
           screenRecording: exercise.screenRecording || 'empty'
- 
+
         }
       });
     }
- 
+
     // console.log("👉 Exercise Not Found in Array, returning unlocked");
     return res.status(200).json({
       success: true,
       data: { isLocked: false, status: 'new' }
     });
- 
+
   } catch (error) {
     console.error("Get Status Error:", error);
     return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
   }
 };
- 
- async function uploadBufferToSupabase(buffer, filePath, mimeType) {
+
+async function uploadBufferToSupabase(buffer, filePath, mimeType) {
   try {
     const { data, error } = await supabase.storage
       .from("smartlms")
@@ -1738,7 +1985,7 @@ exports.getExerciseStatus = async (req, res) => {
 
     // Generate public URL
     const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
-    
+
     return imageUrl;
 
   } catch (error) {
@@ -1771,7 +2018,7 @@ async function uploadImageToSupabase(file, folderPath) {
 
     // Generate public URL
     const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
-    
+
     return imageUrl;
 
   } catch (error) {
@@ -1850,12 +2097,12 @@ exports.addQuestion = async (req, res) => {
       } else if (qType === 'programming') {
         // Validate Programming fields
         // title can be a plain string OR an array of content blocks (programmingQuestionTitle)
-      const _progTitleText = typeof questionData.title === 'string' ? questionData.title.trim() : '';
-if (!_progTitleText) {
-  return res.status(400).json({
-    message: [{ key: "error", value: `Question ${questionIndex}: Programming question title is required` }]
-  });
-}
+        const _progTitleText = typeof questionData.title === 'string' ? questionData.title.trim() : '';
+        if (!_progTitleText) {
+          return res.status(400).json({
+            message: [{ key: "error", value: `Question ${questionIndex}: Programming question title is required` }]
+          });
+        }
 
         // Check if description exists and has text
         let descriptionText = '';
@@ -2020,15 +2267,16 @@ if (!_progTitleText) {
       const questionId = new mongoose.Types.ObjectId();
 
       // Create base question object
+      // Create base question object
       const newQuestion = {
         _id: questionId,
         questionType: qType,
+        sectionId: questionData.sectionId || null, // ✅ ADD THIS LINE
         isActive: questionData.isActive !== undefined ? questionData.isActive : true,
         sequence: startSequence + i,
         createdAt: new Date(),
         updatedAt: new Date()
       };
-
       // Add fields based on question type
       if (qType === 'mcq') {
         // Process MCQ options
@@ -2139,23 +2387,23 @@ if (!_progTitleText) {
         };
 
         // Extract plain-text title for search/display; store rich blocks separately
- const _plainTitle = typeof questionData.title === 'string'
-  ? questionData.title.trim()
-  : (Array.isArray(questionData.programmingQuestionTitle)
-    ? questionData.programmingQuestionTitle.filter(b => b.type === 'text').map(b => b.value || '').join(' ').trim()
-    : '');
+        const _plainTitle = typeof questionData.title === 'string'
+          ? questionData.title.trim()
+          : (Array.isArray(questionData.programmingQuestionTitle)
+            ? questionData.programmingQuestionTitle.filter(b => b.type === 'text').map(b => b.value || '').join(' ').trim()
+            : '');
 
-Object.assign(newQuestion, {
-  title: _plainTitle,
-  // Store rich title blocks separately for rendering
-  programmingQuestionTitle: Array.isArray(questionData.programmingQuestionTitle)
-    ? questionData.programmingQuestionTitle
-    : undefined,
-  // Store rich description blocks array for rendering
-  programmingQuestionDescription: Array.isArray(questionData.programmingQuestionDescription)
-    ? questionData.programmingQuestionDescription
-    : undefined,
-  description: descriptionObj,
+        Object.assign(newQuestion, {
+          title: _plainTitle,
+          // Store rich title blocks separately for rendering
+          programmingQuestionTitle: Array.isArray(questionData.programmingQuestionTitle)
+            ? questionData.programmingQuestionTitle
+            : undefined,
+          // Store rich description blocks array for rendering
+          programmingQuestionDescription: Array.isArray(questionData.programmingQuestionDescription)
+            ? questionData.programmingQuestionDescription
+            : undefined,
+          description: descriptionObj,
           difficulty: questionData.difficulty || 'medium',
           sampleInput: questionData.sampleInput || '',
           sampleOutput: questionData.sampleOutput || '',
@@ -2240,15 +2488,113 @@ Object.assign(newQuestion, {
             : undefined,
         });
       } else if (qType === 'others') {
+        // Build othersDescription object with text, html, images, and attachments
+        const othersDescription = {
+          text: "",
+          html: "",
+          images: [],
+          attachments: []
+        };
+
+        // Process description from the request
+        if (questionData.description) {
+          // If description is a string (HTML with image)
+          if (typeof questionData.description === 'string') {
+            othersDescription.html = questionData.description;
+            // Strip HTML tags for plain text
+            othersDescription.text = questionData.description.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+            // Extract images from HTML
+            const imgRegex = /<img[^>]+src="([^">]+)"[^>]*(?:alt="([^">]*)")?[^>]*>/gi;
+            let match;
+            while ((match = imgRegex.exec(questionData.description)) !== null) {
+              // Extract style attribute if present
+              const styleMatch = questionData.description.match(/style="([^"]+)"/);
+
+              othersDescription.images.push({
+                url: match[1],
+                alt: match[2] || "",
+                alignment: "left",
+                style: styleMatch ? styleMatch[1] : "max-width:100%;border-radius:6px;margin-top:8px;",
+                width: "100%",
+                height: "auto"
+              });
+            }
+          }
+          // If description is already an object
+          else if (typeof questionData.description === 'object' && questionData.description !== null) {
+            othersDescription.text = questionData.description.text || "";
+            othersDescription.html = questionData.description.html || "";
+            othersDescription.images = questionData.description.images || [];
+            othersDescription.attachments = questionData.description.attachments || [];
+          }
+        }
+
+        // Process attachments from root level and add to othersDescription
+        if (Array.isArray(questionData.attachments) && questionData.attachments.length > 0) {
+          for (const att of questionData.attachments) {
+            // Determine icon based on mime type
+            let icon = "📎";
+            const mimeType = att.mimeType || "";
+            if (mimeType.includes('pdf')) icon = "📄";
+            else if (mimeType.includes('word') || mimeType.includes('docx') || mimeType.includes('document')) icon = "📝";
+            else if (mimeType.includes('image')) icon = "🖼️";
+            else if (mimeType.includes('video')) icon = "🎥";
+            else if (mimeType.includes('audio')) icon = "🎵";
+            else if (mimeType.includes('spreadsheet') || mimeType.includes('excel') || mimeType.includes('csv')) icon = "📊";
+            else if (mimeType.includes('presentation') || mimeType.includes('powerpoint')) icon = "📽️";
+            else if (mimeType.includes('zip') || mimeType.includes('compressed')) icon = "🗜️";
+            else if (mimeType.includes('text')) icon = "📃";
+
+            othersDescription.attachments.push({
+              name: att.name || "untitled",
+              url: att.url || "",
+              mimeType: mimeType || "application/octet-stream",
+              size: att.size || 0,
+              icon: icon,
+              description: att.description || "",
+              uploadedAt: new Date()
+            });
+          }
+        }
+
+        // Process file upload settings
+        const fileUploadSettings = {
+          allowMultiple: questionData.fileUploadSettings?.allowMultiple || false,
+          maxFiles: questionData.fileUploadSettings?.maxFiles || 1,
+          maxFileSizeMB: questionData.fileUploadSettings?.maxFileSizeMB || 10,
+          allowedTypes: Array.isArray(questionData.fileUploadSettings?.allowedTypes)
+            ? questionData.fileUploadSettings.allowedTypes
+            : ["pdf", "docx"],
+          requiredFormats: Array.isArray(questionData.fileUploadSettings?.requiredFormats)
+            ? questionData.fileUploadSettings.requiredFormats
+            : [],
+          instructions: questionData.fileUploadSettings?.instructions || ""
+        };
+
         Object.assign(newQuestion, {
           title: typeof questionData.title === 'string' ? questionData.title.trim() : '',
-          description: questionData.description || '',
+          othersDescription: othersDescription,
           difficulty: questionData.difficulty || 'medium',
           score: questionData.score || 0,
-          isRequired: questionData.isRequired || false,
-          othersQuestionType: questionData.othersQuestionType || '',
-          notionSettings: questionData.notionSettings || undefined,
-          fileUploadSettings: questionData.fileUploadSettings || undefined,
+          isRequired: questionData.isRequired !== undefined ? questionData.isRequired : true,
+          othersQuestionType: questionData.othersQuestionType || 'file-upload',
+          fileUploadSettings: fileUploadSettings,
+          scoringType: questionData.scoringType || 'levelBased',
+          questionCountPerLevel: questionData.questionCountPerLevel || {
+            easy: 2,
+            medium: 2,
+            hard: 2
+          },
+          totalMarks: questionData.totalMarks || 50,
+          notionSettings: questionData.notionSettings || undefined
+        });
+
+        console.log('✅ Others question processed:', {
+          title: newQuestion.title,
+          descriptionHasImages: othersDescription.images.length,
+          descriptionHasAttachments: othersDescription.attachments.length,
+          attachmentsDetails: othersDescription.attachments.map(a => ({ name: a.name, mimeType: a.mimeType }))
         });
       }
       // Add question to exercise
@@ -2283,11 +2629,12 @@ Object.assign(newQuestion, {
 
     // Prepare response data
     const responseData = {
-      addedQuestions: addedQuestions.map(q => ({
-        questionId: q.question._id.toString(),
-        questionTitle: q.question.questionTitle || q.question.title,
-        questionType: q.question.questionType,
-        sequence: q.index,
+   addedQuestions: addedQuestions.map(q => ({
+  questionId: q.question._id.toString(),
+  questionTitle: q.question.questionTitle || q.question.title,
+  questionType: q.question.questionType,
+  sectionId: q.question.sectionId, // ✅ ADD THIS LINE
+  sequence: q.index,
         description: q.question.description ? {
           text: q.question.description.text,
           imageUrl: q.question.description.imageUrl,
@@ -2589,9 +2936,13 @@ exports.updateQuestion = async (req, res) => {
     const updatedQuestion = { ...existingQuestion.toObject ? existingQuestion.toObject() : existingQuestion };
 
     // Update common fields
-    if (updateData.isActive !== undefined) {
-      updatedQuestion.isActive = updateData.isActive;
-    }
+  // Update common fields
+if (updateData.isActive !== undefined) {
+  updatedQuestion.isActive = updateData.isActive;
+}
+if (updateData.sectionId !== undefined) {
+  updatedQuestion.sectionId = updateData.sectionId; // ✅ ADD THIS
+}
 
     // Update based on question type
     if (finalQuestionType === 'mcq') {
@@ -2862,9 +3213,101 @@ exports.updateQuestion = async (req, res) => {
       // Preserve database flags
       updatedQuestion.isDatabase = true;
       updatedQuestion.moduleType = 'Database';
+      //     } else if (finalExerciseType === 'Other' && parsedQuesConfig) {
+      //   const othersCfg = parsedQuesConfig.othersQuestionConfiguration 
+      //     || parsedQuesConfig.othersConfig
+      //     || null;
+
+      //   if (othersCfg) {
+      //     const qConfigType = othersCfg.questionConfigType || 'general';
+      //     const exInfo = parsedExerciseInfo || existingExercise.exerciseInformation || {};
+
+      //     let othersTotal = 0;
+
+      //     if (qConfigType === 'general') {
+      //       const evenMarks = othersCfg.generalMarksPerQuestion 
+      //         || othersCfg.scoreSettings?.evenMarks 
+      //         || 0;
+      //       othersTotal = (othersCfg.generalQuestionCount || 0) * evenMarks;
+      //     } else {
+      //       const counts = qConfigType === 'selectionLevel'
+      //         ? othersCfg.selectionLevelCounts
+      //         : othersCfg.levelBasedCounts;
+      //       const levelScoring = othersCfg.scoreSettings?.levelScoringConfiguration;
+
+      //       if (levelScoring) {
+      //         ['easy', 'medium', 'hard'].forEach(l => {
+      //           const c = counts?.[l] || 0;
+      //           if (!c) return;
+      //           const s = levelScoring[l];
+      //           if (!s) return;
+      //           if (s.type === 'level_specific' && s.marksPerQuestion) othersTotal += c * s.marksPerQuestion;
+      //           else if (s.type === 'question_specific' && s.totalMarks) othersTotal += s.totalMarks;
+      //         });
+      //       }
+      //     }
+
+      //     if (!othersTotal) {
+      //       othersTotal = othersCfg.scoreSettings?.totalMarks 
+      //         || exInfo.totalMarks 
+      //         || existingExercise.exerciseInformation?.totalMarks 
+      //         || 0;
+      //     }
+
+      //     let levelBasedMarks = { easy: 0, medium: 0, hard: 0 };
+      //     const levelScoringConfig = othersCfg.scoreSettings?.levelScoringConfiguration;
+
+      //     if (levelScoringConfig && (qConfigType === 'levelBased' || qConfigType === 'selectionLevel')) {
+      //       const counts = qConfigType === 'selectionLevel'
+      //         ? othersCfg.selectionLevelCounts
+      //         : othersCfg.levelBasedCounts;
+      //       ['easy', 'medium', 'hard'].forEach(l => {
+      //         const c = counts?.[l] || 0;
+      //         if (!c) return;
+      //         const s = levelScoringConfig[l];
+      //         if (s?.type === 'level_specific' && s.marksPerQuestion) {
+      //           levelBasedMarks[l] = s.marksPerQuestion;
+      //           if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+      //         } else if (s?.type === 'question_specific' && s.totalMarks) {
+      //           levelBasedMarks[l] = c > 0 ? s.totalMarks / c : 0;
+      //           if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+      //         }
+      //       });
+      //     }
+
+      //     othersQuestionConfig = {
+      //       questionConfigType: qConfigType,
+      //       ...(qConfigType === 'general' && {
+      //         generalQuestionCount: othersCfg.generalQuestionCount || 0,
+      //         generalMarksPerQuestion: othersCfg.generalMarksPerQuestion 
+      //           || othersCfg.scoreSettings?.evenMarks 
+      //           || 0,
+      //       }),
+      //       ...(qConfigType === 'levelBased' && {
+      //         levelBasedCounts: othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 },
+      //       }),
+      //       ...(qConfigType === 'selectionLevel' && {
+      //         selectionLevelCounts: othersCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 },
+      //       }),
+      //       scoreSettings: {
+      //         scoreType: qConfigType === 'general' ? 'evenMarks' : 'levelBasedMarks',
+      //         evenMarks: othersCfg.generalMarksPerQuestion || othersCfg.scoreSettings?.evenMarks || 0,
+      //         levelBasedMarks,
+      //         levelScoringConfiguration: levelScoringConfig || undefined,
+      //         totalMarks: othersTotal,
+      //       },
+      //       questionFlow: othersCfg.questionFlow || 'freeFlow',
+      //       attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
+      //       submissionAttempts: othersCfg.submissionAttempts || 1,
+      //     };
+
+      //     progTotalMarks = othersTotal;
+      //   }
+      // }
     } else if (finalQuestionType === 'others') {
+      // Update Others question fields
       if (updateData.title !== undefined) {
-        updatedQuestion.title = typeof updateData.title === 'string' ? updateData.title.trim() : '';
+        updatedQuestion.title = updateData.title;
       }
       if (updateData.description !== undefined) {
         updatedQuestion.description = updateData.description;
@@ -2887,8 +3330,10 @@ exports.updateQuestion = async (req, res) => {
       if (updateData.fileUploadSettings !== undefined) {
         updatedQuestion.fileUploadSettings = updateData.fileUploadSettings;
       }
+      if (updateData.attachments !== undefined) {
+        updatedQuestion.attachments = Array.isArray(updateData.attachments) ? updateData.attachments : [];
+      }
     }
-
     // Update timestamp
     updatedQuestion.updatedAt = new Date();
 
@@ -2985,8 +3430,8 @@ exports.updateQuestion = async (req, res) => {
 exports.getQuestions = async (req, res) => {
   try {
     const { type, id, exerciseId } = req.params;
-    const { 
-      includeInactive = 'false' 
+    const {
+      includeInactive = 'false'
     } = req.query; // Keep includeInactive as query parameter
 
     // Validate entity type
@@ -3063,7 +3508,7 @@ exports.getQuestions = async (req, res) => {
           const tabData = entity.pedagogy[tabType] instanceof Map
             ? Object.fromEntries(entity.pedagogy[tabType])
             : entity.pedagogy[tabType];
-          
+
           Object.entries(tabData).forEach(([subcat, exercises]) => {
             if (Array.isArray(exercises)) {
               exercises.forEach((ex, idx) => {
@@ -3081,7 +3526,7 @@ exports.getQuestions = async (req, res) => {
           });
         }
       });
-      
+
       return res.status(404).json({
         message: [{ key: "error", value: `No exercise found with ID ${exerciseId}` }],
         data: {
@@ -3127,7 +3572,7 @@ exports.getQuestions = async (req, res) => {
 
     // Sort by sequence
     questions.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
-    
+
     // Prepare exercise data with all settings including securitySettings
     const exerciseData = {
       _id: foundExercise._id?.toString() || exerciseId,
@@ -3138,7 +3583,7 @@ exports.getQuestions = async (req, res) => {
       totalQuestions: questions.length,
       totalPoints: questions.reduce((sum, q) => sum + (q.score || 0), 0),
       estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
+
       // Include all settings
       programmingSettings: foundExercise.programmingSettings || {},
       compilerSettings: foundExercise.compilerSettings || {},
@@ -3148,7 +3593,7 @@ exports.getQuestions = async (req, res) => {
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {}, // Include security settings
-      
+
       createdAt: foundExercise.createdAt,
       updatedAt: foundExercise.updatedAt,
       createdBy: foundExercise.createdBy,
@@ -3246,14 +3691,14 @@ exports.getQuestionById = async (req, res) => {
             return ex._id && ex._id.toString() === exerciseId ||
               (ex.exerciseInformation && ex.exerciseInformation.exerciseId === exerciseId);
           });
-          
+
           if (exercise) {
             // Now search for the question within this exercise
             if (exercise.questions && Array.isArray(exercise.questions)) {
-              const qIndex = exercise.questions.findIndex(q => 
+              const qIndex = exercise.questions.findIndex(q =>
                 q._id && q._id.toString() === questionId
               );
-              
+
               if (qIndex !== -1) {
                 foundExercise = exercise;
                 foundTabType = tabType;
@@ -3290,7 +3735,7 @@ exports.getQuestionById = async (req, res) => {
           });
         });
       }
-      
+
       return res.status(404).json({
         message: [{ key: "error", value: `Question with ID ${questionId} not found in exercise ${foundExercise.exerciseInformation?.exerciseName || exerciseId}` }],
         data: {
@@ -3316,7 +3761,7 @@ exports.getQuestionById = async (req, res) => {
       totalQuestions: foundExercise.questions?.length || 0,
       totalPoints: foundExercise.questions?.reduce((sum, q) => sum + (q.score || 0), 0) || 0,
       estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
+
       // Include all settings
       programmingSettings: foundExercise.programmingSettings || {},
       compilerSettings: foundExercise.compilerSettings || {},
@@ -3326,7 +3771,7 @@ exports.getQuestionById = async (req, res) => {
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {}, // Include security settings
-      
+
       createdAt: foundExercise.createdAt,
       updatedAt: foundExercise.updatedAt,
       createdBy: foundExercise.createdBy,
@@ -3336,7 +3781,7 @@ exports.getQuestionById = async (req, res) => {
     // Get adjacent questions for navigation
     let previousQuestion = null;
     let nextQuestion = null;
-    
+
     if (foundExercise.questions && Array.isArray(foundExercise.questions)) {
       if (questionIndex > 0) {
         previousQuestion = {
@@ -3345,7 +3790,7 @@ exports.getQuestionById = async (req, res) => {
           sequence: foundExercise.questions[questionIndex - 1].sequence
         };
       }
-      
+
       if (questionIndex < foundExercise.questions.length - 1) {
         nextQuestion = {
           _id: foundExercise.questions[questionIndex + 1]._id?.toString(),
@@ -3528,7 +3973,7 @@ exports.deleteQuestion = async (req, res) => {
     }
 
     // Find the question by ID
-    const questionIndex = foundExercise.questions.findIndex(q => 
+    const questionIndex = foundExercise.questions.findIndex(q =>
       q._id && q._id.toString() === questionId
     );
 
@@ -3593,7 +4038,7 @@ exports.deleteQuestion = async (req, res) => {
       totalQuestions: totalQuestions,
       totalScore: totalScore,
       estimatedTime: foundExercise.exerciseInformation?.estimatedTime || 60,
-      
+
       // Include all settings
       programmingSettings: foundExercise.programmingSettings || {},
       compilerSettings: foundExercise.compilerSettings || {},
@@ -3603,7 +4048,7 @@ exports.deleteQuestion = async (req, res) => {
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {},
-      
+
       createdAt: foundExercise.createdAt,
       updatedAt: foundExercise.updatedAt,
       createdBy: foundExercise.createdBy,
@@ -3674,7 +4119,7 @@ exports.deleteQuestion = async (req, res) => {
 
 
 
- 
+
 exports.getUserExerciseGradeAnalytics = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -3684,113 +4129,113 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       category = null,
       subcategory = null
     } = req.query;
- 
+
     if (!exerciseId || !courseId) {
       return res.status(400).json({
         success: false,
         message: "exerciseId parameter and courseId query are required"
       });
     }
- 
+
     console.log(`\n🚀 START getUserExerciseGradeAnalytics`);
     console.log(`User: ${userId}, Course: ${courseId}, Exercise: ${exerciseId}`);
     console.log(`Searching with category: ${category || 'ALL'}, subcategory: ${subcategory || 'ALL'}`);
- 
+
     // 1. Find user and convert to plain object to avoid Mongoose subdocument issues
     const user = await User.findById(userId).lean();
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
- 
+
     const userCourse = user.courses.find(c =>
       c.courseId && c.courseId.toString() === courseId
     );
- 
+
     if (!userCourse) {
       return res.status(404).json({
         success: false,
         message: "User is not enrolled in this course"
       });
     }
- 
+
     console.log(`✅ User course found`);
- 
+
     // 2. SEARCH USER ANSWERS
     let userQuestions = [];
     let foundCategory = null;
     let foundSubcategory = null;
     let foundUserExercise = null;
-   
+
     console.log(`\n🔍 SEARCHING USER ANSWERS...`);
-   
+
     const searchCategories = category ? [category] : ['I_Do', 'We_Do', 'You_Do'];
     const searchSubcategories = subcategory ? [subcategory] : ['practical', 'assignments', 'assessments', 'assesments', 'homework', 'practice', 'project_development'];
-   
+
     let answersData = userCourse.answers;
-   
+
     if (answersData && answersData.toObject) {
       answersData = answersData.toObject();
       console.log(`  Converted answers from Mongoose subdocument to plain object`);
     }
-   
+
     console.log(`  Answers data type: ${typeof answersData}`);
     console.log(`  Answers data keys: ${answersData ? Object.keys(answersData).join(', ') : 'none'}`);
-   
+
     for (const cat of searchCategories) {
       console.log(`\n🔍 Checking category: ${cat}`);
-     
+
       if (!answersData || !answersData[cat]) {
         console.log(`  No answers in category "${cat}"`);
         continue;
       }
-     
+
       const categoryData = answersData[cat];
       console.log(`  Category data type: ${typeof categoryData}`);
       console.log(`  Category data keys: ${categoryData ? Object.keys(categoryData).join(', ') : 'none'}`);
-     
+
       if (categoryData && typeof categoryData === 'object') {
         for (const subcat of searchSubcategories) {
           console.log(`    🔍 Checking subcategory: ${subcat}`);
-         
+
           if (!categoryData[subcat]) {
             console.log(`    No data in "${subcat}"`);
             continue;
           }
-         
+
           let exercises = categoryData[subcat];
           if (!Array.isArray(exercises)) {
             exercises = [exercises];
           }
-         
+
           console.log(`    Found ${exercises.length} exercises in ${subcat}`);
-         
+
           const targetId = exerciseId.toString ? exerciseId.toString() : String(exerciseId);
-         
+
           for (const exercise of exercises) {
             if (!exercise) continue;
-           
+
             let exerciseObj = exercise;
             if (exerciseObj && exerciseObj.toObject) {
               exerciseObj = exerciseObj.toObject();
             }
-           
+
             const exerciseIdField = exerciseObj.exerciseId || exerciseObj._id || exerciseObj.id;
             if (!exerciseIdField) continue;
-           
+
             const exId = exerciseIdField.toString ? exerciseIdField.toString() : String(exerciseIdField);
-           
+
             console.log(`      Checking exercise ID: ${exId} against target: ${targetId}`);
-           
+
             if (exId === targetId) {
               console.log(`    ✅✅✅ FOUND EXERCISE in ${cat}/${subcat}!`);
               console.log(`      Exercise ID: ${exId}`);
               console.log(`      Exercise Name: ${exerciseObj.exerciseName || exerciseObj.exerciseInformation?.exerciseName || 'No name'}`);
               console.log(`      Exercise has keys: ${Object.keys(exerciseObj).join(', ')}`);
-             
+
               foundCategory = cat;
               foundSubcategory = subcat;
               foundUserExercise = exerciseObj;
-             
+
               if (exerciseObj.questions && Array.isArray(exerciseObj.questions)) {
                 userQuestions = exerciseObj.questions.map(q => {
                   if (q && q.toObject) return q.toObject();
@@ -3800,7 +4245,7 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
               } else {
                 console.log(`      ⚠️ No questions found in exercise.questions`);
               }
-             
+
               if (userQuestions.length > 0) {
                 userQuestions.forEach((q, i) => {
                   if (q) {
@@ -3811,36 +4256,36 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
                   }
                 });
               }
-             
+
               break;
             }
           }
-         
+
           if (foundUserExercise) break;
         }
       }
-     
+
       if (foundUserExercise) break;
     }
-   
+
     console.log(`\n📊 USER ANSWERS SUMMARY:`);
     console.log(`  Found in: ${foundCategory}/${foundSubcategory || 'unknown'}`);
     console.log(`  Found exercise: ${!!foundUserExercise}`);
     console.log(`  Total user questions: ${userQuestions.length}`);
- 
+
     // 3. FIND EXERCISE DETAILS FROM COURSE STRUCTURE
     let exerciseDetails = null;
     let allQuestions = [];
     let foundInEntity = null;
     let passingMarks = null;
     let totalMarks = null;
-   
+
     console.log(`\n🔍 Searching for exercise details in course structure...`);
-   
+
     // Helper function to extract question title safely
     const getQuestionTitle = (question) => {
       if (!question) return "Untitled";
-     
+
       // Handle MCQ question title (array of blocks)
       if (question.mcqQuestionTitle && Array.isArray(question.mcqQuestionTitle)) {
         // Extract text from blocks
@@ -3851,7 +4296,7 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         if (textBlocks.trim()) return textBlocks;
         return "MCQ Question";
       }
-     
+
       // Handle programming question title (array of blocks)
       if (question.programmingQuestionTitle && Array.isArray(question.programmingQuestionTitle)) {
         const textBlocks = question.programmingQuestionTitle
@@ -3861,42 +4306,42 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         if (textBlocks.trim()) return textBlocks;
         return "Programming Question";
       }
-     
+
       // Handle regular title
       if (question.title) return question.title;
       if (question.questionTitle) return question.questionTitle;
-     
+
       return "Untitled";
     };
-   
+
     const findExerciseInPedagogy = (pedagogy, targetExerciseId) => {
       if (!pedagogy) return null;
-     
+
       const targetIdStr = targetExerciseId.toString ? targetExerciseId.toString() : String(targetExerciseId);
-     
+
       const categories = ['I_Do', 'We_Do', 'You_Do'];
       const subcategories = ['practical', 'assignments', 'assessments', 'assesments', 'homework', 'practice', 'project_development'];
-     
+
       for (const cat of categories) {
         if (pedagogy[cat]) {
           const sectionData = pedagogy[cat];
-         
+
           if (typeof sectionData === 'object') {
             for (const subcat of subcategories) {
               if (sectionData[subcat] && Array.isArray(sectionData[subcat])) {
                 console.log(`    Checking ${cat}/${subcat} - ${sectionData[subcat].length} exercises`);
-               
+
                 const found = sectionData[subcat].find(ex => {
                   if (!ex) return false;
-                 
+
                   const exId = ex._id?.toString() ||
-                               ex.id?.toString() ||
-                               ex.exerciseId?.toString() ||
-                               ex.exerciseInformation?._id?.toString();
-                 
+                    ex.id?.toString() ||
+                    ex.exerciseId?.toString() ||
+                    ex.exerciseInformation?._id?.toString();
+
                   return exId === targetIdStr;
                 });
-               
+
                 if (found) {
                   console.log(`    ✅ FOUND in pedagogy: ${cat}/${subcat}`);
                   return { exercise: found, category: cat, subcategory: subcat };
@@ -3906,25 +4351,25 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
           }
         }
       }
-     
+
       return null;
     };
-   
+
     const entityModels = [
       { name: 'Module1', model: Module1 },
       { name: 'SubModule1', model: SubModule1 },
       { name: 'Topic1', model: Topic1 },
       { name: 'SubTopic1', model: SubTopic1 }
     ];
-   
+
     for (const { name, model } of entityModels) {
       try {
         const entities = await model.find({ courses: courseId }).lean();
         console.log(`  Checking ${name}: ${entities.length} entities`);
-       
+
         for (const entity of entities) {
           console.log(`    Entity: ${entity.title || entity.name || 'Unnamed'}`);
-         
+
           const result = findExerciseInPedagogy(entity.pedagogy, exerciseId);
           if (result) {
             exerciseDetails = result.exercise;
@@ -3935,31 +4380,31 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
               category: result.category,
               subcategory: result.subcategory
             };
-           
+
             // Get questions from exercise
             allQuestions = exerciseDetails.questions || [];
-           
+
             // Extract passing marks and total marks from exercise configuration
             if (exerciseDetails.gradeSettings) {
               passingMarks = exerciseDetails.gradeSettings.programmingGradeToPass ||
-                            exerciseDetails.gradeSettings.mcqGradeToPass ||
-                            exerciseDetails.gradeSettings.combinedGradeToPass;
+                exerciseDetails.gradeSettings.mcqGradeToPass ||
+                exerciseDetails.gradeSettings.combinedGradeToPass;
               totalMarks = exerciseDetails.gradeSettings.programmingGrade ||
-                          exerciseDetails.gradeSettings.mcqGrade ||
-                          exerciseDetails.gradeSettings.combinedGrade;
+                exerciseDetails.gradeSettings.mcqGrade ||
+                exerciseDetails.gradeSettings.combinedGrade;
               console.log(`  ✅ Found grade settings - Passing Marks: ${passingMarks}, Total Marks: ${totalMarks}`);
             } else if (exerciseDetails.exerciseInformation) {
               totalMarks = exerciseDetails.exerciseInformation.totalMarks;
               passingMarks = totalMarks ? Math.ceil(totalMarks * 0.4) : null;
               console.log(`  ⚠️ Using exerciseInformation - Total Marks: ${totalMarks}, Calculated Passing: ${passingMarks}`);
             }
-           
+
             console.log(`  ✅ EXERCISE FOUND in ${name}: "${entity.title || entity.name}"`);
             console.log(`    Category: ${result.category}/${result.subcategory}`);
             console.log(`    Exercise Name: ${exerciseDetails.exerciseInformation?.exerciseName || exerciseDetails.exerciseName || 'Unnamed'}`);
             console.log(`    Total Questions: ${allQuestions.length}`);
             console.log(`    Passing Marks Required: ${passingMarks}`);
-           
+
             allQuestions.forEach((q, i) => {
               if (q) {
                 const qId = q._id ? q._id.toString() : 'NO_ID';
@@ -3968,23 +4413,23 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
                 console.log(`    Q${i + 1}: "${qTitle.substring(0, 30)}...", ID=${qId}, score=${qScore}`);
               }
             });
-           
+
             break;
           }
         }
-       
+
         if (exerciseDetails) break;
       } catch (err) {
         console.log(`  Error checking ${name}: ${err.message}`);
       }
     }
- 
+
     if (!exerciseDetails && foundUserExercise) {
       console.log(`\n⚠️ Using user exercise data as fallback`);
       exerciseDetails = foundUserExercise;
       allQuestions = userQuestions;
     }
- 
+
     if (!exerciseDetails) {
       console.log(`❌ Exercise not found in course structure or user data`);
       return res.status(404).json({
@@ -3992,12 +4437,12 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         message: "Exercise not found in course structure"
       });
     }
- 
+
     // 4. MATCH QUESTIONS
     console.log(`\n🔍 MATCHING QUESTIONS...`);
     console.log(`User questions to match: ${userQuestions.length}`);
     console.log(`Exercise questions from structure: ${allQuestions.length}`);
-   
+
     const userQuestionMap = new Map();
     userQuestions.forEach((userQ, index) => {
       if (userQ) {
@@ -4007,7 +4452,7 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         } else if (userQ._id) {
           qId = userQ._id.toString ? userQ._id.toString() : String(userQ._id);
         }
-       
+
         if (qId) {
           userQuestionMap.set(qId, {
             data: userQ,
@@ -4017,9 +4462,9 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         }
       }
     });
-   
+
     let questionsToMatch = [];
-   
+
     if (allQuestions.length > 0) {
       questionsToMatch = allQuestions;
       console.log(`  Using ${allQuestions.length} questions from exercise structure for matching`);
@@ -4027,10 +4472,10 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       questionsToMatch = userQuestions;
       console.log(`  Using ${userQuestions.length} questions from user answers as fallback`);
     }
-   
+
     const questionsWithScores = questionsToMatch.map((exerciseQuestion, index) => {
       let exerciseQId = null;
-     
+
       if (exerciseQuestion._id) {
         exerciseQId = exerciseQuestion._id.toString();
       } else if (exerciseQuestion.questionId) {
@@ -4038,17 +4483,17 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       } else if (exerciseQuestion.id) {
         exerciseQId = exerciseQuestion.id.toString();
       }
-     
+
       // Get title safely using helper function
       const exerciseTitle = getQuestionTitle(exerciseQuestion);
-     
+
       let userAttempt = null;
       let matchedBy = null;
-     
+
       if (exerciseQId && userQuestionMap.size > 0) {
         const displayTitle = exerciseTitle.length > 30 ? exerciseTitle.substring(0, 30) + "..." : exerciseTitle;
         console.log(`\n🔍 Matching: "${displayTitle}" (${exerciseQId})`);
-       
+
         if (userQuestionMap.has(exerciseQId)) {
           const userQData = userQuestionMap.get(exerciseQId);
           userAttempt = userQData.data;
@@ -4065,14 +4510,14 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         const displayTitle = exerciseTitle.length > 30 ? exerciseTitle.substring(0, 30) + "..." : exerciseTitle;
         console.log(`\n⚠️ Exercise question has no ID: "${displayTitle}"`);
       }
-     
+
       const questionMaxScore = exerciseQuestion.mcqQuestionScore ||
-                              exerciseQuestion.score ||
-                              10;
+        exerciseQuestion.score ||
+        10;
       const userScore = userAttempt?.score || 0;
       const totalScore = userAttempt?.totalScore || questionMaxScore;
       const percentage = totalScore > 0 ? (userScore / totalScore) * 100 : 0;
-     
+
       return {
         _id: exerciseQuestion._id || exerciseQuestion.questionId,
         sequence: exerciseQuestion.sequence || index + 1,
@@ -4101,26 +4546,26 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         }
       };
     });
- 
+
     // 5. CALCULATE ANALYTICS
     const evaluatedQuestions = questionsWithScores.filter(q => q.userScore > 0);
     const attemptedQuestions = questionsWithScores.filter(q => q.userAttempt);
     const correctQuestions = questionsWithScores.filter(q => q.isCorrect);
-   
+
     console.log(`\n📊 FINAL RESULTS:`);
     console.log(`  Total exercise questions: ${questionsToMatch.length}`);
     console.log(`  User attempts found: ${userQuestions.length}`);
     console.log(`  Matched questions: ${attemptedQuestions.length}`);
     console.log(`  Questions with scores > 0: ${evaluatedQuestions.length}`);
     console.log(`  Correct questions: ${correctQuestions.length}`);
-   
+
     const totalUserScore = evaluatedQuestions.reduce((sum, q) => sum + q.userScore, 0);
     const totalMaxScore = questionsWithScores.reduce((sum, q) => sum + q.maxScore, 0);
     const overallPercentage = totalMaxScore > 0 ? (totalUserScore / totalMaxScore) * 100 : 0;
-   
+
     console.log(`  Total User Score: ${totalUserScore.toFixed(2)} / ${totalMaxScore}`);
     console.log(`  Overall Percentage: ${overallPercentage.toFixed(2)}%`);
- 
+
     // Helper function for letter grade
     const getLetterGrade = (percentage) => {
       if (percentage >= 90) return 'A';
@@ -4129,10 +4574,10 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       if (percentage >= 60) return 'D';
       return 'F';
     };
- 
+
     // Determine passing status based on exercise configuration
     let isPassing = false;
-   
+
     if (passingMarks !== null && totalMaxScore > 0) {
       isPassing = totalUserScore >= passingMarks;
       console.log(`  Passing Check: User Score (${totalUserScore}) >= Passing Marks (${passingMarks}) = ${isPassing}`);
@@ -4140,7 +4585,7 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       isPassing = overallPercentage >= 70;
       console.log(`  Using fallback 70% threshold: ${overallPercentage}% >= 70% = ${isPassing}`);
     }
- 
+
     // 6. PREPARE RESPONSE
     const response = {
       success: true,
@@ -4153,8 +4598,8 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         exercise: {
           _id: exerciseId,
           name: exerciseDetails.exerciseInformation?.exerciseName ||
-                exerciseDetails.exerciseName ||
-                "Exercise",
+            exerciseDetails.exerciseName ||
+            "Exercise",
           totalQuestions: questionsToMatch.length,
           foundInCategory: foundCategory || foundInEntity?.category,
           foundInSubcategory: foundSubcategory || foundInEntity?.subcategory,
@@ -4205,16 +4650,16 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         }
       }
     };
- 
+
     console.log(`\n✅ getUserExerciseGradeAnalytics COMPLETE`);
     console.log(`Response sent with ${attemptedQuestions.length} matched questions`);
-   
+
     return res.status(200).json(response);
- 
+
   } catch (error) {
     console.error("❌ getUserExerciseGradeAnalytics error:", error);
     console.error("❌ Error stack:", error.stack);
-   
+
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -4223,7 +4668,7 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
     });
   }
 };
- 
+
 
 
 
@@ -4272,7 +4717,7 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
     }
 
     // 2. Find user's course progress
-    const userCourse = user.courses?.find(c => 
+    const userCourse = user.courses?.find(c =>
       c.courseId && c.courseId.toString() === courseId
     );
 
@@ -4285,7 +4730,7 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
 
     // 3. Get all entities (modules, submodules, topics, subtopics) for this course
     const allEntities = [];
-    
+
     // Get modules
     const modules = await Module1.find({ courses: courseId })
       .select('_id title description level duration pedagogy')
@@ -4370,7 +4815,7 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
 
     // 5. Get user's progress for these exercises
     const userProgressMap = new Map();
-    
+
     // Search in user's course progress
     if (userCourse.answers) {
       ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
@@ -4425,7 +4870,7 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
 
     function calculateCompletionRate(questions) {
       if (questions.length === 0) return 0;
-      const solved = questions.filter(q => 
+      const solved = questions.filter(q =>
         q.status === 'solved' || q.isCorrect === true
       ).length;
       return (solved / questions.length) * 100;
@@ -4435,11 +4880,11 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
     const exercisesWithProgress = allExercises.map(exercise => {
       const userProgress = userProgressMap.get(exercise._id.toString());
       const questions = exercise.questions || [];
-      
+
       // Calculate exercise statistics
       const totalQuestions = questions.length;
       const totalPoints = questions.reduce((sum, q) => sum + (q.score || 0), 0);
-      
+
       // Calculate difficulty distribution
       const difficultyCount = {
         easy: questions.filter(q => q.difficulty === 'easy').length,
@@ -4484,13 +4929,13 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
         totalQuestions,
         totalPoints,
         estimatedTime: exercise.exerciseInformation?.estimatedTime || 0,
-        
+
         // Entity location
         entity: exercise.entity,
         section: exercise.section,
         subcategory: exercise.subcategory,
         location: exercise.location,
-        
+
         // User progress
         userProgress: userProgress || {
           status: 'not_started',
@@ -4499,29 +4944,29 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
           completionRate: 0,
           lastAccessed: null
         },
-        
+
         // Difficulty analysis
         difficultyCount,
-        
+
         // Questions with user attempts
         questions: questionsWithAttempts,
-        
+
         // Overall statistics
         statistics: {
           attemptedQuestions: questionsWithAttempts.filter(q => q.status !== 'not_attempted').length,
           solvedQuestions: questionsWithAttempts.filter(q => q.isCorrect === true).length,
           averageScore: calculateAverageScore(userQuestionAttempts),
           totalScore: calculateTotalScore(userQuestionAttempts),
-          accuracy: userQuestionAttempts.length > 0 
-            ? (questionsWithAttempts.filter(q => q.isCorrect).length / userQuestionAttempts.length) * 100 
+          accuracy: userQuestionAttempts.length > 0
+            ? (questionsWithAttempts.filter(q => q.isCorrect).length / userQuestionAttempts.length) * 100
             : 0
         },
-        
+
         // Dates
         createdAt: exercise.createdAt,
         startDate: exercise.availabilityPeriod?.startDate,
         endDate: exercise.availabilityPeriod?.endDate,
-        
+
         // Settings
         programmingLanguages: exercise.programmingSettings?.selectedLanguages || [],
         practiceMode: exercise.configurationType?.practiceMode || false,
@@ -4534,47 +4979,47 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
       totalExercises: exercisesWithProgress.length,
       totalQuestions: exercisesWithProgress.reduce((sum, ex) => sum + ex.totalQuestions, 0),
       totalPoints: exercisesWithProgress.reduce((sum, ex) => sum + ex.totalPoints, 0),
-      
-      completedExercises: exercisesWithProgress.filter(ex => 
-        ex.userProgress.status === 'completed' || 
+
+      completedExercises: exercisesWithProgress.filter(ex =>
+        ex.userProgress.status === 'completed' ||
         ex.userProgress.completionRate >= 100
       ).length,
-      
-      inProgressExercises: exercisesWithProgress.filter(ex => 
-        ex.userProgress.status === 'in_progress' || 
+
+      inProgressExercises: exercisesWithProgress.filter(ex =>
+        ex.userProgress.status === 'in_progress' ||
         (ex.userProgress.completionRate > 0 && ex.userProgress.completionRate < 100)
       ).length,
-      
-      notStartedExercises: exercisesWithProgress.filter(ex => 
-        ex.userProgress.status === 'not_started' || 
+
+      notStartedExercises: exercisesWithProgress.filter(ex =>
+        ex.userProgress.status === 'not_started' ||
         ex.userProgress.completionRate === 0
       ).length,
-      
+
       overallScore: exercisesWithProgress.reduce((sum, ex) => sum + ex.userProgress.totalScore, 0),
-      overallAverage: exercisesWithProgress.length > 0 
-        ? exercisesWithProgress.reduce((sum, ex) => sum + ex.userProgress.averageScore, 0) / exercisesWithProgress.length 
+      overallAverage: exercisesWithProgress.length > 0
+        ? exercisesWithProgress.reduce((sum, ex) => sum + ex.userProgress.averageScore, 0) / exercisesWithProgress.length
         : 0,
-      
-      overallCompletion: exercisesWithProgress.length > 0 
-        ? exercisesWithProgress.reduce((sum, ex) => sum + ex.userProgress.completionRate, 0) / exercisesWithProgress.length 
+
+      overallCompletion: exercisesWithProgress.length > 0
+        ? exercisesWithProgress.reduce((sum, ex) => sum + ex.userProgress.completionRate, 0) / exercisesWithProgress.length
         : 0,
-      
+
       byDifficulty: {
         easy: {
           total: exercisesWithProgress.reduce((sum, ex) => sum + ex.difficultyCount.easy, 0),
-          solved: exercisesWithProgress.reduce((sum, ex) => 
+          solved: exercisesWithProgress.reduce((sum, ex) =>
             sum + ex.questions.filter(q => q.difficulty === 'easy' && q.isCorrect).length, 0
           )
         },
         medium: {
           total: exercisesWithProgress.reduce((sum, ex) => sum + ex.difficultyCount.medium, 0),
-          solved: exercisesWithProgress.reduce((sum, ex) => 
+          solved: exercisesWithProgress.reduce((sum, ex) =>
             sum + ex.questions.filter(q => q.difficulty === 'medium' && q.isCorrect).length, 0
           )
         },
         hard: {
           total: exercisesWithProgress.reduce((sum, ex) => sum + ex.difficultyCount.hard, 0),
-          solved: exercisesWithProgress.reduce((sum, ex) => 
+          solved: exercisesWithProgress.reduce((sum, ex) =>
             sum + ex.questions.filter(q => q.difficulty === 'hard' && q.isCorrect).length, 0
           )
         }
@@ -4635,8 +5080,8 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
 exports.getCourseExercisesAdminView = async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { 
-      includeQuestions = 'false', 
+    const {
+      includeQuestions = 'false',
       includeUserProgress = 'false',
       userId = null  // Optional: if you want to check a specific user's progress
     } = req.query;
@@ -4666,7 +5111,7 @@ exports.getCourseExercisesAdminView = async (req, res) => {
 
     // 2. Get all entities for this course
     const allEntities = [];
-    
+
     // Get modules
     const modules = await Module1.find({ courses: courseId })
       .select('_id title description level duration orderIndex pedagogy')
@@ -4766,7 +5211,7 @@ exports.getCourseExercisesAdminView = async (req, res) => {
     // 4. Optional: Get user progress if userId is provided
     let userProgressMap = new Map();
     let userDetails = null;
-    
+
     if (userId && includeUserProgress === 'true') {
       const user = await User.findById(userId)
         .select('firstName lastName email courses')
@@ -4781,7 +5226,7 @@ exports.getCourseExercisesAdminView = async (req, res) => {
         };
 
         // Find user's course progress
-        const userCourse = user.courses?.find(c => 
+        const userCourse = user.courses?.find(c =>
           c.courseId && c.courseId.toString() === courseId
         );
 
@@ -4816,9 +5261,9 @@ exports.getCourseExercisesAdminView = async (req, res) => {
                     status: userExercise.status || 'not_started',
                     questions: userExercise.questions || [],
                     totalScore: userExercise.questions?.reduce((sum, q) => sum + (q.score || 0), 0) || 0,
-                    averageScore: userExercise.questions?.length > 0 ? 
+                    averageScore: userExercise.questions?.length > 0 ?
                       (userExercise.questions.reduce((sum, q) => sum + (q.score || 0), 0) / userExercise.questions.length) : 0,
-                    completionRate: userExercise.questions?.length > 0 ? 
+                    completionRate: userExercise.questions?.length > 0 ?
                       (userExercise.questions.filter(q => q.status === 'solved' || q.isCorrect === true).length / userExercise.questions.length * 100) : 0,
                     lastAccessed: userExercise.updatedAt,
                     startedAt: userExercise.createdAt
@@ -4837,10 +5282,10 @@ exports.getCourseExercisesAdminView = async (req, res) => {
       const questions = exercise.questions || [];
       const totalQuestions = questions.length;
       const totalPoints = questions.reduce((sum, q) => sum + (q.score || 0), 0);
-      
+
       // Get user progress for this exercise if available
       const userProgress = userProgressMap.get(exercise._id.toString());
-      
+
       // Format exercise data
       const formattedExercise = {
         _id: exercise._id,
@@ -4851,27 +5296,27 @@ exports.getCourseExercisesAdminView = async (req, res) => {
         totalQuestions,
         totalPoints,
         estimatedTime: exercise.exerciseInformation?.estimatedTime || 0,
-        
+
         // Entity location
         entity: exercise.entity,
         section: exercise.section,
         subcategory: exercise.subcategory,
         location: exercise.location,
-        
+
         // Settings
         programmingLanguages: exercise.programmingSettings?.selectedLanguages || [],
         practiceMode: exercise.configurationType?.practiceMode || false,
         manualEvaluation: exercise.configurationType?.manualEvaluation || false,
-        
+
         // Dates
         createdAt: exercise.createdAt,
         startDate: exercise.availabilityPeriod?.startDate,
         endDate: exercise.availabilityPeriod?.endDate,
-        status: exercise.availabilityPeriod?.startDate && exercise.availabilityPeriod?.endDate ? 
-          (new Date() < new Date(exercise.availabilityPeriod.startDate) ? 'scheduled' : 
-           new Date() > new Date(exercise.availabilityPeriod.endDate) ? 'expired' : 'active') : 
+        status: exercise.availabilityPeriod?.startDate && exercise.availabilityPeriod?.endDate ?
+          (new Date() < new Date(exercise.availabilityPeriod.startDate) ? 'scheduled' :
+            new Date() > new Date(exercise.availabilityPeriod.endDate) ? 'expired' : 'active') :
           'no_dates',
-        
+
         // Question statistics
         questionStatistics: {
           easy: questions.filter(q => q.difficulty === 'easy').length,
@@ -4905,7 +5350,7 @@ exports.getCourseExercisesAdminView = async (req, res) => {
           lastAccessed: userProgress.lastAccessed,
           startedAt: userProgress.startedAt,
           questionsAttempted: userProgress.questions?.length || 0,
-          questionsSolved: userProgress.questions?.filter(q => 
+          questionsSolved: userProgress.questions?.filter(q =>
             q.status === 'solved' || q.isCorrect === true
           ).length || 0
         };
@@ -4921,12 +5366,12 @@ exports.getCourseExercisesAdminView = async (req, res) => {
       const entityA = entityOrder[a.entity.type] || 5;
       const entityB = entityOrder[b.entity.type] || 5;
       if (entityA !== entityB) return entityA - entityB;
-      
+
       // Then by entity order index
       if (a.entity.orderIndex !== b.entity.orderIndex) {
         return (a.entity.orderIndex || 999) - (b.entity.orderIndex || 999);
       }
-      
+
       // Then by entity title
       return a.entity.title.localeCompare(b.entity.title);
     });
@@ -4945,7 +5390,7 @@ exports.getCourseExercisesAdminView = async (req, res) => {
       totalExercises: formattedExercises.length,
       totalQuestions: formattedExercises.reduce((sum, ex) => sum + ex.totalQuestions, 0),
       totalPoints: formattedExercises.reduce((sum, ex) => sum + ex.totalPoints, 0),
-      
+
       byEntityType: {
         modules: {
           count: exercisesByEntityType.modules.length,
@@ -4964,19 +5409,19 @@ exports.getCourseExercisesAdminView = async (req, res) => {
           questions: exercisesByEntityType.subtopics.reduce((sum, ex) => sum + ex.totalQuestions, 0)
         }
       },
-      
+
       bySection: {
         I_Do: formattedExercises.filter(ex => ex.section === 'I_Do').length,
         We_Do: formattedExercises.filter(ex => ex.section === 'We_Do').length,
         You_Do: formattedExercises.filter(ex => ex.section === 'You_Do').length
       },
-      
+
       byDifficulty: {
         easy: formattedExercises.reduce((sum, ex) => sum + ex.questionStatistics.easy, 0),
         medium: formattedExercises.reduce((sum, ex) => sum + ex.questionStatistics.medium, 0),
         hard: formattedExercises.reduce((sum, ex) => sum + ex.questionStatistics.hard, 0)
       },
-      
+
       byStatus: {
         active: formattedExercises.filter(ex => ex.status === 'active').length,
         scheduled: formattedExercises.filter(ex => ex.status === 'scheduled').length,
@@ -4998,17 +5443,17 @@ exports.getCourseExercisesAdminView = async (req, res) => {
           endDate: course.endDate,
           status: course.status
         },
-        
+
         // User details if provided
         ...(userDetails && { user: userDetails }),
-        
+
         // Exercises in different formats
         exercises: formattedExercises,
         exercisesByEntityType,
-        
+
         // Statistics
         statistics: courseStatistics,
-        
+
         // Summary
         summary: {
           fetchedAt: new Date(),
@@ -5049,35 +5494,35 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
       sortBy = 'name',
       sortOrder = 'asc'
     } = req.query;
- 
+
     console.log(`👨‍🏫 Fetching enrolled students for Exercise: ${exerciseId} in Course: ${courseId}`);
- 
+
     if (!courseId || !exerciseId) {
       return res.status(400).json({
         success: false,
         message: "courseId and exerciseId parameters are required"
       });
     }
- 
+
     // 1. Get course details
     const course = await CourseStructure.findById(courseId)
       .select('courseName courseCode description')
       .lean();
- 
+
     if (!course) {
       return res.status(404).json({
         success: false,
         message: "Course not found"
       });
     }
- 
+
     // 2. Get exercise details to verify it exists and get grade settings
     let exerciseDetails = null;
     let exerciseFoundIn = null;
     let gradeSettings = null;
     let totalMaxScore = 0;
     let exerciseName = '';
-   
+
     // Search for exercise in all entity types
     const entityModels = [
       { name: 'Module1', model: Module1 },
@@ -5085,40 +5530,40 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
       { name: 'Topic1', model: Topic1 },
       { name: 'SubTopic1', model: SubTopic1 }
     ];
- 
+
     for (const { name, model } of entityModels) {
       try {
         const entities = await model.find({ courses: courseId })
           .select('_id title pedagogy')
           .lean();
- 
+
         for (const entity of entities) {
           if (entity.pedagogy) {
             ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
               if (entity.pedagogy[section]) {
                 const sectionData = entity.pedagogy[section];
                 let subcategories = [];
-               
+
                 if (sectionData instanceof Map) {
                   subcategories = Array.from(sectionData.entries());
                 } else if (typeof sectionData === 'object') {
                   subcategories = Object.entries(sectionData);
                 }
- 
+
                 subcategories.forEach(([subcategory, exercises]) => {
                   if (!exercises) return;
-                 
+
                   let exercisesArray = [];
                   if (Array.isArray(exercises)) {
                     exercisesArray = exercises;
                   } else if (exercises._id) {
                     exercisesArray = [exercises];
                   }
- 
+
                   const exercise = exercisesArray.find(ex =>
                     ex._id && ex._id.toString() === exerciseId
                   );
- 
+
                   if (exercise) {
                     exerciseDetails = {
                       ...exercise,
@@ -5131,15 +5576,15 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
                       subcategory
                     };
                     exerciseFoundIn = { name, entity, section, subcategory };
-                   
+
                     // Get grade settings
                     gradeSettings = exercise.gradeSettings || null;
-                   
+
                     // Get exercise name
                     exerciseName = exercise.exerciseInformation?.exerciseName ||
-                                   exercise.exerciseName ||
-                                   'Unnamed Exercise';
-                   
+                      exercise.exerciseName ||
+                      'Unnamed Exercise';
+
                     // Calculate total max score
                     if (exercise.questions && Array.isArray(exercise.questions)) {
                       totalMaxScore = exercise.questions.reduce((sum, q) => {
@@ -5147,7 +5592,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
                         return sum + qScore;
                       }, 0);
                     }
-                   
+
                     console.log(`✅ Found exercise: ${exerciseName}`);
                     console.log(`   Grade Settings:`, gradeSettings);
                     console.log(`   Total Max Score: ${totalMaxScore}`);
@@ -5162,25 +5607,25 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         console.log(`Error searching in ${name}:`, err.message);
       }
     }
- 
+
     if (!exerciseDetails) {
       return res.status(404).json({
         success: false,
         message: "Exercise not found in course structure"
       });
     }
- 
+
     console.log(`✅ Exercise found: ${exerciseName}`);
- 
+
     // 3. Get all enrolled users for this course
     const enrolledUsers = await User.find({
       courses: { $exists: true, $ne: null }
     })
-    .select('_id firstName lastName email profile phone status createdAt role courses')
-    .lean();
- 
+      .select('_id firstName lastName email profile phone status createdAt role courses')
+      .lean();
+
     console.log(`👥 Found ${enrolledUsers.length} users with courses data`);
- 
+
     // Filter users who are enrolled in this specific course
     const enrolledInCourse = enrolledUsers.filter(user => {
       if (!user.courses || !Array.isArray(user.courses)) {
@@ -5190,9 +5635,9 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         course && course.courseId && course.courseId.toString() === courseId
       );
     });
- 
+
     console.log(`📊 ${enrolledInCourse.length} users enrolled in course ${courseId}`);
- 
+
     // 4. Process each user to find their exercise progress with Pass/Fail
     const studentsWithProgress = await Promise.all(
       enrolledInCourse.map(async (user) => {
@@ -5200,7 +5645,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         const userCourse = userCourses.find(c =>
           c && c.courseId && c.courseId.toString() === courseId
         );
- 
+
         let exerciseProgress = null;
         let questionAttempts = [];
         let overallScore = 0;
@@ -5209,13 +5654,13 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         let status = 'not_started';
         let isPassing = false;
         let passingMarksRequired = null;
- 
+
         if (userCourse && userCourse.answers) {
           // Search through all sections for this exercise
           ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
             const sectionData = userCourse.answers[section];
             if (!sectionData) return;
- 
+
             // Handle both Map and object formats
             let subcategories = [];
             if (sectionData instanceof Map) {
@@ -5223,42 +5668,42 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
             } else if (typeof sectionData === 'object') {
               subcategories = Object.entries(sectionData);
             }
- 
+
             subcategories.forEach(([subcategory, exercises]) => {
               if (!exercises) return;
- 
+
               let exercisesArray = [];
               if (Array.isArray(exercises)) {
                 exercisesArray = exercises;
               } else if (typeof exercises === 'object' && exercises._id) {
                 exercisesArray = [exercises];
               }
- 
+
               if (!exercisesArray || !Array.isArray(exercisesArray)) {
                 return;
               }
- 
+
               const userExercise = exercisesArray.find(ex =>
                 ex && ex.exerciseId && ex.exerciseId.toString() === exerciseId
               );
- 
+
               if (userExercise) {
                 exerciseProgress = userExercise;
                 questionAttempts = userExercise.questions || [];
-               
+
                 // Calculate overall score
                 overallScore = questionAttempts.reduce((sum, q) => sum + (q.score || 0), 0);
-               
+
                 // Calculate completion percentage
                 const totalQuestions = exerciseDetails.questions?.length || 0;
                 const attemptedQuestions = questionAttempts.length;
                 completionPercentage = totalQuestions > 0 ?
                   (attemptedQuestions / totalQuestions) * 100 : 0;
-               
+
                 // Determine status based on exercise type
                 const isMCQExercise = exerciseDetails.exerciseType === 'MCQ' ||
-                                     (exerciseDetails.questions && exerciseDetails.questions.every(q => q.questionType === 'MCQ'));
-               
+                  (exerciseDetails.questions && exerciseDetails.questions.every(q => q.questionType === 'MCQ'));
+
                 if (questionAttempts.length === 0) {
                   status = 'not_started';
                 } else if (isMCQExercise) {
@@ -5271,31 +5716,31 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
                 } else if (questionAttempts.every(q => q.status === 'solved' || q.status === 'completed')) {
                   status = 'completed';
                 }
-               
+
                 lastActivity = userExercise.updatedAt || userExercise.createdAt;
               }
             });
           });
         }
-       
+
         // Calculate Pass/Fail based on grade settings
         if (gradeSettings) {
           // Use mcqGradeToPass for MCQ exercises
           passingMarksRequired = gradeSettings.mcqGradeToPass ||
-                                 gradeSettings.programmingGradeToPass ||
-                                 gradeSettings.combinedGradeToPass ||
-                                 (totalMaxScore * 0.4); // Default 40% if not specified
-         
+            gradeSettings.programmingGradeToPass ||
+            gradeSettings.combinedGradeToPass ||
+            (totalMaxScore * 0.4); // Default 40% if not specified
+
           // Check if student has passed
           isPassing = overallScore >= passingMarksRequired;
-         
+
           console.log(`Student ${user.firstName} ${user.lastName}: Score ${overallScore}/${totalMaxScore}, Pass Mark ${passingMarksRequired}, Passing: ${isPassing}`);
         } else {
           // Default: 50% passing mark
           passingMarksRequired = totalMaxScore * 0.5;
           isPassing = overallScore >= passingMarksRequired;
         }
- 
+
         // Get user role name
         let roleName = 'Student';
         if (user.role) {
@@ -5306,14 +5751,14 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
             roleName = user.role;
           }
         }
- 
+
         let enrolledAt = user.createdAt;
         if (userCourse && userCourse.enrolledAt) {
           enrolledAt = userCourse.enrolledAt;
         } else if (userCourse && userCourse.createdAt) {
           enrolledAt = userCourse.createdAt;
         }
- 
+
         return {
           _id: user._id,
           name: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
@@ -5326,7 +5771,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           role: roleName,
           enrolledAt: enrolledAt,
           lastAccessed: userCourse?.lastAccessed,
-         
+
           // Exercise-specific progress with Pass/Fail
           exerciseProgress: includeProgress === 'true' ? {
             status,
@@ -5340,7 +5785,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
             isPassing: isPassing,
             passingMarksRequired: passingMarksRequired,
             totalMaxScore: totalMaxScore,
-           
+
             // Detailed question attempts
             questionAttempts: includeProgress === 'true' ? questionAttempts.map(q => ({
               questionId: q.questionId,
@@ -5354,7 +5799,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
               evaluatedAt: q.evaluatedAt,
               feedback: q.feedback || ''
             })) : [],
-           
+
             projectType: exerciseProgress?.projectType,
             fileCount: exerciseProgress?.questions?.[0]?.files?.length || 0,
             folderCount: exerciseProgress?.questions?.[0]?.folders?.length || 0
@@ -5362,7 +5807,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         };
       })
     );
- 
+
     // 5. Apply search filter if provided
     let filteredStudents = studentsWithProgress;
     if (search) {
@@ -5373,11 +5818,11 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         (student.role && student.role.toLowerCase().includes(searchLower))
       );
     }
- 
+
     // 6. Apply sorting
     filteredStudents.sort((a, b) => {
       let aValue, bValue;
-     
+
       switch (sortBy) {
         case 'progress':
           aValue = a.exerciseProgress?.completionPercentage || 0;
@@ -5400,29 +5845,29 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           aValue = a.name ? a.name.toLowerCase() : '';
           bValue = b.name ? b.name.toLowerCase() : '';
       }
-     
+
       if (sortOrder === 'desc') {
         return bValue > aValue ? 1 : bValue < aValue ? -1 : 0;
       } else {
         return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
       }
     });
- 
+
     // 7. Apply pagination
     const totalStudents = filteredStudents.length;
     const startIndex = (parseInt(page) - 1) * parseInt(limit);
     const endIndex = startIndex + parseInt(limit);
     const paginatedStudents = filteredStudents.slice(startIndex, endIndex);
- 
+
     // 8. Calculate exercise statistics with Pass/Fail counts
     const studentsWithProgressOnly = studentsWithProgress.filter(s =>
       s.exerciseProgress && s.exerciseProgress.status !== 'not_started'
     );
-   
+
     const exerciseStatistics = {
       totalEnrolled: enrolledInCourse.length,
       studentsWithProgress: studentsWithProgressOnly.length,
-     
+
       byStatus: {
         not_started: studentsWithProgress.filter(s =>
           s.exerciseProgress && s.exerciseProgress.status === 'not_started'
@@ -5437,7 +5882,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           s.exerciseProgress && s.exerciseProgress.status === 'evaluated'
         ).length
       },
-     
+
       byPassFail: {
         pass: studentsWithProgressOnly.filter(s =>
           s.exerciseProgress && s.exerciseProgress.isPassing === true
@@ -5449,34 +5894,34 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           !s.exerciseProgress || s.exerciseProgress.status === 'not_started'
         ).length
       },
-     
+
       averageScore: studentsWithProgressOnly.length > 0 ?
         studentsWithProgressOnly.reduce((sum, s) => sum + (s.exerciseProgress?.overallScore || 0), 0) /
         studentsWithProgressOnly.length : 0,
-     
+
       averageCompletion: studentsWithProgressOnly.length > 0 ?
         studentsWithProgressOnly.reduce((sum, s) => sum + parseFloat(s.exerciseProgress?.completionPercentage || 0), 0) /
         studentsWithProgressOnly.length : 0,
-     
+
       passingMarksRequired: gradeSettings?.mcqGradeToPass ||
-                            gradeSettings?.programmingGradeToPass ||
-                            gradeSettings?.combinedGradeToPass ||
-                            (totalMaxScore * 0.4),
-     
+        gradeSettings?.programmingGradeToPass ||
+        gradeSettings?.combinedGradeToPass ||
+        (totalMaxScore * 0.4),
+
       totalMaxScore: totalMaxScore,
-     
+
       scoreDistribution: {
         '0-20': studentsWithProgressOnly.filter(s => (s.exerciseProgress?.overallScore || 0) <= 20).length,
         '21-40': studentsWithProgressOnly.filter(s => (s.exerciseProgress?.overallScore || 0) > 20 &&
-                                                  (s.exerciseProgress?.overallScore || 0) <= 40).length,
+          (s.exerciseProgress?.overallScore || 0) <= 40).length,
         '41-60': studentsWithProgressOnly.filter(s => (s.exerciseProgress?.overallScore || 0) > 40 &&
-                                                  (s.exerciseProgress?.overallScore || 0) <= 60).length,
+          (s.exerciseProgress?.overallScore || 0) <= 60).length,
         '61-80': studentsWithProgressOnly.filter(s => (s.exerciseProgress?.overallScore || 0) > 60 &&
-                                                  (s.exerciseProgress?.overallScore || 0) <= 80).length,
+          (s.exerciseProgress?.overallScore || 0) <= 80).length,
         '81-100': studentsWithProgressOnly.filter(s => (s.exerciseProgress?.overallScore || 0) > 80).length
       }
     };
- 
+
     // 9. Prepare final response
     const responseData = {
       success: true,
@@ -5487,7 +5932,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           code: course.courseCode,
           description: course.description
         },
-       
+
         exercise: {
           _id: exerciseDetails._id,
           exerciseId: exerciseDetails.exerciseInformation?.exerciseId,
@@ -5497,19 +5942,19 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           totalQuestions: exerciseDetails.questions?.length || 0,
           totalPoints: totalMaxScore,
           exerciseType: exerciseDetails.exerciseType ||
-                       (exerciseDetails.questions?.every(q => q.questionType === 'MCQ') ? 'MCQ' : 'Programming'),
+            (exerciseDetails.questions?.every(q => q.questionType === 'MCQ') ? 'MCQ' : 'Programming'),
           gradeSettings: gradeSettings,
           passingMarksRequired: gradeSettings?.mcqGradeToPass ||
-                               gradeSettings?.programmingGradeToPass ||
-                               gradeSettings?.combinedGradeToPass,
-         
+            gradeSettings?.programmingGradeToPass ||
+            gradeSettings?.combinedGradeToPass,
+
           location: {
             entityType: exerciseFoundIn?.name,
             entityTitle: exerciseFoundIn?.entity?.title,
             section: exerciseFoundIn?.section,
             subcategory: exerciseFoundIn?.subcategory
           },
-         
+
           questions: exerciseDetails.questions?.map(q => ({
             _id: q._id,
             title: q.mcqQuestionTitle || q.title || 'Untitled Question',
@@ -5517,11 +5962,11 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
             score: q.mcqQuestionScore || q.score || 10
           })) || []
         },
-       
+
         students: paginatedStudents,
-       
+
         statistics: exerciseStatistics,
-       
+
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
@@ -5529,14 +5974,14 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
           pages: Math.ceil(totalStudents / parseInt(limit)),
           showing: paginatedStudents.length
         },
-       
+
         filters: {
           search,
           includeProgress: includeProgress === 'true',
           sortBy,
           sortOrder
         },
-       
+
         summary: {
           fetchedAt: new Date(),
           totalEnrolled: enrolledInCourse.length,
@@ -5547,15 +5992,15 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         }
       }
     };
- 
+
     console.log(`✅ Exercise student list generated`);
     console.log(`   Total enrolled: ${enrolledInCourse.length}`);
     console.log(`   With progress: ${exerciseStatistics.studentsWithProgress}`);
     console.log(`   Pass: ${exerciseStatistics.byPassFail.pass}, Fail: ${exerciseStatistics.byPassFail.fail}`);
     console.log(`   Page ${page}: ${paginatedStudents.length} students`);
- 
+
     return res.status(200).json(responseData);
- 
+
   } catch (error) {
     console.error("❌ Get enrolled students for exercise error:", error);
     console.error("❌ Error stack:", error.stack);
@@ -5567,14 +6012,14 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     });
   }
 };
- 
+
 
 
 // Get exercise questions with student's answers for admin/coordinator view
 exports.getStudentExerciseQuestions = async (req, res) => {
   try {
     const { courseId, studentId, exerciseId } = req.params;
-    const { 
+    const {
       includeCorrectAnswers = 'true',  // Whether to include correct answers
       includeTestCases = 'false',      // Whether to include test cases
       includeHints = 'false'           // Whether to include hints
@@ -5620,7 +6065,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       .select('courses')
       .lean();
 
-    const isEnrolled = studentWithCourses?.courses?.some(c => 
+    const isEnrolled = studentWithCourses?.courses?.some(c =>
       c.courseId && c.courseId.toString() === courseId
     );
 
@@ -5634,7 +6079,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     // 5. Find the exercise in course structure to get question details
     let exerciseDetails = null;
     let exerciseLocation = null;
-    
+
     // Search in all entity types
     const entityModels = [
       { name: 'Module1', model: Module1 },
@@ -5655,7 +6100,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
               if (entity.pedagogy[section]) {
                 const sectionData = entity.pedagogy[section];
                 let subcategories = [];
-                
+
                 if (sectionData instanceof Map) {
                   subcategories = Array.from(sectionData.entries());
                 } else if (typeof sectionData === 'object') {
@@ -5664,7 +6109,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
 
                 subcategories.forEach(([subcategory, exercises]) => {
                   if (!exercises) return;
-                  
+
                   let exercisesArray = [];
                   if (Array.isArray(exercises)) {
                     exercisesArray = exercises;
@@ -5672,7 +6117,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
                     exercisesArray = [exercises];
                   }
 
-                  const exercise = exercisesArray.find(ex => 
+                  const exercise = exercisesArray.find(ex =>
                     ex._id && ex._id.toString() === exerciseId
                   );
 
@@ -5716,7 +6161,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     let foundInCategory = null;
 
     if (studentWithAnswers?.courses) {
-      const userCourse = studentWithAnswers.courses.find(c => 
+      const userCourse = studentWithAnswers.courses.find(c =>
         c.courseId && c.courseId.toString() === courseId
       );
 
@@ -5725,7 +6170,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
         ['I_Do', 'We_Do', 'You_Do'].forEach(category => {
           if (userCourse.answers[category]) {
             const categoryData = userCourse.answers[category];
-            
+
             // Handle both Map and object formats
             let exercisesArray = [];
             if (categoryData instanceof Map) {
@@ -5739,17 +6184,17 @@ exports.getStudentExerciseQuestions = async (req, res) => {
             } else if (typeof categoryData === 'object') {
               exercisesArray = Object.values(categoryData).flat();
             }
-            
-            const userExercise = exercisesArray.find(ex => 
+
+            const userExercise = exercisesArray.find(ex =>
               ex.exerciseId && ex.exerciseId.toString() === exerciseId
             );
-            
+
             if (userExercise) {
               studentAnswers = userExercise.questions || [];
               exerciseProgress = {
                 status: userExercise.status || 'not_started',
                 totalScore: userExercise.questions?.reduce((sum, q) => sum + (q.score || 0), 0) || 0,
-                averageScore: userExercise.questions?.length > 0 ? 
+                averageScore: userExercise.questions?.length > 0 ?
                   (userExercise.questions.reduce((sum, q) => sum + (q.score || 0), 0) / userExercise.questions.length) : 0,
                 questionsAttempted: userExercise.questions?.length || 0,
                 lastActivity: userExercise.updatedAt || userExercise.createdAt,
@@ -5777,11 +6222,11 @@ exports.getStudentExerciseQuestions = async (req, res) => {
 
     // 8. Get exercise questions and combine with student answers
     const exerciseQuestions = exerciseDetails.questions || [];
-    
+
     const questionsWithStudentAnswers = exerciseQuestions.map((question, index) => {
       const questionId = question._id?.toString();
       const studentAnswer = questionId ? studentAnswerMap.get(questionId) : null;
-      
+
       // Format the question with student answer
       const formattedQuestion = {
         _id: question._id,
@@ -5794,35 +6239,35 @@ exports.getStudentExerciseQuestions = async (req, res) => {
         memoryLimit: question.memoryLimit || 256,
         isActive: question.isActive !== false,
         createdAt: question.createdAt,
-        
+
         // Student's attempt (if any)
         studentAttempt: studentAnswer ? {
           _id: studentAnswer._id,
           questionId: studentAnswer.questionId,
           questionTitle: studentAnswer.questionTitle || question.title,
-          
+
           // Code submission details
           codeAnswer: studentAnswer.codeAnswer || '',
           language: studentAnswer.language || '',
-          
+
           // Multi-file project details
           files: studentAnswer.files || [],
           folders: studentAnswer.folders || [],
           projectStructure: studentAnswer.projectStructure || {},
           entryPoints: studentAnswer.entryPoints || [],
           isMultiFile: !!(studentAnswer.files && studentAnswer.files.length > 0),
-          
+
           // Evaluation details
           score: studentAnswer.score || 0,
           totalScore: studentAnswer.totalScore || question.score || 10,
-          percentage: studentAnswer.totalScore > 0 ? 
-            ((studentAnswer.score || 0) / studentAnswer.totalScore * 100).toFixed(2) : 
+          percentage: studentAnswer.totalScore > 0 ?
+            ((studentAnswer.score || 0) / studentAnswer.totalScore * 100).toFixed(2) :
             (question.score > 0 ? ((studentAnswer.score || 0) / question.score * 100).toFixed(2) : 0),
           isCorrect: studentAnswer.isCorrect || false,
           status: studentAnswer.status || 'attempted',
           attempts: studentAnswer.attempts || 1,
           feedback: studentAnswer.feedback || '',
-          
+
           // Submission details
           submittedAt: studentAnswer.submittedAt,
           evaluatedAt: studentAnswer.evaluatedAt,
@@ -5830,7 +6275,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           createdAt: studentAnswer.createdAt,
           updatedAt: studentAnswer.updatedAt
         } : null,
-        
+
         // Question details (conditionally included)
         ...(includeCorrectAnswers === 'true' && {
           sampleInput: question.sampleInput || '',
@@ -5838,34 +6283,34 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           constraints: question.constraints || [],
           solutions: question.solutions || {}
         }),
-        
+
         ...(includeHints === 'true' && {
           hints: question.hints || []
         }),
-        
+
         ...(includeTestCases === 'true' && {
           testCases: question.testCases || []
         })
       };
-      
+
       return formattedQuestion;
     });
 
     // 9. Calculate statistics
     const attemptedQuestions = questionsWithStudentAnswers.filter(q => q.studentAttempt).length;
-    const solvedQuestions = questionsWithStudentAnswers.filter(q => 
+    const solvedQuestions = questionsWithStudentAnswers.filter(q =>
       q.studentAttempt && (q.studentAttempt.isCorrect || q.studentAttempt.status === 'solved')
     ).length;
-    
-    const totalScoreObtained = questionsWithStudentAnswers.reduce((sum, q) => 
+
+    const totalScoreObtained = questionsWithStudentAnswers.reduce((sum, q) =>
       sum + (q.studentAttempt?.score || 0), 0
     );
-    
-    const totalPossibleScore = questionsWithStudentAnswers.reduce((sum, q) => 
+
+    const totalPossibleScore = questionsWithStudentAnswers.reduce((sum, q) =>
       sum + q.score, 0
     );
-    
-    const overallPercentage = totalPossibleScore > 0 ? 
+
+    const overallPercentage = totalPossibleScore > 0 ?
       (totalScoreObtained / totalPossibleScore * 100).toFixed(2) : 0;
 
     // 10. Prepare response
@@ -5881,7 +6326,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           status: student.status || 'active',
           enrolled: isEnrolled
         },
-        
+
         // Course information
         course: {
           _id: course._id,
@@ -5889,7 +6334,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           code: course.courseCode,
           description: course.description
         },
-        
+
         // Exercise information
         exercise: {
           _id: exerciseDetails._id,
@@ -5899,34 +6344,34 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           level: exerciseDetails.exerciseInformation?.exerciseLevel || 'intermediate',
           totalDuration: exerciseDetails.exerciseInformation?.totalDuration || 0,
           createdAt: exerciseDetails.createdAt,
-          
+
           // Location in course structure
           location: exerciseLocation,
-          
+
           // Exercise settings
           programmingLanguages: exerciseDetails.programmingSettings?.selectedLanguages || [],
           practiceMode: exerciseDetails.configurationType?.practiceMode || false,
           manualEvaluation: exerciseDetails.configurationType?.manualEvaluation || false,
           availabilityPeriod: exerciseDetails.availabilityPeriod || {}
         },
-        
+
         // Questions with student answers
         questions: questionsWithStudentAnswers,
-        
+
         // Student's overall progress for this exercise
         studentProgress: {
           ...exerciseProgress,
           questionsAttempted: attemptedQuestions,
           questionsTotal: questionsWithStudentAnswers.length,
           questionsSolved: solvedQuestions,
-          completionPercentage: questionsWithStudentAnswers.length > 0 ? 
+          completionPercentage: questionsWithStudentAnswers.length > 0 ?
             (attemptedQuestions / questionsWithStudentAnswers.length * 100).toFixed(2) : 0,
           totalScoreObtained,
           totalPossibleScore,
           overallPercentage,
           foundInCategory
         },
-        
+
         // Statistics
         statistics: {
           totalQuestions: questionsWithStudentAnswers.length,
@@ -5952,7 +6397,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
             }
           }
         },
-        
+
         // Summary
         summary: {
           fetchedAt: new Date(),
@@ -5965,7 +6410,7 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       }
     };
 
- 
+
 
     return res.status(200).json(response);
 
@@ -6004,7 +6449,7 @@ async function uploadImageToSupabase(file, folderPath) {
 
     // Generate public URL
     const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
-    
+
     return imageUrl;
 
   } catch (error) {
@@ -6012,7 +6457,6 @@ async function uploadImageToSupabase(file, folderPath) {
     throw error;
   }
 }
-
 exports.addMCQQuestions = async (req, res) => {
   try {
     const { type, id, exerciseId } = req.params;
@@ -6049,7 +6493,7 @@ exports.addMCQQuestions = async (req, res) => {
 
     for (let i = 0; i < questionsData.length; i++) {
       const question = questionsData[i];
-  if (!question.mcqQuestionTitle || 
+      if (!question.mcqQuestionTitle ||
         (typeof question.mcqQuestionTitle === 'string' && !question.mcqQuestionTitle.trim()) ||
         (Array.isArray(question.mcqQuestionTitle) && question.mcqQuestionTitle.length === 0)) {
         return res.status(400).json({
@@ -6139,9 +6583,11 @@ exports.addMCQQuestions = async (req, res) => {
       const processedQuestion = {
         _id: new mongoose.Types.ObjectId(),
         questionType: 'mcq',
- mcqQuestionTitle: Array.isArray(question.mcqQuestionTitle) 
-          ? question.mcqQuestionTitle 
-          : (question.mcqQuestionTitle || '').trim(),        mcqQuestionType: question.mcqQuestionType,
+        sectionId: question.sectionId || null, // 🆕 NEW: Section linking
+        mcqQuestionTitle: Array.isArray(question.mcqQuestionTitle)
+          ? question.mcqQuestionTitle
+          : (question.mcqQuestionTitle || '').trim(),
+        mcqQuestionType: question.mcqQuestionType,
         mcqQuestionDifficulty: question.mcqQuestionDifficulty || undefined,
         mcqQuestionScore: question.mcqQuestionScore || 1,
         mcqQuestionTimeLimit: question.mcqQuestionTimeLimit || 0,
@@ -6175,20 +6621,20 @@ exports.addMCQQuestions = async (req, res) => {
       }
 
       if (question.mcqQuestionType === 'numeric') {
-        processedQuestion.numericAnswer    = question.numericAnswer    ?? null;
+        processedQuestion.numericAnswer = question.numericAnswer ?? null;
         processedQuestion.numericTolerance = question.numericTolerance ?? null;
       }
 
       if (question.mcqQuestionType === 'matching') {
         processedQuestion.matchingPairs = (question.matchingPairs || []).map(p => ({
-          left:  p.left  || '',
+          left: p.left || '',
           right: p.right || '',
         }));
       }
 
       if (question.mcqQuestionType === 'ordering') {
         processedQuestion.orderingItems = (question.orderingItems || []).map(item => ({
-          text:  item.text  || '',
+          text: item.text || '',
           order: item.order || 0,
         }));
       }
@@ -6281,6 +6727,7 @@ exports.addMCQQuestions = async (req, res) => {
         mcqQuestionTitle: question.mcqQuestionTitle,
         mcqQuestionType: question.mcqQuestionType,
         sequence: question.sequence,
+        sectionId: question.sectionId, // 🆕 Include sectionId in response
         optionsCount: question.mcqQuestionOptions.length,
         mcqQuestionRequired: question.mcqQuestionRequired
       });
@@ -6303,11 +6750,22 @@ exports.addMCQQuestions = async (req, res) => {
 
     const totalMCQMarks = processedQuestions.reduce((sum, q) => sum + (q.mcqQuestionScore || 0), 0);
 
+    // 🆕 Group added questions by section for response
+    const addedBySection = {};
+    addedQuestions.forEach(q => {
+      const secId = q.sectionId || 'unassigned';
+      if (!addedBySection[secId]) {
+        addedBySection[secId] = [];
+      }
+      addedBySection[secId].push(q);
+    });
+
     return res.status(201).json({
       success: true,
       message: `Successfully added ${addedQuestions.length} MCQ question(s)`,
       data: {
         addedQuestions,
+        addedBySection, // 🆕 Questions grouped by section
         exercise: {
           id: exercise._id?.toString(),
           exerciseId: exercise.exerciseInformation?.exerciseId,
@@ -6333,7 +6791,6 @@ exports.addMCQQuestions = async (req, res) => {
     });
   }
 };
-
 
 
 exports.updateMCQQuestion = async (req, res) => {
@@ -6371,12 +6828,12 @@ exports.updateMCQQuestion = async (req, res) => {
     }
 
     if (!questionData.mcqQuestionTitle ||
-        (typeof questionData.mcqQuestionTitle === 'string' && !questionData.mcqQuestionTitle.trim()) ||
-        (Array.isArray(questionData.mcqQuestionTitle) && questionData.mcqQuestionTitle.length === 0)) {
-        return res.status(400).json({
-          message: [{ key: "error", value: "MCQ question title is required" }]
-        });
-      }
+      (typeof questionData.mcqQuestionTitle === 'string' && !questionData.mcqQuestionTitle.trim()) ||
+      (Array.isArray(questionData.mcqQuestionTitle) && questionData.mcqQuestionTitle.length === 0)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "MCQ question title is required" }]
+      });
+    }
 
     if (!questionData.mcqQuestionType) {
       return res.status(400).json({
@@ -6540,10 +6997,11 @@ exports.updateMCQQuestion = async (req, res) => {
     const updatedQuestion = {
       _id: originalQuestion._id,
       questionType: 'mcq',
- mcqQuestionTitle: Array.isArray(questionData.mcqQuestionTitle)
+      sectionId: questionData.sectionId !== undefined ? questionData.sectionId : (originalQuestion.sectionId || null), // 🆕 NEW: Section update support
+      mcqQuestionTitle: Array.isArray(questionData.mcqQuestionTitle)
         ? questionData.mcqQuestionTitle
         : (questionData.mcqQuestionTitle || '').trim(),
-              mcqQuestionType: questionData.mcqQuestionType,
+      mcqQuestionType: questionData.mcqQuestionType,
       mcqQuestionDifficulty: questionData.mcqQuestionDifficulty || originalQuestion.mcqQuestionDifficulty || undefined,
       mcqQuestionScore: questionData.mcqQuestionScore !== undefined ? questionData.mcqQuestionScore : (originalQuestion.mcqQuestionScore || 1),
       mcqQuestionTimeLimit: questionData.mcqQuestionTimeLimit !== undefined ? questionData.mcqQuestionTimeLimit : (originalQuestion.mcqQuestionTimeLimit || 0),
@@ -6637,6 +7095,7 @@ exports.updateMCQQuestion = async (req, res) => {
           mcqQuestionRequired: updatedQuestion.mcqQuestionRequired,
           isActive: updatedQuestion.isActive,
           sequence: updatedQuestion.sequence,
+          sectionId: updatedQuestion.sectionId, // 🆕 Include sectionId in response
           optionsCount: updatedQuestion.mcqQuestionOptions.length
         },
         exercise: {
@@ -6665,7 +7124,7 @@ exports.updateMCQQuestion = async (req, res) => {
     });
   }
 };
- 
+
 exports.deleteMCQQuestion = async (req, res) => {
   try {
     const { type, id, exerciseId, questionId } = req.params;
@@ -6783,6 +7242,9 @@ exports.deleteMCQQuestion = async (req, res) => {
       });
     }
 
+    // 🆕 Get section info before deleting for response
+    const deletedQuestionSection = exercise.questions[questionIndex].sectionId || null;
+
     exercise.questions.splice(questionIndex, 1);
     exercise.questions.forEach((q, idx) => { q.sequence = idx; });
 
@@ -6807,6 +7269,7 @@ exports.deleteMCQQuestion = async (req, res) => {
       data: {
         exerciseId,
         questionId,
+        deletedFromSection: deletedQuestionSection, // 🆕 Include which section it was deleted from
         remainingQuestions: exercise.questions.length
       }
     });
@@ -6820,7 +7283,6 @@ exports.deleteMCQQuestion = async (req, res) => {
   }
 };
 
-
 // ─── Upload question image directly to Supabase ───────────────────────────────
 exports.uploadQuestionImage = async (req, res) => {
   try {
@@ -6833,5 +7295,1215 @@ exports.uploadQuestionImage = async (req, res) => {
   } catch (error) {
     console.error('❌ Error uploading question image:', error);
     return res.status(500).json({ success: false, message: 'Failed to upload image' });
+  }
+};
+
+// ─── Upload question file attachment to Supabase ──────────────────────────────
+exports.uploadQuestionFile = async (req, res) => {
+  try {
+    const file = req.files?.file;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'No file provided' });
+    }
+
+    const ALLOWED_MIME_TYPES = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'text/plain',
+      'text/csv',
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+    ];
+
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return res.status(400).json({ success: false, message: 'File type not allowed' });
+    }
+
+    const MAX_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
+    if (file.size > MAX_SIZE_BYTES) {
+      return res.status(400).json({ success: false, message: 'File too large (max 20 MB)' });
+    }
+
+    const timestamp = Date.now();
+
+    // ── Always derive the extension from the MIME type (not from the filename).
+    // Filenames can arrive mangled (spaces, encoding quirks, wrong extension) but
+    // the browser MIME type is always reliable.
+    const MIME_TO_EXT = {
+      'application/pdf': '.pdf',
+      'application/msword': '.doc',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+      'application/vnd.ms-excel': '.xls',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+      'application/vnd.ms-powerpoint': '.ppt',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+      'text/plain': '.txt',
+      'text/csv': '.csv',
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'application/zip': '.zip',
+      'application/x-zip-compressed': '.zip',
+    };
+
+    const correctExt = MIME_TO_EXT[file.mimetype] || path.extname(file.name || '').toLowerCase() || '';
+    // Strip the (potentially wrong) extension from the original name, keep only the stem
+    const rawStem = path.basename(file.name || 'upload', path.extname(file.name || ''));
+    const cleanStem = rawStem.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').slice(0, 100);
+    const cleanName = cleanStem + correctExt;           // e.g. "ProblemStatementsforReact.docx"
+    const fileName = `${timestamp}_${cleanName}`;
+    const filePath = `question/others/attachments/${fileName}`;
+
+    const { error } = await supabase.storage
+      .from('smartlms')
+      .upload(filePath, file.data, {
+        contentType: file.mimetype,
+        cacheControl: '3600',
+        upsert: false,
+      });
+
+    if (error) {
+      throw new Error(`Supabase upload failed: ${error.message}`);
+    }
+
+    const url = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    // Return cleanName (correct extension) — NOT file.name which may be mangled
+    return res.status(200).json({ success: true, url, name: cleanName, mimeType: file.mimetype });
+  } catch (error) {
+    console.error('❌ Error uploading question file:', error);
+    return res.status(500).json({ success: false, message: 'Failed to upload file' });
+  }
+};
+
+
+
+exports.addYouDoExercise = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const {
+      tabType,
+      subcategory,
+      exerciseType,
+      exerciseInformation,
+      availabilityPeriod,
+      questionConfiguration,
+      notificationSettings,
+      gradeSettings,
+      additionalOptions,
+      isSectionBased,
+      sections,
+      sectionConfigs,
+      questions = [],
+      securitySettings,  // ← Add securitySettings to destructuring
+    } = req.body;
+
+    // ── Helper: parse JSON strings if needed (MUST be defined FIRST) ──────
+    const parseIfNeeded = (data) => {
+      if (typeof data === 'string') {
+        try { return JSON.parse(data); } catch { return data; }
+      }
+      return data;
+    };
+
+    // ── Transform description fields ──────────────────────────────────────
+    const transformExerciseInfo = (info) => {
+      if (!info) return info;
+      const t = { ...info };
+      if (t.description && typeof t.description === 'object' && t.description.text !== undefined) {
+        t.description = t.description.text;
+      }
+      return t;
+    };
+
+    // ── Parse all incoming data (NOW parseIfNeeded is defined) ─────────────
+    let exerciseTypeParsed = parseIfNeeded(exerciseType);
+    let exerciseInfo = transformExerciseInfo(parseIfNeeded(exerciseInformation));
+    let availPeriod = parseIfNeeded(availabilityPeriod) || {};
+    let quesConfig = parseIfNeeded(questionConfiguration) || {};
+    let notifSettings = parseIfNeeded(notificationSettings) || {};
+    let gradeSettingsRaw = parseIfNeeded(gradeSettings) || {};
+    let additOptions = parseIfNeeded(additionalOptions) || {};
+    let securitySettingsData = parseIfNeeded(securitySettings) || {};  // ← Now safe to use
+
+    // ── Validate entity type ───────────────────────────────────────────────
+    if (!modelMap[type]) {
+      return res.status(400).json({
+        message: [{ key: 'error', value: `Invalid entity type: ${type}` }]
+      });
+    }
+
+    if (!subcategory) {
+      return res.status(400).json({
+        message: [{ key: 'error', value: "Subcategory is required." }]
+      });
+    }
+
+    // ── Basic validation ──────────────────────────────────────────────────
+    if (!exerciseInfo || !exerciseInfo.exerciseName) {
+      return res.status(400).json({
+        message: [{ key: 'error', value: 'Exercise name is required' }]
+      });
+    }
+
+    // ── Find entity ───────────────────────────────────────────────────────
+    const { model } = modelMap[type];
+    const entity = await model.findById(id);
+
+    if (!entity) {
+      return res.status(404).json({
+        message: [{ key: 'error', value: `${type} with ID ${id} not found` }]
+      });
+    }
+
+    // ── Initialize pedagogy structure ─────────────────────────────────────
+    if (!entity.pedagogy) {
+      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
+    }
+
+    const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+
+    if (!entity.pedagogy[tabKey]) {
+      entity.pedagogy[tabKey] = new Map();
+    }
+
+    let exercises = entity.pedagogy[tabKey].has(subcategory)
+      ? entity.pedagogy[tabKey].get(subcategory)
+      : [];
+
+    // ── Generate exercise ID ───────────────────────────────────────────────
+    const generateExerciseId = () =>
+      `EX${(exercises.length + 1).toString().padStart(3, '0')}`;
+
+    const exerciseId = exerciseInfo.exerciseId || generateExerciseId();
+
+    // ── Configuration type flags ──────────────────────────────────────────
+    const configTypeSettings = {
+      mcqMode: exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined',
+      programmingMode: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined',
+      combinedMode: exerciseTypeParsed === 'Combined',
+      otherMode: exerciseTypeParsed === 'Other',
+      sectionBased: isSectionBased === true,
+    };
+
+    // ── Build MCQ config ───────────────────────────────────────────────────
+    const buildMCQConfig = (mcqCfg) => {
+      if (!mcqCfg) return { cfg: null, total: 0 };
+
+      const scoreType = mcqCfg.scoreSettings?.scoreType || 'equalDistribution';
+      let marksPerQuestion = 0;
+      let total = 0;
+
+      if (scoreType === 'equalDistribution') {
+        marksPerQuestion = mcqCfg.scoreSettings?.equalDistribution || 0;
+        total = (mcqCfg.generalQuestionCount || 0) * marksPerQuestion;
+      } else {
+        total = mcqCfg.scoreSettings?.totalMarks || 0;
+      }
+
+      return {
+        cfg: {
+          totalMcqQuestions: mcqCfg.generalQuestionCount || 0,
+          marksPerQuestion,
+          mcqTotalMarks: total,
+          attemptLimitEnabled: mcqCfg.attemptLimitEnabled || false,
+          submissionAttempts: mcqCfg.submissionAttempts || 1,
+          shuffleQuestions: true,
+          scoringType: scoreType,
+        },
+        total,
+      };
+    };
+
+    // ── Build Programming config ───────────────────────────────────────────
+    const buildProgConfig = (progCfg) => {
+      if (!progCfg) return { cfg: null, total: 0 };
+
+      const qConfigType = progCfg.questionConfigType || 'general';
+      let total = 0;
+
+      if (qConfigType === 'general') {
+        const evenMarks = progCfg.scoreSettings?.equalDistribution || 0;
+        total = (progCfg.generalQuestionCount || 0) * evenMarks;
+      } else if (qConfigType === 'levelBased' || qConfigType === 'selectionLevel') {
+        const counts = qConfigType === 'selectionLevel'
+          ? progCfg.selectionLevelCounts
+          : progCfg.levelBasedCounts;
+        const levelScoring = progCfg.scoreSettings?.levelScoringConfiguration;
+
+        if (levelScoring) {
+          ['easy', 'medium', 'hard'].forEach(l => {
+            const c = counts?.[l] || 0;
+            if (!c) return;
+            const s = levelScoring[l];
+            if (!s) return;
+            if (s.type === 'level_specific' && s.marksPerQuestion) {
+              total += c * s.marksPerQuestion;
+            } else if (s.type === 'question_specific' && s.totalMarks) {
+              total += s.totalMarks;
+            }
+          });
+        }
+      }
+
+      let backendScoreType = 'evenMarks';
+      if (qConfigType === 'levelBased' || qConfigType === 'selectionLevel') {
+        backendScoreType = 'levelBasedMarks';
+      } else {
+        switch (progCfg.scoreSettings?.scoreType) {
+          case 'equalDistribution': backendScoreType = 'evenMarks'; break;
+          case 'questionSpecific': backendScoreType = 'separateMarks'; break;
+          default: backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
+        }
+      }
+
+      const cfg = {
+        questionConfigType: qConfigType,
+        attemptLimitEnabled: progCfg.attemptLimitEnabled || false,
+        submissionAttempts: progCfg.submissionAttempts || 1,
+        questionFlow: progCfg.questionFlow || 'freeFlow',
+        allowCodeExecution: true,
+        enableTestCases: true,
+        showSampleCases: true,
+        scoreSettings: {
+          scoreType: backendScoreType,
+          evenMarks: progCfg.scoreSettings?.equalDistribution || 0,
+          levelBasedMarks: progCfg.scoreSettings?.levelBasedMarks || { easy: 0, medium: 0, hard: 0 },
+          levelScoringConfiguration: progCfg.scoreSettings?.levelScoringConfiguration,
+          totalMarks: total,
+        },
+      };
+
+      if (qConfigType === 'general') {
+        cfg.generalQuestionCount = progCfg.generalQuestionCount || 0;
+      } else if (qConfigType === 'levelBased') {
+        cfg.levelBasedCounts = progCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
+      } else if (qConfigType === 'selectionLevel') {
+        cfg.selectionLevelCounts = progCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 };
+      }
+
+      return { cfg, total };
+    };
+
+    // ── Build Others config ─────────────────────────────────────────────────
+    const buildOthersConfig = (othersCfg) => {
+      if (!othersCfg) return { cfg: null, total: 0 };
+
+      const qConfigType = othersCfg.questionConfigType || 'general';
+      let total = 0;
+
+      if (qConfigType === 'general') {
+        const evenMarks = othersCfg.scoreSettings?.equalDistribution || othersCfg.generalMarksPerQuestion || 0;
+        total = (othersCfg.generalQuestionCount || 0) * evenMarks;
+      } else if (qConfigType === 'levelBased' || qConfigType === 'selectionLevel') {
+        const counts = qConfigType === 'selectionLevel'
+          ? othersCfg.selectionLevelCounts
+          : othersCfg.levelBasedCounts;
+        const levelScoring = othersCfg.scoreSettings?.levelScoringConfiguration;
+
+        if (levelScoring) {
+          ['easy', 'medium', 'hard'].forEach(l => {
+            const c = counts?.[l] || 0;
+            if (!c) return;
+            const s = levelScoring[l];
+            if (!s) return;
+            if (s.type === 'level_specific' && s.marksPerQuestion) {
+              total += c * s.marksPerQuestion;
+            } else if (s.type === 'question_specific' && s.totalMarks) {
+              total += s.totalMarks;
+            }
+          });
+        }
+      }
+
+      const cfg = {
+        questionConfigType: qConfigType,
+        attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
+        submissionAttempts: othersCfg.submissionAttempts || 1,
+        questionFlow: othersCfg.questionFlow || 'freeFlow',
+        scoreSettings: {
+          scoreType: qConfigType === 'general' ? 'evenMarks' : 'levelBasedMarks',
+          evenMarks: othersCfg.scoreSettings?.equalDistribution || othersCfg.generalMarksPerQuestion || 0,
+          levelBasedMarks: othersCfg.scoreSettings?.levelBasedMarks || { easy: 0, medium: 0, hard: 0 },
+          levelScoringConfiguration: othersCfg.scoreSettings?.levelScoringConfiguration,
+          totalMarks: total,
+        },
+      };
+
+      if (qConfigType === 'general') {
+        cfg.generalQuestionCount = othersCfg.generalQuestionCount || 0;
+      } else if (qConfigType === 'levelBased') {
+        cfg.levelBasedCounts = othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
+      } else if (qConfigType === 'selectionLevel') {
+        cfg.selectionLevelCounts = othersCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 };
+      }
+
+      return { cfg, total };
+    };
+
+    // ── Extract MCQ/Programming/Others configs ─────────────────────────────
+    let mcqQuestionConfig = null;
+    let programmingQuestionConfig = null;
+    let othersQuestionConfig = null;
+    let mcqTotalMarks = 0;
+    let progTotalMarks = 0;
+
+    if (quesConfig.mcqConfig) {
+      const { cfg, total } = buildMCQConfig(quesConfig.mcqConfig);
+      mcqQuestionConfig = cfg;
+      mcqTotalMarks = total;
+    }
+
+    if (quesConfig.programmingConfig) {
+      const { cfg, total } = buildProgConfig(quesConfig.programmingConfig);
+      programmingQuestionConfig = cfg;
+      progTotalMarks = total;
+    }
+
+    if (quesConfig.othersQuestionConfiguration || quesConfig.othersConfig) {
+      const othersCfg = quesConfig.othersQuestionConfiguration || quesConfig.othersConfig;
+      const { cfg, total } = buildOthersConfig(othersCfg);
+      othersQuestionConfig = cfg;
+      progTotalMarks = total;
+    }
+
+    // ── Build availabilityPeriod ───────────────────────────────────────────
+    const buildAvailabilityPeriod = (period) => {
+      const parseDate = (dateObj) => {
+        if (!dateObj || !dateObj.year || !dateObj.month || !dateObj.day) return null;
+        return new Date(
+          dateObj.year,
+          dateObj.month - 1,
+          dateObj.day,
+          dateObj.hour || 0,
+          dateObj.minute || 0
+        );
+      };
+
+      const startDate = parseDate(period.startDate);
+      const endDate = parseDate(period.endDate);
+      const cutOffDate = period.cutOffEnabled ? parseDate(period.cutOffDate) : null;
+      const gracePeriodDate = period.gracePeriodEnabled ? parseDate(period.gracePeriodDate) : null;
+
+      return {
+        startDate,
+        endDate,
+        cutOffDate,
+        cutOffEnabled: period.cutOffEnabled || false,
+        gracePeriodAllowed: period.gracePeriodEnabled || false,
+        gracePeriodEnabled: period.gracePeriodEnabled || false,
+        gracePeriodDate,
+        extendedDays: period.extendedDays || 0,
+      };
+    };
+
+    const availabilityPeriodData = buildAvailabilityPeriod(availPeriod);
+
+    // ── Build notificationSettings ─────────────────────────────────────────
+    const notificationSettingsData = {
+      notifyUsers: notifSettings.notifyUsers || false,
+      notifyGmail: notifSettings.notifyGmail || false,
+      notifyWhatsApp: notifSettings.notifyWhatsApp || false,
+      gradeSheet: notifSettings.gradeSheet !== undefined ? notifSettings.gradeSheet : true,
+      notifyGradersSubmissions: notifSettings.notifyGradersSubmissions || false,
+      notifyGradersLateSubmissions: notifSettings.notifyGradersLateSubmissions || false,
+      notifyStudent: notifSettings.notifyStudent !== undefined ? notifSettings.notifyStudent : true,
+    };
+
+    // ── Build gradeSettings ────────────────────────────────────────────────
+    const totalMarksForMCQ = exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined'
+      ? (exerciseInfo.totalMarksMCQ || mcqTotalMarks)
+      : 0;
+    const totalMarksForProg = exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
+      ? (exerciseInfo.totalMarksProgramming || progTotalMarks)
+      : 0;
+    const totalMarksCombined = totalMarksForMCQ + totalMarksForProg;
+
+    const gradeSettingsData = {
+      mcqGrade: totalMarksForMCQ > 0 ? totalMarksForMCQ : null,
+      mcqGradeToPass: gradeSettingsRaw.mcqGradeToPass || null,
+      programmingGrade: totalMarksForProg > 0 ? totalMarksForProg : null,
+      programmingGradeToPass: gradeSettingsRaw.programmingGradeToPass || null,
+      combinedGrade: totalMarksCombined > 0 ? totalMarksCombined : null,
+      combinedGradeToPass: gradeSettingsRaw.combinedGradeToPass || null,
+      separateMarks: gradeSettingsRaw.separateMarks || false,
+    };
+
+    // ── Build additionalOptions ────────────────────────────────────────────
+    const additionalOptionsData = {
+      anonymousSubmissions: additOptions.anonymousSubmissions || false,
+      hideGraderIdentity: additOptions.hideGraderIdentity || false,
+    };
+
+    // ── Assemble the new exercise document ─────────────────────────────────
+    const totalMarksForInfo = isSectionBased
+      ? (exerciseInfo.totalMarks || 0)
+      : exerciseTypeParsed === 'Combined'
+        ? totalMarksCombined
+        : (exerciseInfo.totalMarks || progTotalMarks || mcqTotalMarks);
+
+    const newExercise = {
+      _id: new mongoose.Types.ObjectId(),
+      exerciseType: exerciseTypeParsed,
+      configurationType: configTypeSettings,
+      isSectionBased: isSectionBased || false,
+      sections: sections || [],
+      sectionConfigs: sectionConfigs || {},
+
+      exerciseInformation: {
+        exerciseId: exerciseId,
+        exerciseName: exerciseInfo.exerciseName || '',
+        testType: exerciseInfo.testType || 'mock',
+        description: exerciseInfo.description || '',
+        exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
+        totalDuration: exerciseInfo.totalDuration || 1,
+        totalMarksMCQ: totalMarksForMCQ,
+        totalMarksProgramming: totalMarksForProg,
+        totalMarks: totalMarksForInfo,
+        selectedModule: exerciseInfo.selectedModule || '',
+        selectedLanguages: exerciseInfo.selectedLanguages || [],
+      },
+
+      securitySettings: securitySettingsData,  // ← Add security settings
+      questionConfiguration: {},
+      availabilityPeriod: availabilityPeriodData,
+      notificationSettings: notificationSettingsData,
+      gradeSettings: gradeSettingsData,
+      additionalOptions: additionalOptionsData,
+      questions: questions,
+      createdAt: new Date(),
+      createdBy: req.user?.email || 'system',
+      version: 1,
+    };
+
+    // Attach question configurations
+    if (mcqQuestionConfig) {
+      newExercise.questionConfiguration.mcqQuestionConfiguration = mcqQuestionConfig;
+    }
+    if (programmingQuestionConfig) {
+      newExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
+    }
+    if (othersQuestionConfig) {
+      newExercise.questionConfiguration.othersQuestionConfiguration = othersQuestionConfig;
+    }
+
+    // Attach programming settings if needed
+    if ((exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Combined') && exerciseInfo.selectedLanguages) {
+      newExercise.programmingSettings = {
+        selectedModule: exerciseInfo.selectedModule || null,
+        selectedLanguages: exerciseInfo.selectedLanguages || [],
+      };
+    }
+
+    // ── Save to database ───────────────────────────────────────────────────
+    exercises.push(newExercise);
+    entity.pedagogy[tabKey].set(subcategory, exercises);
+    entity.markModified(`pedagogy.${tabKey}`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    // ── Build response config ──────────────────────────────────────────────
+    let responseConfig = {};
+    if (exerciseTypeParsed === 'MCQ') {
+      responseConfig = { mode: 'mcq', config: mcqQuestionConfig };
+    } else if (exerciseTypeParsed === 'Programming') {
+      responseConfig = { mode: 'programming', config: programmingQuestionConfig };
+    } else if (exerciseTypeParsed === 'Other') {
+      responseConfig = { mode: 'other', config: othersQuestionConfig };
+    } else if (exerciseTypeParsed === 'Combined') {
+      responseConfig = {
+        mode: 'combined',
+        mcqConfig: mcqQuestionConfig,
+        programmingConfig: programmingQuestionConfig
+      };
+    }
+
+    return res.status(201).json({
+      message: [{ key: 'success', value: `Exercise added successfully to ${subcategory}` }],
+      data: {
+        exercise: newExercise,
+        configuration: responseConfig,
+        gradeSettings: gradeSettingsData,
+        notificationSettings: notificationSettingsData,
+        additionalOptions: additionalOptionsData,
+        securitySettings: securitySettingsData,
+        subcategory,
+        tabType: tabKey,
+        entityType: type,
+        entityId: id,
+        totalExercises: exercises.length,
+        generatedExerciseId: exerciseId,
+        location: { section: tabKey, subcategory, index: exercises.length - 1 },
+      },
+    });
+
+  } catch (err) {
+    console.error('❌ Add exercise error:', err);
+    res.status(500).json({
+      message: [{ key: 'error', value: `Internal server error: ${err.message}` }],
+    });
+  }
+};
+
+
+exports.updateYouDoExercise = async (req, res) => {
+  try {
+    const { type, id, exerciseId } = req.params;
+    const {
+      tabType,
+      subcategory,
+      exerciseType,
+      programmingSettings,
+      exerciseInformation,
+      availabilityPeriod,
+      questionConfiguration,
+      notificationSettings,
+      notificationGradeSettings,
+      gradeSettings,
+      additionalOptions,
+      isSectionBased,      // ← ADD THIS
+      sections,            // ← ADD THIS
+      sectionConfigs,      // ← ADD THIS
+      securitySettings,    // ← ADD THIS (if needed)
+    } = req.body;
+
+    // ── Validate ──────────────────────────────────────────────────────────
+    if (!modelMap[type]) {
+      return res.status(400).json({
+        message: [{ key: 'error', value: `Invalid entity type: ${type}.` }]
+      });
+    }
+    if (!subcategory) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'Subcategory is required.' }] });
+    }
+    if (!tabType) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'tabType is required (I_Do, We_Do, You_Do)' }] });
+    }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    const parseIfNeeded = (data) => {
+      if (typeof data === 'string') {
+        try { return JSON.parse(data); } catch { return data; }
+      }
+      return data;
+    };
+
+    const transformQuestionDescription = (question) => {
+      if (!question) return question;
+      if (question.description && typeof question.description === 'string') {
+        question.description = { text: question.description, imageUrl: null, imageAlignment: 'left', imageSizePercent: 100 };
+      }
+      return question;
+    };
+
+    // ── Parse all incoming ─────────────────────────────────────────────────
+    const parsedExerciseType = exerciseType ? parseIfNeeded(exerciseType) : null;
+    const parsedExerciseInfo = exerciseInformation ? parseIfNeeded(exerciseInformation) : null;
+    const parsedProgSettings = programmingSettings ? parseIfNeeded(programmingSettings) : null;
+    const parsedAvailPeriod = availabilityPeriod ? parseIfNeeded(availabilityPeriod) : null;
+    const parsedQuesConfig = questionConfiguration ? parseIfNeeded(questionConfiguration) : null;
+    const parsedNotifSettings = notificationSettings
+      ? parseIfNeeded(notificationSettings)
+      : (notificationGradeSettings ? parseIfNeeded(notificationGradeSettings) : null);
+    const parsedGradeSettings = gradeSettings ? parseIfNeeded(gradeSettings) : null;
+    const parsedAdditOptions = additionalOptions ? parseIfNeeded(additionalOptions) : null;
+
+    // ── Parse section-related fields ───────────────────────────────────────
+    const parsedIsSectionBased = isSectionBased !== undefined ? isSectionBased : false;
+    const parsedSections = sections ? parseIfNeeded(sections) : [];
+    const parsedSectionConfigs = sectionConfigs ? parseIfNeeded(sectionConfigs) : {};
+    const parsedSecuritySettings = securitySettings ? parseIfNeeded(securitySettings) : null;
+
+    // ── Find entity ───────────────────────────────────────────────────────
+    const { model } = modelMap[type];
+    const entity = await model.findById(id);
+
+    if (!entity) return res.status(404).json({ message: [{ key: 'error', value: `${type} with ID ${id} not found` }] });
+    if (!entity.pedagogy) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
+    if (!entity.pedagogy[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
+    if (!entity.pedagogy[tabType].has(subcategory))
+      return res.status(404).json({ message: [{ key: 'error', value: `Subcategory '${subcategory}' not found in ${tabType}` }] });
+
+    const exercises = entity.pedagogy[tabType].get(subcategory);
+    const exerciseIndex = exercises.findIndex(ex => ex._id.toString() === exerciseId);
+
+    if (exerciseIndex === -1) {
+      return res.status(404).json({
+        message: [{ key: 'error', value: `Exercise with ID ${exerciseId} not found in subcategory '${subcategory}'` }]
+      });
+    }
+
+    const existingExercise = exercises[exerciseIndex].toObject
+      ? exercises[exerciseIndex].toObject()
+      : { ...exercises[exerciseIndex] };
+    delete existingExercise.$__;
+    delete existingExercise.$isNew;
+    delete existingExercise._doc;
+
+    const finalExerciseType = parsedExerciseType || existingExercise.exerciseType;
+
+    const configTypeSettings = {
+      mcqMode: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined',
+      programmingMode: finalExerciseType === 'Programming' || finalExerciseType === 'Combined',
+      combinedMode: finalExerciseType === 'Combined',
+      otherMode: finalExerciseType === 'Other',
+      sectionBased: parsedIsSectionBased,
+    };
+
+    // ── Re-use question config builders (same logic as addExercise) ────────
+    let mcqQuestionConfig = existingExercise.questionConfiguration?.mcqQuestionConfiguration || null;
+    let programmingQuestionConfig = existingExercise.questionConfiguration?.programmingQuestionConfiguration || null;
+    let othersQuestionConfig = existingExercise.questionConfiguration?.othersQuestionConfiguration || null;
+    let mcqTotalMarks = existingExercise.exerciseInformation?.totalMarksMCQ || 0;
+    let progTotalMarks = existingExercise.exerciseInformation?.totalMarksProgramming || 0;
+
+    if (parsedQuesConfig) {
+      // ── MCQ config ───────────────────────────────────────────────────────
+      if (parsedQuesConfig.mcqConfig) {
+        const mcqCfg = parsedQuesConfig.mcqConfig;
+        const scoreType = mcqCfg.scoreSettings?.scoreType || 'equalDistribution';
+        let marksPerQuestion = 0;
+        if (scoreType === 'equalDistribution') {
+          marksPerQuestion = mcqCfg.scoreSettings?.equalDistribution || 0;
+          mcqTotalMarks = (mcqCfg.generalQuestionCount || 0) * marksPerQuestion;
+        } else {
+          mcqTotalMarks = mcqCfg.scoreSettings?.totalMarks || 0;
+        }
+        mcqQuestionConfig = {
+          totalMcqQuestions: mcqCfg.generalQuestionCount || 0,
+          marksPerQuestion,
+          mcqTotalMarks,
+          attemptLimitEnabled: mcqCfg.attemptLimitEnabled || false,
+          submissionAttempts: mcqCfg.submissionAttempts || 1,
+          shuffleQuestions: true,
+          scoringType: scoreType,
+        };
+      }
+
+      // ── Programming config ───────────────────────────────────────────────
+      if (parsedQuesConfig.programmingConfig) {
+        const progCfg = parsedQuesConfig.programmingConfig;
+        const qConfigType = progCfg.questionConfigType || 'general';
+        let backendType;
+        switch (qConfigType) {
+          case 'levelBased': backendType = 'levelBased'; break;
+          case 'selectionLevel': backendType = 'selectionLevel'; break;
+          default: backendType = qConfigType;
+        }
+
+        progTotalMarks = 0;
+        if (qConfigType === 'general' && progCfg.scoreSettings?.scoreType === 'equalDistribution') {
+          progTotalMarks = (progCfg.generalQuestionCount || 0) * (progCfg.scoreSettings.equalDistribution || 0);
+        } else if (qConfigType === 'levelBased' || qConfigType === 'selectionLevel') {
+          const counts = qConfigType === 'selectionLevel' ? progCfg.selectionLevelCounts : progCfg.levelBasedCounts;
+          const levelScoring = progCfg.scoreSettings?.levelScoringConfiguration;
+          if (levelScoring) {
+            ['easy', 'medium', 'hard'].forEach(l => {
+              const c = counts?.[l] || 0; if (!c) return;
+              const s = levelScoring[l]; if (!s) return;
+              if (s.type === 'level_specific' && s.marksPerQuestion) progTotalMarks += c * s.marksPerQuestion;
+              else if (s.type === 'question_specific' && s.totalMarks) progTotalMarks += s.totalMarks;
+            });
+          }
+        }
+
+        let backendScoreType;
+        if (qConfigType === 'levelBased' || qConfigType === 'selectionLevel') {
+          backendScoreType = 'levelBasedMarks';
+        } else {
+          switch (progCfg.scoreSettings?.scoreType) {
+            case 'equalDistribution': backendScoreType = 'evenMarks'; break;
+            case 'questionSpecific': backendScoreType = 'separateMarks'; break;
+            case 'levelSpecific': backendScoreType = 'levelBasedMarks'; break;
+            default: backendScoreType = progCfg.scoreSettings?.scoreType || 'evenMarks';
+          }
+        }
+
+        const levelScoringConfig = progCfg.scoreSettings?.levelScoringConfiguration;
+        let levelBasedMarks = progCfg.scoreSettings?.levelBasedMarks || { easy: 0, medium: 0, hard: 0 };
+
+        if (levelScoringConfig && (qConfigType === 'levelBased' || qConfigType === 'selectionLevel')) {
+          const counts = qConfigType === 'selectionLevel' ? progCfg.selectionLevelCounts : progCfg.levelBasedCounts;
+          ['easy', 'medium', 'hard'].forEach(l => {
+            const c = counts?.[l] || 0; if (!c) return;
+            const s = levelScoringConfig[l];
+            if (s?.type === 'level_specific' && s.marksPerQuestion) {
+              levelBasedMarks[l] = s.marksPerQuestion;
+              if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+            } else if (s?.type === 'question_specific' && s.totalMarks) {
+              if (!levelScoringConfig[l].questionCount) levelScoringConfig[l].questionCount = c;
+            }
+          });
+        }
+
+        programmingQuestionConfig = {
+          questionConfigType: backendType || 'general',
+          attemptLimitEnabled: progCfg.attemptLimitEnabled || false,
+          submissionAttempts: progCfg.submissionAttempts || 1,
+          questionFlow: progCfg.questionFlow || 'freeFlow',
+          allowCodeExecution: true,
+          enableTestCases: true,
+          showSampleCases: true,
+          scoreSettings: {
+            scoreType: backendScoreType,
+            evenMarks: progCfg.scoreSettings?.scoreType === 'equalDistribution' ? (progCfg.scoreSettings.equalDistribution || 0) : 0,
+            separateMarks: progCfg.scoreSettings?.questionSpecific || { general: [], levelBased: { easy: [], medium: [], hard: [] } },
+            levelBasedMarks,
+            levelScoringConfiguration: levelScoringConfig,
+            totalMarks: progTotalMarks,
+          },
+        };
+        if (qConfigType === 'general') {
+          programmingQuestionConfig.generalQuestionCount = progCfg.generalQuestionCount || 0;
+          programmingQuestionConfig.generalMarksPerQuestion = progCfg.scoreSettings?.equalDistribution || progCfg.scoreSettings?.evenMarks || 0;
+        } else if (qConfigType === 'levelBased') {
+          programmingQuestionConfig.levelBasedCounts = progCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 };
+        } else if (qConfigType === 'selectionLevel') {
+          programmingQuestionConfig.selectionLevelCounts = progCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 };
+        }
+      }
+
+      // ── Others config ───────────────────────────────────────────────────
+      if (parsedQuesConfig.othersQuestionConfiguration || parsedQuesConfig.othersConfig) {
+        const othersCfg = parsedQuesConfig.othersQuestionConfiguration || parsedQuesConfig.othersConfig;
+        const qConfigType = othersCfg.questionConfigType || 'general';
+
+        let othersTotal = 0;
+        if (qConfigType === 'general') {
+          const evenMarks = othersCfg.generalMarksPerQuestion || othersCfg.scoreSettings?.evenMarks || 0;
+          othersTotal = (othersCfg.generalQuestionCount || 0) * evenMarks;
+        } else {
+          const counts = qConfigType === 'selectionLevel' ? othersCfg.selectionLevelCounts : othersCfg.levelBasedCounts;
+          const levelScoring = othersCfg.scoreSettings?.levelScoringConfiguration;
+          if (levelScoring) {
+            ['easy', 'medium', 'hard'].forEach(l => {
+              const c = counts?.[l] || 0; if (!c) return;
+              const s = levelScoring[l]; if (!s) return;
+              if (s.type === 'level_specific' && s.marksPerQuestion)
+                othersTotal += c * s.marksPerQuestion;
+              else if (s.type === 'question_specific' && s.totalMarks)
+                othersTotal += s.totalMarks;
+            });
+          }
+        }
+
+        if (!othersTotal) {
+          othersTotal = othersCfg.scoreSettings?.totalMarks || parsedExerciseInfo?.totalMarks || existingExercise.exerciseInformation?.totalMarks || 0;
+        }
+
+        othersQuestionConfig = {
+          questionConfigType: qConfigType,
+          ...(qConfigType === 'general' && {
+            generalQuestionCount: othersCfg.generalQuestionCount || 0,
+            generalMarksPerQuestion: othersCfg.generalMarksPerQuestion || othersCfg.scoreSettings?.evenMarks || 0,
+          }),
+          ...(qConfigType === 'levelBased' && {
+            levelBasedCounts: othersCfg.levelBasedCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          ...(qConfigType === 'selectionLevel' && {
+            selectionLevelCounts: othersCfg.selectionLevelCounts || { easy: 0, medium: 0, hard: 0 },
+          }),
+          scoreSettings: {
+            scoreType: qConfigType === 'general' ? 'evenMarks' : 'levelBasedMarks',
+            evenMarks: othersCfg.generalMarksPerQuestion || othersCfg.scoreSettings?.evenMarks || 0,
+            levelBasedMarks: othersCfg.scoreSettings?.levelBasedMarks || { easy: 0, medium: 0, hard: 0 },
+            levelScoringConfiguration: othersCfg.scoreSettings?.levelScoringConfiguration,
+            totalMarks: othersTotal,
+          },
+          questionFlow: othersCfg.questionFlow || 'freeFlow',
+          attemptLimitEnabled: othersCfg.attemptLimitEnabled || false,
+          submissionAttempts: othersCfg.submissionAttempts || 1,
+        };
+        progTotalMarks = othersTotal;
+      }
+
+      // Direct overrides (if frontend sends already-formatted config objects)
+      if (parsedQuesConfig.mcqQuestionConfiguration) {
+        mcqQuestionConfig = parsedQuesConfig.mcqQuestionConfiguration;
+        mcqTotalMarks = mcqQuestionConfig.mcqTotalMarks || 0;
+      }
+      if (parsedQuesConfig.programmingQuestionConfiguration) {
+        programmingQuestionConfig = parsedQuesConfig.programmingQuestionConfiguration;
+        progTotalMarks = programmingQuestionConfig.scoreSettings?.totalMarks || 0;
+      }
+
+      if (parsedQuesConfig.questions) {
+        if (Array.isArray(parsedQuesConfig.questions)) {
+          parsedQuesConfig.questions = parsedQuesConfig.questions.map(q => transformQuestionDescription(q));
+        }
+      }
+    }
+
+    // ── Build updated exercise (spread existing, apply changes) ────────────
+    const updatedExercise = {
+      ...existingExercise,
+      ...(parsedExerciseType && { exerciseType: finalExerciseType }),
+      configurationType: configTypeSettings,
+      updatedAt: new Date(),
+      updatedBy: req.user?.email || 'system',
+      version: (existingExercise.version || 1) + 1,
+    };
+
+    // ── Section-based fields ───────────────────────────────────────────────
+    if (parsedIsSectionBased !== undefined) {
+      updatedExercise.isSectionBased = parsedIsSectionBased;
+    }
+    if (parsedSections.length > 0) {
+      updatedExercise.sections = parsedSections;
+    }
+    if (Object.keys(parsedSectionConfigs).length > 0) {
+      updatedExercise.sectionConfigs = parsedSectionConfigs;
+    }
+    if (parsedSecuritySettings) {
+      updatedExercise.securitySettings = parsedSecuritySettings;
+    }
+
+    // ── Exercise information ───────────────────────────────────────────────
+    if (parsedExerciseInfo) {
+      updatedExercise.exerciseInformation = {
+        ...existingExercise.exerciseInformation,
+        exerciseId: parsedExerciseInfo.exerciseId || existingExercise.exerciseInformation?.exerciseId,
+        exerciseName: parsedExerciseInfo.exerciseName || existingExercise.exerciseInformation?.exerciseName,
+        testType: parsedExerciseInfo.testType || existingExercise.exerciseInformation?.testType || 'mock',
+        description: parsedExerciseInfo.description !== undefined ? parsedExerciseInfo.description : existingExercise.exerciseInformation?.description,
+        exerciseLevel: parsedExerciseInfo.exerciseLevel || existingExercise.exerciseInformation?.exerciseLevel,
+        totalDuration: parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
+        totalMarksMCQ: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
+          ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
+        totalMarksProgramming: finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
+          ? (parsedExerciseInfo.totalMarksProgramming !== undefined ? parsedExerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
+        totalMarks: parsedExerciseInfo.totalMarks || (mcqTotalMarks + progTotalMarks),
+        selectedModule: parsedExerciseInfo.selectedModule || existingExercise.exerciseInformation?.selectedModule,
+        selectedLanguages: parsedExerciseInfo.selectedLanguages || existingExercise.exerciseInformation?.selectedLanguages || [],
+        isSectionBased: parsedIsSectionBased,
+      };
+    }
+
+    // ── Programming settings ───────────────────────────────────────────────
+    if (parsedProgSettings) {
+      updatedExercise.programmingSettings = {
+        selectedModule: parsedProgSettings.selectedModule || existingExercise.programmingSettings?.selectedModule,
+        selectedLanguages: parsedProgSettings.selectedLanguages || existingExercise.programmingSettings?.selectedLanguages || [],
+      };
+    }
+
+    // ── Question configuration ─────────────────────────────────────────────
+    if (parsedQuesConfig) {
+      if (!updatedExercise.questionConfiguration) updatedExercise.questionConfiguration = {};
+      if (mcqQuestionConfig) updatedExercise.questionConfiguration.mcqQuestionConfiguration = mcqQuestionConfig;
+      if (programmingQuestionConfig) updatedExercise.questionConfiguration.programmingQuestionConfiguration = programmingQuestionConfig;
+      if (othersQuestionConfig) updatedExercise.questionConfiguration.othersQuestionConfiguration = othersQuestionConfig;
+      if (parsedQuesConfig.questions) updatedExercise.questions = parsedQuesConfig.questions;
+    }
+
+    // ── Availability period ────────────────────────────────────────────────
+    if (parsedAvailPeriod) {
+      const safeD = (v) => {
+        if (!v || v === 'null' || v === 'undefined') return undefined;
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? undefined : d;
+      };
+      const existAvail = existingExercise.availabilityPeriod || {};
+      const prev = (f) => existAvail[f] ? new Date(existAvail[f]) : undefined;
+
+      const startDate = safeD(parsedAvailPeriod.startDate) || prev('startDate');
+      const endDate = safeD(parsedAvailPeriod.endDate) || prev('endDate');
+      const cutOffEnabled = parsedAvailPeriod.cutOffEnabled !== undefined
+        ? !!parsedAvailPeriod.cutOffEnabled
+        : !!(existAvail.cutOffEnabled ?? false);
+      const cutOffDate = cutOffEnabled
+        ? (safeD(parsedAvailPeriod.cutOffDate) || prev('cutOffDate'))
+        : undefined;
+      const remindEnabled = parsedAvailPeriod.remindGradeByEnabled !== undefined
+        ? !!parsedAvailPeriod.remindGradeByEnabled
+        : !!(existAvail.remindGradeByEnabled ?? false);
+      const remindGradeBy = remindEnabled
+        ? (safeD(parsedAvailPeriod.remindGradeBy) || prev('remindGradeBy'))
+        : undefined;
+      const gracePeriodOn = parsedAvailPeriod.gracePeriodAllowed !== undefined
+        ? !!(parsedAvailPeriod.gracePeriodAllowed || parsedAvailPeriod.gracePeriodEnabled)
+        : !!(existAvail.gracePeriodAllowed || existAvail.gracePeriodEnabled);
+      const gracePeriodDate = gracePeriodOn
+        ? (safeD(parsedAvailPeriod.gracePeriodDate) || prev('gracePeriodDate'))
+        : undefined;
+
+      if (startDate) {
+        const ap = {};
+        ap.startDate = startDate;
+        if (endDate) ap.endDate = endDate;
+        if (cutOffDate) ap.cutOffDate = cutOffDate;
+        ap.cutOffEnabled = cutOffEnabled;
+        if (remindGradeBy) ap.remindGradeBy = remindGradeBy;
+        ap.remindGradeByEnabled = remindEnabled;
+        ap.gracePeriodAllowed = gracePeriodOn;
+        ap.gracePeriodEnabled = gracePeriodOn;
+        if (gracePeriodOn && gracePeriodDate) ap.gracePeriodDate = gracePeriodDate;
+        ap.extendedDays = parsedAvailPeriod.extendedDays ?? existAvail.extendedDays ?? 0;
+        updatedExercise.availabilityPeriod = ap;
+      } else {
+        delete updatedExercise.availabilityPeriod;
+      }
+    }
+
+    // ── Notification settings ──────────────────────────────────────────────
+    if (parsedNotifSettings) {
+      const ex = existingExercise.notificationSettings || existingExercise.notificatonandGradeSettings || {};
+      updatedExercise.notificationSettings = {
+        notifyUsers: parsedNotifSettings.notifyUsers !== undefined ? parsedNotifSettings.notifyUsers : (ex.notifyUsers ?? false),
+        notifyGmail: parsedNotifSettings.notifyGmail !== undefined ? parsedNotifSettings.notifyGmail : (ex.notifyGmail ?? false),
+        notifyWhatsApp: parsedNotifSettings.notifyWhatsApp !== undefined ? parsedNotifSettings.notifyWhatsApp : (ex.notifyWhatsApp ?? false),
+        gradeSheet: parsedNotifSettings.gradeSheet !== undefined ? parsedNotifSettings.gradeSheet : (ex.gradeSheet ?? true),
+        notifyGradersSubmissions: parsedNotifSettings.notifyGradersSubmissions !== undefined ? parsedNotifSettings.notifyGradersSubmissions : (ex.notifyGradersSubmissions ?? false),
+        notifyGradersLateSubmissions: parsedNotifSettings.notifyGradersLateSubmissions !== undefined ? parsedNotifSettings.notifyGradersLateSubmissions : (ex.notifyGradersLateSubmissions ?? false),
+        notifyStudent: parsedNotifSettings.notifyStudent !== undefined ? parsedNotifSettings.notifyStudent : (ex.notifyStudent ?? true),
+      };
+      updatedExercise.notificatonandGradeSettings = {
+        notifyUsers: updatedExercise.notificationSettings.notifyUsers,
+        notifyGmail: updatedExercise.notificationSettings.notifyGmail,
+        notifyWhatsApp: updatedExercise.notificationSettings.notifyWhatsApp,
+        gradeSheet: updatedExercise.notificationSettings.gradeSheet,
+      };
+    }
+
+    // ── Grade settings (include computeAutoGrades if you have it) ──────────
+    if (parsedGradeSettings !== null) {
+      const exGrade = existingExercise.gradeSettings || {};
+      const merged = {
+        mcqGrade: parsedGradeSettings?.mcqGrade !== undefined ? Number(parsedGradeSettings.mcqGrade) : exGrade.mcqGrade,
+        mcqGradeToPass: parsedGradeSettings?.mcqGradeToPass !== undefined
+          ? (parsedGradeSettings.mcqGradeToPass !== null ? Number(parsedGradeSettings.mcqGradeToPass) : null)
+          : exGrade.mcqGradeToPass,
+        programmingGrade: parsedGradeSettings?.programmingGrade !== undefined ? Number(parsedGradeSettings.programmingGrade) : exGrade.programmingGrade,
+        programmingGradeToPass: parsedGradeSettings?.programmingGradeToPass !== undefined
+          ? (parsedGradeSettings.programmingGradeToPass !== null ? Number(parsedGradeSettings.programmingGradeToPass) : null)
+          : exGrade.programmingGradeToPass,
+        combinedGrade: parsedGradeSettings?.combinedGrade !== undefined ? Number(parsedGradeSettings.combinedGrade) : exGrade.combinedGrade,
+        combinedGradeToPass: parsedGradeSettings?.combinedGradeToPass !== undefined
+          ? (parsedGradeSettings.combinedGradeToPass !== null ? Number(parsedGradeSettings.combinedGradeToPass) : null)
+          : exGrade.combinedGradeToPass,
+        separateMarks: parsedGradeSettings?.separateMarks !== undefined ? parsedGradeSettings.separateMarks : (exGrade.separateMarks ?? false),
+      };
+      updatedExercise.gradeSettings = merged;
+    }
+
+    // ── Additional options ─────────────────────────────────────────────────
+    if (parsedAdditOptions) {
+      const exAddit = existingExercise.additionalOptions || {};
+      updatedExercise.additionalOptions = {
+        anonymousSubmissions: parsedAdditOptions.anonymousSubmissions !== undefined ? parsedAdditOptions.anonymousSubmissions : (exAddit.anonymousSubmissions ?? false),
+        hideGraderIdentity: parsedAdditOptions.hideGraderIdentity !== undefined ? parsedAdditOptions.hideGraderIdentity : (exAddit.hideGraderIdentity ?? false),
+      };
+    }
+
+    // ── Persist ────────────────────────────────────────────────────────────
+    const cleanExercise = JSON.parse(JSON.stringify(updatedExercise));
+    exercises[exerciseIndex] = cleanExercise;
+    entity.pedagogy[tabType].set(subcategory, exercises);
+    entity.markModified(`pedagogy.${tabType}`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    // ── Build response config ──────────────────────────────────────────────
+    let responseConfig = {};
+    if (finalExerciseType === 'MCQ') responseConfig = { mode: 'mcq', config: mcqQuestionConfig };
+    else if (finalExerciseType === 'Programming') responseConfig = { mode: 'programming', config: programmingQuestionConfig };
+    else if (finalExerciseType === 'Other') responseConfig = { mode: 'other', config: othersQuestionConfig };
+    else if (finalExerciseType === 'Combined') responseConfig = { mode: 'combined', mcqConfig: mcqQuestionConfig, programmingConfig: programmingQuestionConfig };
+
+    return res.status(200).json({
+      message: [{ key: 'success', value: `Exercise updated successfully in ${subcategory}` }],
+      data: {
+        exercise: cleanExercise,
+        configuration: responseConfig,
+        gradeSettings: cleanExercise.gradeSettings,
+        notificationSettings: cleanExercise.notificationSettings,
+        additionalOptions: cleanExercise.additionalOptions,
+        securitySettings: cleanExercise.securitySettings,
+        subcategory,
+        tabType,
+        entityType: type,
+        entityId: id,
+        exerciseId,
+        totalExercises: exercises.length,
+        location: { section: tabType, subcategory, index: exerciseIndex },
+      },
+    });
+
+  } catch (err) {
+    console.error('❌ Update exercise error:', err);
+    console.error('Error stack:', err.stack);
+    res.status(500).json({
+      message: [{ key: 'error', value: `Internal server error: ${err.message}` }],
+    });
+  }
+};
+
+// GET YOU DO EXERCISES - For Assessment component with Pagination
+exports.getYouDoExercises = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const {
+      tabType,
+      subcategory,
+      page = 1,
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+
+    // Validate entity type
+    if (!modelMap[type]) {
+      return res.status(400).json({
+        message: [{ key: "error", value: `Invalid entity type: ${type}` }]
+      });
+    }
+
+    const { model } = modelMap[type];
+    const entity = await model.findById(id);
+
+    if (!entity) {
+      return res.status(404).json({
+        message: [{ key: "error", value: `${type} not found` }]
+      });
+    }
+
+    // Check if pedagogy exists
+    if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+      return res.json({
+        message: [{ key: "success", value: "No exercises found" }],
+        data: {
+          exercises: [],
+          tabType: tabType,
+          subcategory: subcategory,
+          total: 0,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: 0
+        }
+      });
+    }
+
+    // Get exercises for specific subcategory
+    let exercises = [];
+    if (subcategory) {
+      exercises = entity.pedagogy[tabType].get(subcategory) || [];
+    } else {
+      // Return all exercises from all subcategories in tabType
+      const allExercises = [];
+      entity.pedagogy[tabType].forEach((exArray, subcat) => {
+        if (Array.isArray(exArray)) {
+          exArray.forEach(ex => {
+            const exerciseObj = ex.toObject ? ex.toObject() : { ...ex };
+            allExercises.push({
+              ...exerciseObj,
+              subcategory: subcat
+            });
+          });
+        }
+      });
+      exercises = allExercises;
+    }
+
+    // Convert to array and add timestamps for sorting
+    // NOTE: must call .toObject() on Mongoose subdocs — spreading a Document directly
+    // copies internal props ($__, _doc, ...) instead of the actual data, which made
+    // exerciseInformation.exerciseName render as "Untitled Assessment" on the client.
+    let exercisesArray = exercises.map(ex => {
+      const obj = ex && typeof ex.toObject === 'function' ? ex.toObject() : { ...ex };
+      return {
+        ...obj,
+        sortCreatedAt: obj.createdAt ? new Date(obj.createdAt).getTime() : 0,
+        sortUpdatedAt: obj.updatedAt ? new Date(obj.updatedAt).getTime() : 0,
+      };
+    });
+
+    // Sort exercises (descending order by default - latest first)
+    exercisesArray.sort((a, b) => {
+      let aValue, bValue;
+
+      switch (sortBy) {
+        case 'createdAt':
+          aValue = a.sortCreatedAt;
+          bValue = b.sortCreatedAt;
+          break;
+        case 'updatedAt':
+          aValue = a.sortUpdatedAt;
+          bValue = b.sortUpdatedAt;
+          break;
+        case 'exerciseName':
+          aValue = a.exerciseInformation?.exerciseName || '';
+          bValue = b.exerciseInformation?.exerciseName || '';
+          return sortOrder === 'desc'
+            ? bValue.localeCompare(aValue)
+            : aValue.localeCompare(bValue);
+        case 'totalMarks':
+          aValue = a.exerciseInformation?.totalMarks || 0;
+          bValue = b.exerciseInformation?.totalMarks || 0;
+          break;
+        default:
+          aValue = a.sortCreatedAt;
+          bValue = b.sortCreatedAt;
+      }
+
+      if (sortOrder === 'desc') {
+        return bValue - aValue;
+      } else {
+        return aValue - bValue;
+      }
+    });
+
+    // Calculate pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const total = exercisesArray.length;
+    const totalPages = Math.ceil(total / limitNum);
+    const startIndex = (pageNum - 1) * limitNum;
+    const endIndex = startIndex + limitNum;
+
+    // Get paginated exercises
+    const paginatedExercises = exercisesArray.slice(startIndex, endIndex);
+
+    // Remove temporary sort fields from response
+    const cleanExercises = paginatedExercises.map(({ sortCreatedAt, sortUpdatedAt, ...rest }) => rest);
+
+    return res.json({
+      message: [{ key: "success", value: "Exercises retrieved successfully" }],
+      data: {
+        exercises: cleanExercises,
+        tabType: tabType,
+        subcategory: subcategory,
+        pagination: {
+          total: total,
+          page: pageNum,
+          limit: limitNum,
+          totalPages: totalPages,
+          hasNextPage: pageNum < totalPages,
+          hasPrevPage: pageNum > 1
+        },
+        sorting: {
+          sortBy: sortBy,
+          sortOrder: sortOrder
+        },
+        entityType: type,
+        entityId: id
+      }
+    });
+
+  } catch (err) {
+    console.error("❌ Get YouDo exercises error:", err);
+    res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }]
+    });
   }
 };

@@ -46,18 +46,15 @@ const descriptionSchema = new mongoose.Schema(
 );
 
 // ─── OPTION SCHEMA ────────────────────────────────────────────────────────────
-// FIX: text is no longer required — non-option question types (matching, ordering,
-// numeric, true-false, short-answer, essay) send mcqQuestionOptions: []
-// so Mongoose must not enforce text on empty arrays.
 const optionSchema = new mongoose.Schema({
-  text: { type: String, default: "" },   // was required:true — removed
+  text: { type: String, default: "" },
   isCorrect: { type: Boolean, default: false },
   imageUrl: { type: String, default: null },
   imageAlignment: { type: String, enum: ["left", "center", "right"], default: "left" },
   imageSizePercent: { type: Number, default: 100 },
 });
 
-// ─── MATCHING PAIR SCHEMA (NEW) ───────────────────────────────────────────────
+// ─── MATCHING PAIR SCHEMA ─────────────────────────────────────────────────────
 const matchingPairSchema = new mongoose.Schema(
   {
     left: { type: String, default: "" },
@@ -66,7 +63,7 @@ const matchingPairSchema = new mongoose.Schema(
   { _id: true }
 );
 
-// ─── ORDERING ITEM SCHEMA (NEW) ───────────────────────────────────────────────
+// ─── ORDERING ITEM SCHEMA ─────────────────────────────────────────────────────
 const orderingItemSchema = new mongoose.Schema(
   {
     text: { type: String, default: "" },
@@ -75,110 +72,56 @@ const orderingItemSchema = new mongoose.Schema(
   { _id: true }
 );
 
-// ─── QUESTION SCHEMA ──────────────────────────────────────────────────────────
-const questionSchema = new mongoose.Schema(
+// ─── SECURITY SETTINGS SCHEMA ─────────────────────────────────────────────────
+const securitySettingsSchema = new mongoose.Schema(
   {
-    questionType: { type: String },
-
-    // ── MCQ Fields ────────────────────────────────────────────────────────────
-    mcqQuestionTitle: { type: mongoose.Schema.Types.Mixed },
-    mcqQuestionDescription: { type: String, default: "" },
-
-    // FIX: Extended enum — was ['multiple_choice','dropdown','short_answer','essay','checkboxes']
-    mcqQuestionType: {
-      type: String,
-      enum: [
-        "multiple_choice",  // single correct answer (radio style)
-        "multiple_select",  // multiple correct answers (checkbox style)
-        "true_false",       // true / false
-        "short_answer",     // short text answer
-        "essay",            // long-form paragraph
-        "dropdown",         // dropdown select
-        "matching",         // left-right matching pairs
-        "ordering",         // sequence / ordering
-        "numeric",          // numeric answer with optional tolerance
-        "checkboxes",       // legacy alias → maps to multiple_select on frontend
-      ],
-    },
-
-    // FIX: No default difficulty — teacher must explicitly choose
-    mcqQuestionDifficulty: {
-      type: String,
-      enum: ["easy", "medium", "hard"],
-      // default removed intentionally
-    },
-
-    mcqQuestionScore: { type: Number },
-    mcqQuestionTimeLimit: { type: Number },
-    isActive: { type: Boolean, default: true },
-    mcqQuestionOptionsPerRow: { type: Number },
-    mcqQuestionRequired: { type: Boolean },
-    hasOtherOption: { type: Boolean, default: false },
-    hasExplanation: { type: Boolean, default: false },
-
-    // Options — only populated for multiple_choice, multiple_select, dropdown, checkboxes
-    // Empty array [] is sent for all other types to avoid text-required validation errors
-    mcqQuestionOptions: [optionSchema],
-    mcqQuestionCorrectAnswers: [{ type: String }],
-
-    // Image fields
-    mcqQuestionImageUrl: { type: String, default: null },
-    mcqQuestionImageAlignment: { type: String, enum: ["left", "center", "right"] },
-    mcqQuestionImageSizePercent: { type: Number },
-
-    // ── NEW: Type-specific answer fields ──────────────────────────────────────
-
-    // true_false answer
-    trueFalseAnswer: { type: Boolean, default: null },
-
-    // short_answer correct answer text
-    shortAnswer: { type: String, default: "" },
-
-    // numeric answer + optional tolerance band
-    numericAnswer: { type: Number, default: null },
-    numericTolerance: { type: Number, default: null },
-
-    // matching pairs array
-    matchingPairs: [matchingPairSchema],
-
-    // ordering items array (correct sequence)
-    orderingItems: [orderingItemSchema],
-    // sequence within exercise
-    sequence: { type: Number, default: 0 },
-
-    // ── Programming Fields ────────────────────────────────────────────────────
-    // programmingQuestionTitle stores rich content blocks (text/image/code)
-    // exactly like mcqQuestionTitle — Mixed so it accepts array or string
-    programmingQuestionDescription: { type: mongoose.Schema.Types.Mixed },
-    title: { type: mongoose.Schema.Types.Mixed },
-    description: { type: mongoose.Schema.Types.Mixed, default: { text: "" } },
-    difficulty: { type: String },
-    sampleInput: { type: String },
-    sampleOutput: { type: String },
-    score: { type: Number, min: 0, max: 100 },
-    constraints: [{ type: String }],
-    hints: [hintSchema],
-    testCases: [testCaseSchema],
-    solutions: solutionSchema,
-    timeLimit: { type: Number, min: 0, max: 10000 },
-    memoryLimit: { type: Number, min: 0, max: 1024 },
-
-
-
-
-    // ── Database Fields ────────────────────────────────────────────────────────────
-    sampleQuery: { type: String, default: '' },
-    sampleResult: { type: mongoose.Schema.Types.Mixed, default: [] }, // array of content blocks
-    isDatabase: { type: Boolean, default: false },
-    moduleType: { type: String }, // 'Database', 'CoreProgramming', etc.
-    databaseType: { type: String }, // kept for legacy but no longer required from frontend
-    points: { type: Number, min: 0, max: 100 },
+    // Basic restrictions
+    preventCopyPaste: { type: Boolean, default: true },
+    preventRightClick: { type: Boolean, default: true },
+    preventPrinting: { type: Boolean, default: true },
+    preventScreenshot: { type: Boolean, default: true },
+    preventScreenRecording: { type: Boolean, default: true },
+    
+    // Browser restrictions
+    requireFullscreen: { type: Boolean, default: true },
+    preventTabSwitch: { type: Boolean, default: true },
+    preventBrowserClose: { type: Boolean, default: true },
+    preventDevTools: { type: Boolean, default: true },
+    
+    // Navigation restrictions
+    preventBackNavigation: { type: Boolean, default: true },
+    preventRefresh: { type: Boolean, default: true },
+    preventUrlChange: { type: Boolean, default: false },
+    
+    // Time restrictions
+    autoSubmitOnTimeout: { type: Boolean, default: true },
+    warnBeforeTimeout: { type: Boolean, default: true },
+    warningSeconds: { type: Number, default: 30 },
+    
+    // Identity verification
+    enableFaceVerification: { type: Boolean, default: false },
+    enableIdVerification: { type: Boolean, default: false },
+    enableVoiceVerification: { type: Boolean, default: false },
+    captureIntervalSeconds: { type: Number, default: 60 },
+    
+    // Network restrictions
+    blockOtherIPs: { type: Boolean, default: false },
+    allowedIPs: [{ type: String }],
+    singleDeviceOnly: { type: Boolean, default: false },
+    
+    // Question restrictions
+    shuffleQuestions: { type: Boolean, default: true },
+    shuffleOptions: { type: Boolean, default: true },
+    randomizeQuestionOrder: { type: Boolean, default: false },
+    preventQuestionBacktrack: { type: Boolean, default: false },
+    
+    // Additional security
+    sessionTimeoutMinutes: { type: Number, default: 30 },
+    maxAttempts: { type: Number, default: 1 },
+    graceAttempts: { type: Number, default: 0 },
+    cooldownMinutes: { type: Number, default: 30 },
   },
-  {
-    _id: true,
-    strict: false,
-    minimize: false,
-  }
+  { _id: false }
 );
 
 // ─── SCORE SETTINGS SCHEMA ────────────────────────────────────────────────────
@@ -227,6 +170,181 @@ const scoreSettingsSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ─── SECTION ITEM SCHEMA ──────────────────────────────────────────────────────
+const sectionItemSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    name: { type: String, required: true },
+    order: { type: Number, default: 1 },
+    description: { type: String, default: "" },
+  },
+  { _id: false }
+);
+
+// ─── SECTION MCQ CONFIG SCHEMA ────────────────────────────────────────────────
+const sectionMCQConfigSchema = new mongoose.Schema(
+  {
+    generalQuestionCount: { type: Number, default: 0 },
+    scoreSettings: {
+      scoreType: { type: String, enum: ["equalDistribution", "questionSpecific"], default: "equalDistribution" },
+      equalDistribution: { type: Number, default: 0 },
+      totalMarks: { type: Number, default: 0 },
+    },
+    attemptLimitEnabled: { type: Boolean, default: false },
+    submissionAttempts: { type: Number, default: 1 },
+  },
+  { _id: false }
+);
+
+// ─── SECTION PROGRAMMING CONFIG SCHEMA ────────────────────────────────────────
+const sectionProgrammingConfigSchema = new mongoose.Schema(
+  {
+    questionConfigType: { type: String, enum: ["general", "levelBased", "selectionLevel"], default: "general" },
+    generalQuestionCount: { type: Number, default: 0 },
+    levelBasedCounts: {
+      easy: { type: Number, default: 0 },
+      medium: { type: Number, default: 0 },
+      hard: { type: Number, default: 0 },
+    },
+    selectionLevelCounts: {
+      easy: { type: Number, default: 0 },
+      medium: { type: Number, default: 0 },
+      hard: { type: Number, default: 0 },
+    },
+    levelScoring: {
+      easy: {
+        type: { type: String, enum: ["level_specific", "question_specific"], default: "level_specific" },
+        marksPerQuestion: { type: Number, default: 0 },
+        totalMarks: { type: Number, default: 0 },
+      },
+      medium: {
+        type: { type: String, enum: ["level_specific", "question_specific"], default: "level_specific" },
+        marksPerQuestion: { type: Number, default: 0 },
+        totalMarks: { type: Number, default: 0 },
+      },
+      hard: {
+        type: { type: String, enum: ["level_specific", "question_specific"], default: "level_specific" },
+        marksPerQuestion: { type: Number, default: 0 },
+        totalMarks: { type: Number, default: 0 },
+      },
+    },
+    scoreSettings: {
+      equalDistribution: { type: Number, default: 0 },
+    },
+    questionFlow: { type: String, enum: ["freeFlow", "controlled"], default: "freeFlow" },
+    attemptLimitEnabled: { type: Boolean, default: false },
+    submissionAttempts: { type: Number, default: 1 },
+  },
+  { _id: false }
+);
+
+// ─── SECTION CONFIG SCHEMA ────────────────────────────────────────────────────
+const sectionConfigSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    name: { type: String, required: true },
+    exerciseType: { type: String, enum: ["MCQ", "Programming", "Combined", "Other", ""], default: "" },
+    difficulty: { type: String, enum: ["easy", "medium", "hard"], default: "medium" },
+    totalMarks: { type: Number, default: 0 },
+    sectionNumber: { type: Number, default: 1 },
+    mcqSectionMarks: { type: Number, default: 0 },
+    programmingSectionMarks: { type: Number, default: 0 },
+    mcqConfig: { type: sectionMCQConfigSchema },
+    programmingConfig: { type: sectionProgrammingConfigSchema },
+  },
+  { _id: false }
+);
+
+// ─── QUESTION SCHEMA (UPDATED) ────────────────────────────────────────────────
+const questionSchema = new mongoose.Schema(
+  {
+    questionType: { type: String },
+
+    // ── NEW: Section linking field ────────────────────────────────────────────
+    sectionId: { type: String, default: null },
+
+    // ── MCQ Fields ────────────────────────────────────────────────────────────
+    mcqQuestionTitle: { type: mongoose.Schema.Types.Mixed },
+    mcqQuestionDescription: { type: String, default: "" },
+
+    mcqQuestionType: {
+      type: String,
+      enum: [
+        "multiple_choice",
+        "multiple_select",
+        "true_false",
+        "short_answer",
+        "essay",
+        "dropdown",
+        "matching",
+        "ordering",
+        "numeric",
+        "checkboxes",
+      ],
+    },
+
+    mcqQuestionDifficulty: {
+      type: String,
+      enum: ["easy", "medium", "hard"],
+    },
+
+    mcqQuestionScore: { type: Number },
+    mcqQuestionTimeLimit: { type: Number },
+    isActive: { type: Boolean, default: true },
+    mcqQuestionOptionsPerRow: { type: Number },
+    mcqQuestionRequired: { type: Boolean },
+    hasOtherOption: { type: Boolean, default: false },
+    hasExplanation: { type: Boolean, default: false },
+
+    mcqQuestionOptions: [optionSchema],
+    mcqQuestionCorrectAnswers: [{ type: String }],
+
+    // Image fields
+    mcqQuestionImageUrl: { type: String, default: null },
+    mcqQuestionImageAlignment: { type: String, enum: ["left", "center", "right"] },
+    mcqQuestionImageSizePercent: { type: Number },
+
+    // ── Type-specific answer fields ──────────────────────────────────────────
+    trueFalseAnswer: { type: Boolean, default: null },
+    shortAnswer: { type: String, default: "" },
+    numericAnswer: { type: Number, default: null },
+    numericTolerance: { type: Number, default: null },
+    matchingPairs: [matchingPairSchema],
+    orderingItems: [orderingItemSchema],
+    
+    // sequence within exercise
+    sequence: { type: Number, default: 0 },
+
+    // ── Programming Fields ────────────────────────────────────────────────────
+    programmingQuestionDescription: { type: mongoose.Schema.Types.Mixed },
+    title: { type: mongoose.Schema.Types.Mixed },
+    description: { type: mongoose.Schema.Types.Mixed, default: { text: "" } },
+    difficulty: { type: String },
+    sampleInput: { type: String },
+    sampleOutput: { type: String },
+    score: { type: Number, min: 0, max: 100 },
+    constraints: [{ type: String }],
+    hints: [hintSchema],
+    testCases: [testCaseSchema],
+    solutions: solutionSchema,
+    timeLimit: { type: Number, min: 0, max: 10000 },
+    memoryLimit: { type: Number, min: 0, max: 1024 },
+
+    // ── Database Fields ───────────────────────────────────────────────────────
+    sampleQuery: { type: String, default: '' },
+    sampleResult: { type: mongoose.Schema.Types.Mixed, default: [] },
+    isDatabase: { type: Boolean, default: false },
+    moduleType: { type: String },
+    databaseType: { type: String },
+    points: { type: Number, min: 0, max: 100 },
+  },
+  {
+    _id: true,
+    strict: false,
+    minimize: false,
+  }
+);
+
 // ─── NOTIFICATION & GRADE SCHEMA ──────────────────────────────────────────────
 const notificationGradeSchema = new mongoose.Schema(
   {
@@ -238,26 +356,21 @@ const notificationGradeSchema = new mongoose.Schema(
   { _id: false }
 );
 
-
-
+// ─── AVAILABILITY PERIOD SCHEMA ───────────────────────────────────────────────
 const availabilityPeriodSchema = new mongoose.Schema({
   startDate: { type: Date },
-  // End date — actual submission deadline shown to students (replaces dueDate)
   endDate: { type: Date },
-  // Cut-off date — optional hard late boundary (must be >= endDate)
   cutOffDate: { type: Date },
   cutOffEnabled: { type: Boolean, default: false },
-  // Remind grader by
   remindGradeBy: { type: Date },
   remindGradeByEnabled: { type: Boolean, default: false },
-  // Grace period
   gracePeriodAllowed: { type: Boolean, default: false },
   gracePeriodEnabled: { type: Boolean, default: false },
   gracePeriodDate: { type: Date },
   extendedDays: { type: Number, default: 0 },
 });
 
-// ─── NOTIFICATION SETTINGS SCHEMA (NEW — separate from grades)
+// ─── NOTIFICATION SETTINGS SCHEMA ─────────────────────────────────────────────
 const notificationSettingsSchema = new mongoose.Schema(
   {
     notifyUsers: { type: Boolean, default: false },
@@ -271,25 +384,31 @@ const notificationSettingsSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// ─── GRADE SETTINGS SCHEMA (NEW)
+// ─── GRADE SETTINGS SCHEMA ────────────────────────────────────────────────────
 const gradeSettingsSchema = new mongoose.Schema(
   {
-    // MCQ
-    mcqGrade: { type: Number, default: null },   // auto = totalMarks (MCQ) or totalMarksMCQ (Combined)
-    mcqGradeToPass: { type: Number, default: null },   // user-entered
-    // Programming
-    programmingGrade: { type: Number, default: null },   // auto = totalMarksProgramming or user for pure Programming
-    programmingGradeToPass: { type: Number, default: null },   // user-entered
-    // Combined (no separateMarks)
-    combinedGrade: { type: Number, default: null },   // auto = totalMarksMCQ + totalMarksProgramming
-    combinedGradeToPass: { type: Number, default: null },   // user-entered
-    // Toggle
+    mcqGrade: { type: Number, default: null },
+    mcqGradeToPass: { type: Number, default: null },
+    programmingGrade: { type: Number, default: null },
+    programmingGradeToPass: { type: Number, default: null },
+    combinedGrade: { type: Number, default: null },
+    combinedGradeToPass: { type: Number, default: null },
     separateMarks: { type: Boolean, default: false },
+
+    // Difficulty-based pass marks
+    difficultyPassEnabled: { type: Boolean, default: false },
+    easyPassMark: { type: Number, default: null },
+    mediumPassMark: { type: Number, default: null },
+    hardPassMark: { type: Number, default: null },
+
+    // Overall mark to pass (optional)
+    overallMarkToPassEnabled: { type: Boolean, default: false },
+    overallMarkToPass: { type: Number, default: null },
   },
   { _id: false }
 );
 
-// ─── ADDITIONAL OPTIONS SCHEMA (NEW)
+// ─── ADDITIONAL OPTIONS SCHEMA ────────────────────────────────────────────────
 const additionalOptionsSchema = new mongoose.Schema(
   {
     anonymousSubmissions: { type: Boolean, default: false },
@@ -297,17 +416,6 @@ const additionalOptionsSchema = new mongoose.Schema(
   },
   { _id: false }
 );
-
-
-
-// ─── AVAILABILITY PERIOD SCHEMA ───────────────────────────────────────────────
-// const availabilityPeriodSchema = new mongoose.Schema({
-//   startDate:           { type: Date },
-//   endDate:             { type: Date },
-//   gracePeriodAllowed:  { type: Boolean },
-//   gracePeriodDate:     { type: Date },
-//   extendedDays:        { type: Number},
-// });
 
 // ─── MCQ QUESTION CONFIG SCHEMA ───────────────────────────────────────────────
 const mcqQuestionConfigSchema = new mongoose.Schema(
@@ -349,13 +457,13 @@ const programmingQuestionConfigSchema = new mongoose.Schema(
     attemptLimitEnabled: { type: Boolean, default: false },
     submissionAttempts: { type: Number, default: 1, min: 1, max: 10 },
     questionFlow: { type: String, enum: ["freeFlow", "controlled"], default: "freeFlow" },
+    compilerFileMode: { type: String, enum: ["single", "multiple"], default: "single" },
     allowCodeExecution: { type: Boolean, default: true },
     enableTestCases: { type: Boolean, default: true },
     showSampleCases: { type: Boolean, default: true },
   },
   { _id: false }
 );
-
 
 // ─── PROGRAMMING SETTINGS SCHEMA ─────────────────────────────────────────────
 const programmingSettingsSchema = new mongoose.Schema({
@@ -390,24 +498,25 @@ const configurationTypeSettSchema = new mongoose.Schema({
 // ─── OTHERS QUESTION CONFIG SCHEMA ───────────────────────────────────────────
 const othersQuestionConfigSchema = new mongoose.Schema(
   {
-    totalQuestions: { type: Number, default: 0, min: 0 },
-    scoringType: {
+    questionConfigType: {
       type: String,
-      enum: ["equalDistribution", "questionSpecific", "levelBased"],
-      default: "equalDistribution",
+      enum: ["general", "levelBased", "selectionLevel"],
+      default: "general",
     },
-    marksPerQuestion: { type: Number, default: 0, min: 0 },
-    totalMarks: { type: Number, default: 0, min: 0 },
+    generalQuestionCount: { type: Number, default: 0, min: 0, max: 100 },
+    generalMarksPerQuestion: { type: Number, default: 0, min: 0 },
     levelBasedCounts: {
-      easy:   { type: Number, default: 0, min: 0 },
-      medium: { type: Number, default: 0, min: 0 },
-      hard:   { type: Number, default: 0, min: 0 },
+      easy:   { type: Number, default: 0, min: 0, max: 100 },
+      medium: { type: Number, default: 0, min: 0, max: 100 },
+      hard:   { type: Number, default: 0, min: 0, max: 100 },
     },
-    levelBasedMarks: {
-      easy:   { type: Number, default: 0, min: 0 },
-      medium: { type: Number, default: 0, min: 0 },
-      hard:   { type: Number, default: 0, min: 0 },
+    selectionLevelCounts: {
+      easy:   { type: Number, default: 0, min: 0, max: 100 },
+      medium: { type: Number, default: 0, min: 0, max: 100 },
+      hard:   { type: Number, default: 0, min: 0, max: 100 },
     },
+    scoreSettings: { type: scoreSettingsSchema },
+    questionFlow: { type: String, enum: ["freeFlow", "controlled"], default: "freeFlow" },
     attemptLimitEnabled: { type: Boolean, default: false },
     submissionAttempts: { type: Number, default: 1, min: 1, max: 10 },
   },
@@ -424,10 +533,12 @@ const questionConfigurationSchema = new mongoose.Schema(
   { _id: false, strict: false }
 );
 
-// ─── EXERCISE SCHEMA ──────────────────────────────────────────────────────────
+// ─── EXERCISE SCHEMA (UPDATED) ────────────────────────────────────────────────
 const exerciseSchema = new mongoose.Schema(
   {
     exerciseType: { type: String },
+    isGraded: { type: Boolean, default: true },
+    stepsSaved: { type: [String], default: [] },
     configurationType: configurationTypeSettSchema,
     programmingSettings: { type: programmingSettingsSchema },
     exerciseInformation: exerciseInformationSchema,
@@ -436,8 +547,13 @@ const exerciseSchema = new mongoose.Schema(
     notificationSettings: { type: notificationSettingsSchema },
     gradeSettings: { type: gradeSettingsSchema },
     additionalOptions: { type: additionalOptionsSchema },
+    
+    // ── NEW: Sections array for Part A, Part B, etc. ──────────────────────────
+    sections: [sectionConfigSchema],
+    
     // keep legacy field so old data still reads correctly
     questions: [questionSchema],
+    
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
     createdBy: String,
@@ -523,7 +639,7 @@ const tagSchema = new mongoose.Schema({
 
 // ─── FILE MCQ OPTION SCHEMA ───────────────────────────────────────────────────
 const fileMCOptionSchema = new mongoose.Schema({
-  text: { type: String, default: "" },  // also changed from required to default
+  text: { type: String, default: "" },
   isCorrect: { type: Boolean, default: false },
   imageUrl: { type: String, default: null },
   imageAlignment: { type: String, enum: ["left", "center", "right"] },
@@ -547,13 +663,12 @@ const fileMcqQuestionSchema = new mongoose.Schema(
           "multiple_choice", "multiple_select", "true_false",
           "short_answer", "essay", "dropdown",
           "matching", "ordering", "numeric",
-          "checkboxes", // legacy
+          "checkboxes",
         ],
       },
       mcqQuestionOptionsPerRow: { type: Number },
       mcqQuestionRequired: { type: Boolean },
       explanation: { type: String, default: "" },
-      // New answer fields
       trueFalseAnswer: { type: Boolean, default: null },
       shortAnswer: { type: String, default: "" },
       numericAnswer: { type: Number, default: null },
@@ -588,14 +703,12 @@ const fileSchema = new mongoose.Schema(
   { _id: true, strict: false }
 );
 
-
 // ─── Reusable Page Document Schema ───────────────────────────────────────────
 const pageDocSchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
     blocks: { type: mongoose.Schema.Types.Mixed, default: [] },
     combinedCode: { type: String, default: "" },
-    // Stores each page's data for multi-page documents
     pagesData: [{
       id: { type: String },
       name: { type: String },
@@ -607,19 +720,30 @@ const pageDocSchema = new mongoose.Schema(
     version: { type: String, default: "1.0.0" },
     folderId: { type: String, default: null },
     folderPath: [{ type: String }],
+    // Group context — set when the page was created from a group's "Add"
+    // action. Mirrors the same fields used on files/folders so a page can
+    // be rendered inside its group row alongside the rest of the group.
+    groupId: { type: String, default: null },
+    groupName: { type: String, default: null },
     createdBy: { type: String },
     updatedBy: { type: String },
   },
   { _id: true, timestamps: true }
-)
+);
 
 // ─── FOLDER SCHEMA ────────────────────────────────────────────────────────────
 const folderSchema = new mongoose.Schema(
   {
     name: { type: String },
     files: [fileSchema],
-    subfolders: { type: mongoose.Schema.Types.Mixed, default: [] },  // ← FIX
+    subfolders: { type: mongoose.Schema.Types.Mixed, default: [] },
     tags: [tagSchema],
+    parentGroupId: { type: String, default: null },
+    groupName: { type: String, default: null },
+    groupDescription: { type: String, default: null },
+    uploadedAt: { type: Date, default: Date.now },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
     pages: [
       {
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
@@ -631,6 +755,10 @@ const folderSchema = new mongoose.Schema(
         version: { type: String, default: "1.0.0" },
         folderId: { type: String, default: null },
         folderPath: [{ type: String }],
+        // Group context — a folder belongs to a group when parentGroupId is
+        // set; a page created inside such a folder inherits the same group.
+        groupId: { type: String, default: null },
+        groupName: { type: String, default: null },
         createdBy: { type: String },
         updatedBy: { type: String },
       },
@@ -656,6 +784,10 @@ const pedagogyElementSchema = new mongoose.Schema(
         version: { type: String, default: "1.0.0" },
         folderId: { type: String, default: null },
         folderPath: [{ type: String }],
+        // Group context — populated when the page was created from a
+        // group's "Add" action so the UI can render it inside that group.
+        groupId: { type: String, default: null },
+        groupName: { type: String, default: null },
         createdBy: { type: String },
         updatedBy: { type: String },
       },
@@ -669,7 +801,7 @@ const pedagogySchema = new mongoose.Schema(
   {
     I_Do: { type: Map, of: pedagogyElementSchema, default: {} },
     We_Do: { type: Map, of: [exerciseSchema], default: {} },
-    You_Do: { type: Map, of: [exerciseSchema], default: {} },
+    You_Do: { type: Map, of: mongoose.Schema.Types.Mixed, default: {} },
   },
   { strict: false }
 );

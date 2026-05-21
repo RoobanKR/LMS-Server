@@ -244,25 +244,6 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: String,
     enum: ['single-file', 'multi-file'],
     default: 'single-file'
-  },
-  testSubmissions: {
-    type: Number,
-    default: 0
-  },
-  userAttempts: {
-    type: Number,
-    default: 0,
-    description: "Total number of times user has attempted this exercise"
-  },
-  lastTestSubmittedAt: {
-    type: Date,
-    default: null,
-    description: "Timestamp of last full Submit Exercise — used for double-click guard"
-  },
-  lateSubmission: {
-    type: Boolean,
-    default: false,
-    description: "True if the most recent Submit Exercise happened after endDate but inside the cutOff window"
   }
 }, {
   timestamps: true
@@ -292,29 +273,21 @@ const userCourseSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: "Course-Structure",
   },
-
-  answers: answerSchema,
-  lastAccessed: { type: Date },
-  
-  progress: {           // ← ADD THIS BLOCK
-    visitedNodes: [{ 
-      type: String 
-    }],
-    openedResources: [{ 
-      type: String 
-    }],
-    completedExercises: [{ 
-      type: String 
-    }],
-    lastVisitedNode: { 
-      type: String, 
-      default: "" 
-    },
-    lastVisitedAt: { 
-      type: Date 
-    }
+  answers: {
+    type: answerSchema,
+    default: () => ({
+      I_Do: new Map(),
+      We_Do: new Map(),
+      You_Do: new Map()
+    })
+  },
+  lastAccessed: {
+    type: Date,
+    default: Date.now
   }
-})
+}, {
+  timestamps: true
+});
 
 // Update User Schema to use userCourseSchema directly
 const permissionItemSchema = new mongoose.Schema({

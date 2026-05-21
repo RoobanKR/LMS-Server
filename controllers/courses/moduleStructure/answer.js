@@ -7,6 +7,86 @@ const Topic1 = mongoose.model('Topic1');
 const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
 
+// Returns true if the submission is happening after endDate but inside the cutoff window.
+// Server-authoritative — fetches the exercise doc from the node so client cannot fake it.
+// Walks the WHOLE pedagogy.<category> subtree because subcategory shape varies (We_Do.practical,
+// I_Do.<various keys>, etc.) — we just find the exercise by _id wherever it lives.
+async function isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId }) {
+  try {
+    if (!nodeId || !nodeType || !category || !exerciseId) {
+      console.log('[lateCheck] missing input:', { nodeId, nodeType, category, exerciseId });
+      return false;
+    }
+    const modelMap = {
+      module: Module1, submodule: SubModule1, topic: Topic1, subtopic: SubTopic1,
+    };
+    const Model = modelMap[String(nodeType).toLowerCase()];
+    if (!Model) {
+      console.log('[lateCheck] unknown nodeType:', nodeType);
+      return false;
+    }
+
+    // Fetch the whole category subtree — covers any subcategory shape.
+    const doc = await Model.findById(nodeId).select(`pedagogy.${category}`).lean();
+    const categoryNode = doc?.pedagogy?.[category];
+    if (!categoryNode) {
+      console.log('[lateCheck] no category in node:', { nodeId, category });
+      return false;
+    }
+
+    const exerciseIdStr = String(exerciseId);
+    const findInArray = (arr) =>
+      Array.isArray(arr) ? arr.find(ex => ex && String(ex._id) === exerciseIdStr) : null;
+
+    let exercise = null;
+    if (Array.isArray(categoryNode)) {
+      // category is directly an array of exercises
+      exercise = findInArray(categoryNode);
+    } else if (typeof categoryNode === 'object') {
+      // Try the requested subcategory first
+      if (subcategory && categoryNode[subcategory]) {
+        exercise = findInArray(categoryNode[subcategory]);
+      }
+      // Fall back: search every subcategory until we find the exercise
+      if (!exercise) {
+        for (const k of Object.keys(categoryNode)) {
+          const found = findInArray(categoryNode[k]);
+          if (found) { exercise = found; break; }
+        }
+      }
+    }
+
+    if (!exercise) {
+      console.log('[lateCheck] exercise not found in pedagogy:', { nodeId, category, subcategory, exerciseId });
+      return false;
+    }
+
+    const ap = exercise.availabilityPeriod;
+    if (!ap) {
+      console.log('[lateCheck] no availabilityPeriod on exercise');
+      return false;
+    }
+    if (!ap.cutOffEnabled) {
+      console.log('[lateCheck] cutOffEnabled is false');
+      return false;
+    }
+    if (!ap.endDate) {
+      console.log('[lateCheck] no endDate');
+      return false;
+    }
+    const endTime = new Date(ap.endDate).getTime();
+    if (Number.isNaN(endTime)) return false;
+    const isLate = Date.now() > endTime;
+    console.log('[lateCheck] result:', {
+      exerciseId, endDate: ap.endDate, cutOffDate: ap.cutOffDate, now: new Date().toISOString(), isLate,
+    });
+    return isLate;
+  } catch (err) {
+    console.warn('isLateSubmissionForExercise error:', err?.message || err);
+    return false;
+  }
+}
+
 
 exports.submitAnswer = async (req, res) => {
   try {
@@ -25,11 +105,35 @@ exports.submitAnswer = async (req, res) => {
       score = 0,
       language = "",
       status = "attempted",
+      othersFiles: rawOthersFiles,
+      attemptLimitEnabled,
+      maxAttempts,
+      isTestSubmission,  // ← KEY FLAG: only true when Submit Test or last question
     } = req.body;
 
+    // Parse isTestSubmission properly from FormData string
+    const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
 
+    let othersFiles = [];
+    if (rawOthersFiles) {
+      try {
+        const parsed = typeof rawOthersFiles === 'string' 
+          ? JSON.parse(rawOthersFiles) 
+          : rawOthersFiles;
+        if (Array.isArray(parsed)) othersFiles = parsed;
+      } catch (e) {}
+    }
 
-    // Validate required fields
+    let notionPages = null;
+    if (code && typeof code === 'string' && code.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(code);
+        if (parsed.type === 'notionPages' && Array.isArray(parsed.pages)) {
+          notionPages = parsed.pages;
+        }
+      } catch (e) {}
+    }
+
     if (!courseId || !exerciseId || !questionId) {
       return res.status(400).json({
         success: false,
@@ -37,7 +141,6 @@ exports.submitAnswer = async (req, res) => {
       });
     }
 
-    // Validate category
     const validCategories = ['I_Do', 'We_Do', 'You_Do'];
     if (!validCategories.includes(category)) {
       return res.status(400).json({
@@ -46,161 +149,211 @@ exports.submitAnswer = async (req, res) => {
       });
     }
 
-    // Find user
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found"
+      return res.status(404).json({ 
+        success: false, 
+        message: "User not found" 
       });
     }
 
-    // Prepare the question answer
-    const questionAnswer = {
-      questionId: new mongoose.Types.ObjectId(questionId),
-      codeAnswer: code,
-      language: language,
-      score: score,
-      status: status,
-      isCorrect: status === 'solved' || score >= 70,
-      attempts: 1,
-      submittedAt: new Date(),
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    // Find or create the course entry
-    let courseIndex = user.courses.findIndex(c => 
+    // ── Find or create course entry ──
+    let courseIndex = user.courses.findIndex(c =>
       c.courseId && c.courseId.toString() === courseId
     );
 
     if (courseIndex === -1) {
-      // Create new course entry
-      const newCourse = {
+      user.courses.push({
         courseId: new mongoose.Types.ObjectId(courseId),
-        answers: {
-          I_Do: new Map(),
-          We_Do: new Map(),
-          You_Do: new Map()
-        },
+        answers: { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() },
         lastAccessed: new Date(),
-        createdAt: new Date(),
-        updatedAt: new Date()
-      };
-      user.courses.push(newCourse);
+      });
       courseIndex = user.courses.length - 1;
     } else {
-      // Update existing course
       user.courses[courseIndex].lastAccessed = new Date();
-      user.courses[courseIndex].updatedAt = new Date();
     }
 
-    // Ensure answers structure exists
     if (!user.courses[courseIndex].answers) {
       user.courses[courseIndex].answers = {
-        I_Do: new Map(),
-        We_Do: new Map(),
-        You_Do: new Map()
+        I_Do: new Map(), We_Do: new Map(), You_Do: new Map()
       };
     }
 
-    // Initialize category if it doesn't exist
     if (!user.courses[courseIndex].answers[category]) {
       user.courses[courseIndex].answers[category] = new Map();
     }
 
- // Determine the exercise key based on category
-let exerciseKey;
-if (category === 'We_Do' || category === 'You_Do') {
-  // For both We_Do and You_Do, use subcategory as the key
-  exerciseKey = subcategory;
-} else {
-  // For I_Do, use exerciseId as the key
-  exerciseKey = exerciseId.toString();
-}
+    const exerciseKey = (category === 'We_Do' || category === 'You_Do')
+      ? subcategory
+      : exerciseId.toString();
 
-    // Get or create the exercise array for this key
-    let exerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey);
-    if (!exerciseArray) {
-      exerciseArray = [];
-      user.courses[courseIndex].answers[category].set(exerciseKey, exerciseArray);
-    }
+    let exerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey) || [];
 
-    // Find existing exercise in the array
     let exerciseIndex = exerciseArray.findIndex(
       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
     );
 
- if (exerciseIndex === -1) {
-  // Create new exercise entry
-  const newExercise = {
-    exerciseId: new mongoose.Types.ObjectId(exerciseId),
-    questions: [questionAnswer],
-    nodeId: nodeId,
-    nodeName: nodeName,
-    nodeType: nodeType,
-    selectedProgrammingLanguage:selectedProgrammingLanguage,
-    // Always set subcategory for both We_Do and You_Do
-    subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
-   
-    createdAt: new Date(),
-    updatedAt: new Date()
-  };
-  exerciseArray.push(newExercise);
-} else {
-  // Update existing exercise
-  const existingExercise = exerciseArray[exerciseIndex];
-  
-  // Find existing question in this exercise
-  const existingQuestionIndex = existingExercise.questions.findIndex(
-    q => q.questionId && q.questionId.toString() === questionId
-  );
-  
-  if (existingQuestionIndex === -1) {
-    // Add new question to this exercise
-    existingExercise.questions.push(questionAnswer);
-  } else {
-    // Update existing question in this exercise
-    const existingQuestion = existingExercise.questions[existingQuestionIndex];
-    existingExercise.questions[existingQuestionIndex] = {
-      ...questionAnswer,
-      attempts: (existingQuestion.attempts || 0) + 1,
-      createdAt: existingQuestion.createdAt || new Date(),
-      updatedAt: new Date()
+    // ── Attempt limit check — only on full test submission ──
+    const limitEnabled = attemptLimitEnabled === 'true' || attemptLimitEnabled === true;
+    const maxAtt = parseInt(maxAttempts) || 1;
+
+    if (limitEnabled && isTestSubmit && exerciseIndex !== -1) {
+      const currentUserAttempts = exerciseArray[exerciseIndex].userAttempts || 0;
+      if (currentUserAttempts >= maxAtt) {
+        return res.status(403).json({
+          success: false,
+          message: [{ 
+            key: 'error', 
+            value: `Maximum attempts reached (${currentUserAttempts}/${maxAtt}). You cannot submit again.` 
+          }]
+        });
+      }
+    }
+
+    const questionAnswer = {
+      questionId: new mongoose.Types.ObjectId(questionId),
+      codeAnswer: code,
+      language,
+      score,
+      status,
+      isCorrect: status === 'solved' || score >= 70,
+      attempts: 1,
+      submittedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...(othersFiles.length > 0 ? { othersFiles } : {}),
+      ...(notionPages ? { notionPages } : {}),
     };
-  }
-  
 
-  // Update exercise metadata
-  existingExercise.updatedAt = new Date();
-  if (nodeId) existingExercise.nodeId = nodeId;
-  if (nodeName) existingExercise.nodeName = nodeName;
-  if (nodeType) existingExercise.nodeType = nodeType;
-  if (selectedProgrammingLanguage) existingExercise.selectedProgrammingLanguage = selectedProgrammingLanguage;
-  // Always update subcategory for both We_Do and You_Do
-  if ((category === 'We_Do' || category === 'You_Do') && subcategory) {
-    existingExercise.subcategory = subcategory;
-  }
-}
+    // ── Late submission detection (server-authoritative) ──
+    // Only meaningful when isTestSubmit; cheap no-op otherwise.
+    const isLate = isTestSubmit
+      ? await isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId })
+      : false;
 
-    // Update the Map with modified array
+    if (exerciseIndex === -1) {
+      // ── Create new exercise entry ──
+      const newExercise = {
+        exerciseId: new mongoose.Types.ObjectId(exerciseId),
+        questions: [questionAnswer],
+        nodeId,
+        nodeName,
+        nodeType,
+        selectedProgrammingLanguage,
+        subcategory: (category === 'We_Do' || category === 'You_Do')
+          ? subcategory
+          : undefined,
+        userAttempts: isTestSubmit ? 1 : 0,
+        testSubmissions: isTestSubmit ? 1 : 0,
+        lastTestSubmittedAt: isTestSubmit ? new Date() : null,
+        lateSubmission: isTestSubmit ? isLate : false,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      exerciseArray.push(newExercise);
+
+    } else {
+      // ── Update existing exercise ──
+      const existingExercise = exerciseArray[exerciseIndex];
+      const existingQuestionIndex = existingExercise.questions.findIndex(
+        q => q.questionId && q.questionId.toString() === questionId
+      );
+
+      if (existingQuestionIndex === -1) {
+        existingExercise.questions.push(questionAnswer);
+      } else {
+        const existingQuestion = existingExercise.questions[existingQuestionIndex];
+        existingExercise.questions[existingQuestionIndex] = {
+          ...questionAnswer,
+          attempts: (existingQuestion.attempts || 0) + 1,
+          createdAt: existingQuestion.createdAt || new Date(),
+          updatedAt: new Date()
+        };
+      }
+
+      existingExercise.updatedAt = new Date();
+      if (nodeId) existingExercise.nodeId = nodeId;
+      if (nodeName) existingExercise.nodeName = nodeName;
+      if (nodeType) existingExercise.nodeType = nodeType;
+      if (selectedProgrammingLanguage) {
+        existingExercise.selectedProgrammingLanguage = selectedProgrammingLanguage;
+      }
+      if ((category === 'We_Do' || category === 'You_Do') && subcategory) {
+        existingExercise.subcategory = subcategory;
+      }
+
+      // ── ONLY increment userAttempts on full test submission ──
+      // Guard: ignore duplicate requests within 10 seconds (double-click protection)
+      if (isTestSubmit) {
+        const now = Date.now();
+        const lastAt = existingExercise.lastTestSubmittedAt
+          ? new Date(existingExercise.lastTestSubmittedAt).getTime()
+          : 0;
+        if (now - lastAt > 10000) {
+          existingExercise.userAttempts = (existingExercise.userAttempts || 0) + 1;
+          existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
+          existingExercise.lastTestSubmittedAt = new Date();
+          existingExercise.lateSubmission = isLate;
+        }
+      }
+      // ── Individual question submits do NOT touch userAttempts ──
+    }
+
     user.courses[courseIndex].answers[category].set(exerciseKey, exerciseArray);
-
-    // Mark the modified paths for Mongoose
     user.markModified(`courses.${courseIndex}.answers.${category}`);
-    
-    // Save the user
+
+    // ── Mark exercise completed only on full test submission ──
+    if (isTestSubmit) {
+      const exerciseArray2 = user.courses[courseIndex].answers[category].get(exerciseKey);
+      const exEntry = exerciseArray2?.find(
+        ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
+      );
+
+      if (exEntry) {
+        exEntry.status = 'completed';
+        user.markModified(`courses.${courseIndex}.answers.${category}`);
+
+        const submissionsUsed = exEntry.testSubmissions || 1;
+        if (!limitEnabled || submissionsUsed >= maxAtt) {
+          if (!user.courses[courseIndex].progress) {
+            user.courses[courseIndex].progress = {
+              visitedNodes: [], 
+              openedResources: [], 
+              completedExercises: []
+            };
+          }
+          const exerciseIdStr = exerciseId.toString();
+          if (!user.courses[courseIndex].progress.completedExercises.includes(exerciseIdStr)) {
+            user.courses[courseIndex].progress.completedExercises.push(exerciseIdStr);
+            user.markModified(`courses.${courseIndex}.progress`);
+          }
+        }
+      }
+    }
+
     await user.save();
+
+    // ── Read back final counts ──
+    const savedExerciseArray = user.courses[courseIndex].answers[category].get(exerciseKey);
+    const savedExercise = savedExerciseArray?.find(
+      ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
+    );
 
     res.status(200).json({
       success: true,
       message: "Answer submitted successfully",
+      // ── Return userAttempts so frontend can sync ──
+      userAttempts: savedExercise?.userAttempts || 0,
+      testSubmissions: savedExercise?.testSubmissions || 0,
+      lateSubmission: savedExercise?.lateSubmission || false,
       data: {
         courseId,
         exerciseId,
         questionId,
         category,
-        subcategory: category === 'We_Do' ? subcategory : undefined,
+        subcategory: (category === 'We_Do' || category === 'You_Do') 
+          ? subcategory 
+          : undefined,
         status,
         score,
         isCorrect: questionAnswer.isCorrect,
@@ -214,15 +367,9 @@ if (category === 'We_Do' || category === 'You_Do') {
 
   } catch (error) {
     console.error("❌ Submit answer error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
-
-
-
 exports.getAllUsers = async (req, res) => {
   try {
     const { courseId } = req.params;
@@ -1148,9 +1295,12 @@ exports.submitMultipleFiles = async (req, res) => {
       score = 0,
       feedback = "",
       language = "multi-file",
-      isMultiFile = true
+      isMultiFile = true,
+      isTestSubmission,
     } = req.body;
- 
+
+    const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
+
     // Validate required fields
     if (!courseId || !exerciseId || !questionId) {
       return res.status(400).json({
@@ -1158,7 +1308,7 @@ exports.submitMultipleFiles = async (req, res) => {
         message: "courseId, exerciseId, and questionId are required"
       });
     }
- 
+
     // Validate category
     const validCategories = ['I_Do', 'We_Do', 'You_Do'];
     if (!validCategories.includes(category)) {
@@ -1167,7 +1317,7 @@ exports.submitMultipleFiles = async (req, res) => {
         message: "Category must be one of: I_Do, We_Do, You_Do"
       });
     }
- 
+
     // Validate files array
     if (!files || !Array.isArray(files) || files.length === 0) {
       return res.status(400).json({
@@ -1382,6 +1532,11 @@ exports.submitMultipleFiles = async (req, res) => {
       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
     );
  
+    // ── Late submission detection (server-authoritative) ──
+    const isLate = isTestSubmit
+      ? await isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId })
+      : false;
+
     if (exerciseIndex === -1) {
       exerciseArray.push({
         exerciseId: new mongoose.Types.ObjectId(exerciseId),
@@ -1393,20 +1548,24 @@ exports.submitMultipleFiles = async (req, res) => {
         selectedProgrammingLanguage,
         subcategory: (category === 'We_Do' || category === 'You_Do') ? subcategory : undefined,
         screenRecording: screenRecord,
-        status: 'in-progress',
+        status: isTestSubmit ? 'completed' : 'in-progress',
         projectType: 'multi-file',
         hasFolderStructure: processedFolders.length > 0,
-        folderCount: processedFolders.length
+        folderCount: processedFolders.length,
+        userAttempts: isTestSubmit ? 1 : 0,
+        testSubmissions: isTestSubmit ? 1 : 0,
+        lastTestSubmittedAt: isTestSubmit ? new Date() : null,
+        lateSubmission: isTestSubmit ? isLate : false,
       });
     } else {
       // Update existing exercise
       const existingExercise = exerciseArray[exerciseIndex];
-     
+
       // Find existing question
       const questionIndex = existingExercise.questions.findIndex(
         q => q.questionId && q.questionId.toString() === questionId
       );
- 
+
       if (questionIndex === -1) {
         existingExercise.questions.push(questionAnswer);
       } else {
@@ -1417,13 +1576,29 @@ exports.submitMultipleFiles = async (req, res) => {
           updatedAt: new Date()
         };
       }
- 
+
       // Update exercise metadata
       existingExercise.updatedAt = new Date();
       existingExercise.projectType = 'multi-file';
       existingExercise.hasFolderStructure = processedFolders.length > 0;
       existingExercise.folderCount = processedFolders.length;
-      existingExercise.status = status === 'completed' ? 'completed' : existingExercise.status;
+
+      // ── Increment on full test submission (with 10-second double-click guard) ──
+      if (isTestSubmit) {
+        const now = Date.now();
+        const lastAt = existingExercise.lastTestSubmittedAt
+          ? new Date(existingExercise.lastTestSubmittedAt).getTime()
+          : 0;
+        if (now - lastAt > 10000) {
+          existingExercise.userAttempts = (existingExercise.userAttempts || 0) + 1;
+          existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
+          existingExercise.lastTestSubmittedAt = new Date();
+          existingExercise.lateSubmission = isLate;
+        }
+        existingExercise.status = 'completed';
+      } else {
+        existingExercise.status = status === 'completed' ? 'completed' : existingExercise.status;
+      }
     }
  
     // Save back to map

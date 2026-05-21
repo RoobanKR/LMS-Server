@@ -23,6 +23,10 @@ const {
   updateMCQQuestion,
   deleteMCQQuestion,
   uploadQuestionImage,
+  uploadQuestionFile,
+  addYouDoExercise,
+  updateYouDoExercise,
+  getYouDoExercises  
 } = require("../../../controllers/courses/moduleStructure/exerciseAndQuestion");
 const {
   parseBulkDocument,
@@ -133,4 +137,14 @@ router.delete(
 );
 
 router.post('/upload/question-image', userAuth, uploadQuestionImage);
+router.post('/upload/question-file', userAuth, uploadQuestionFile);
+
+
+//  You Do Routes can be added here in future
+router.put("/you-do/exercise/add/:type/:id", userAuth, addYouDoExercise);
+
+router.put("/you-do/exercise/update/:type/:id/:exerciseId", userAuth, updateYouDoExercise);
+
+router.get("/you-do/exercise/getAll/:type/:id", userAuth, getYouDoExercises);
+
 module.exports = router;

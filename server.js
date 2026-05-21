@@ -35,7 +35,12 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const exceriseandQuestionRoutes = require('./routes/courses/moduleStructure/exerciseAndQuestionRoutes');
 const QuestionbankRoutes = require('./routes/courses/questionBankRoutes');
 const liveQuestionRoutes = require('./routes/courses/moduleStructure/liveQuestionRoutes');
+// Import progress routes
+const progressRoutes = require('./routes/progressRoutes')
+const pptConversionRoutes = require('./routes/courses/pptConversionRoutes');
+const testYourSkillsRoutes = require('./routes/courses/moduleStructure/testYourSkillsRoutes');
 
+// Use progress routes
 // Connect Database
 connectDB();
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
@@ -44,7 +49,7 @@ app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Ba
 app.use(express.json({ extended: false }));
 app.use(cors({
   origin: ["https://lms-client-jade-three.vercel.app"],
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  methods: ["GET", "POST", "PUT", "DELETE","PATCH"],
   credentials: true,
   exposedHeaders: ["Content-Length", "Authorization"],
 }));
@@ -176,8 +181,12 @@ app.use('/', QuestionbankRoutes);
 app.use('/', liveQuestionRoutes);
 
 app.use("/api/chat", chatHistoryRoutes);
-app.use("/api/extract-doc", documentExtractionRoutes);
+app.use("/api/extract-doc", documentExtractionRoutes)
+app.use('/', pptConversionRoutes);
 app.use("/api/video", videoTranscriptionRoutes);
+app.use('/', progressRoutes);
+app.use('/you-do', testYourSkillsRoutes);
+
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5533;
