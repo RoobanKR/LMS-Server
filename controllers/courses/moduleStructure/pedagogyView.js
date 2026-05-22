@@ -3404,6 +3404,7 @@ if (action === 'updateFolder' && folderName) {
               tags: parsedTags,
               groupId: groupId || "",
               groupName: groupName || "",
+              parentGroupId: parentGroupId || "",
               fileSettings: {
                 showToStudents: showToStudentsValue,
                 allowDownload: allowDownloadValue,
@@ -3480,6 +3481,7 @@ if (action === 'updateFolder' && folderName) {
             tags: parsedTags,
             groupId: groupId || "",
             groupName: groupName || "",
+            parentGroupId: parentGroupId || "",
             fileSettings: {
               showToStudents: showToStudentsValue,
               allowDownload: allowDownloadValue,
@@ -3585,6 +3587,7 @@ if (action === 'updateFolder' && folderName) {
         tags: parsedTags,
         groupId: groupId || "",
         groupName: groupName || "",
+        parentGroupId: parentGroupId || "",
         fileSettings: {
           showToStudents: showToStudentsValue,
           allowDownload: allowDownloadValue,
