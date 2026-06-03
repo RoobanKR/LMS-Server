@@ -793,12 +793,18 @@ exports.addExercise = async (req, res) => {
         exerciseName: exerciseInfo.exerciseName || '',
         description: exerciseInfo.description || '',
         exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
+        exerciseType: exerciseInfo.exerciseType || exerciseTypeParsed || '',
+        testType: exerciseInfo.testType || 'mock',
         totalDuration: exerciseInfo.totalDuration || 1,
         totalMarksMCQ: exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined'
           ? (exerciseInfo.totalMarksMCQ !== undefined ? exerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
         totalMarksProgramming: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
           ? (exerciseInfo.totalMarksProgramming !== undefined ? exerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
         totalMarks: exerciseInfo.totalMarks || totalMarksForInfo,
+        selectedModule: exerciseInfo.selectedModule || '',
+        selectedLanguages: exerciseInfo.selectedLanguages || [],
+        isSectionBased: exerciseInfo.isSectionBased || false,
+        sectionBasedDuration: exerciseInfo.sectionBasedDuration || false,
       },
 
       questionConfiguration: {},
@@ -1213,12 +1219,18 @@ exports.updateExercise = async (req, res) => {
         exerciseName: parsedExerciseInfo.exerciseName || existingExercise.exerciseInformation?.exerciseName,
         description: parsedExerciseInfo.description !== undefined ? parsedExerciseInfo.description : existingExercise.exerciseInformation?.description,
         exerciseLevel: parsedExerciseInfo.exerciseLevel || existingExercise.exerciseInformation?.exerciseLevel,
+        exerciseType: parsedExerciseInfo.exerciseType || existingExercise.exerciseInformation?.exerciseType || '',
+        testType: parsedExerciseInfo.testType || existingExercise.exerciseInformation?.testType || 'mock',
         totalDuration: parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
         totalMarksMCQ: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
           ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
         totalMarksProgramming: finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
           ? (parsedExerciseInfo.totalMarksProgramming !== undefined ? parsedExerciseInfo.totalMarksProgramming : progTotalMarks) : 0,
         totalMarks: parsedExerciseInfo.totalMarks || (mcqTotalMarks + progTotalMarks),
+        selectedModule: parsedExerciseInfo.selectedModule !== undefined ? parsedExerciseInfo.selectedModule : existingExercise.exerciseInformation?.selectedModule || '',
+        selectedLanguages: parsedExerciseInfo.selectedLanguages !== undefined ? parsedExerciseInfo.selectedLanguages : existingExercise.exerciseInformation?.selectedLanguages || [],
+        isSectionBased: parsedExerciseInfo.isSectionBased !== undefined ? parsedExerciseInfo.isSectionBased : existingExercise.exerciseInformation?.isSectionBased || false,
+        sectionBasedDuration: parsedExerciseInfo.sectionBasedDuration !== undefined ? parsedExerciseInfo.sectionBasedDuration : existingExercise.exerciseInformation?.sectionBasedDuration || false,
       };
     }
 
@@ -1765,7 +1777,17 @@ exports.lockExercise = async (req, res) => {
       subcategory,
       status,
       isLocked,
+      submitType,
+      autoSubmitReason,
+      reason,
     } = req.body;
+
+    // AUTO submit when the client flags it (proctoring/face/tab/timeout
+    // termination), or when the exercise is being terminated.
+    const _isAutoSubmit = submitType === 'AUTO' || status === 'terminated';
+    const _autoReason = _isAutoSubmit
+      ? String(autoSubmitReason || reason || '').slice(0, 300)
+      : '';
 
 
     if (!courseId || !exerciseId || !subcategory) {
@@ -1868,6 +1890,10 @@ exports.lockExercise = async (req, res) => {
       if (status) exercisesArray[exerciseIndex].status = status;
       if (isLocked !== undefined) exercisesArray[exerciseIndex].isLocked = isLocked;
       else if (status === 'terminated') exercisesArray[exerciseIndex].isLocked = true;
+      if (_isAutoSubmit) {
+        exercisesArray[exerciseIndex].submitType = 'AUTO';
+        exercisesArray[exerciseIndex].autoSubmitReason = _autoReason;
+      }
 
       // Add screen recording URL if uploaded
       if (screenRecordingUrl) {
@@ -1882,7 +1908,9 @@ exports.lockExercise = async (req, res) => {
         status: status || 'in-progress',
         isLocked: isLocked !== undefined ? (isLocked === 'true' || isLocked === true) : (status === 'terminated'),
         questions: [],
-        screenRecording: screenRecordingUrl || undefined
+        screenRecording: screenRecordingUrl || undefined,
+        submitType: _isAutoSubmit ? 'AUTO' : 'USER',
+        autoSubmitReason: _autoReason,
       };
       exercisesArray.push(newEntry);
       updatedExercise = newEntry;
@@ -1968,6 +1996,98 @@ exports.getExerciseStatus = async (req, res) => {
     return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
   }
 };
+
+
+// ── Save Assessment Screen Recording URL (from proctoring hook) ───────────────
+// Called after the client uploads to Cloudinary and gets a URL back.
+// Saves the URL to the student's exercise record so getExerciseStatus can return it.
+exports.saveAssessmentRecording = async (req, res) => {
+  try {
+    const {
+      courseId,
+      exerciseId,
+      studentId,
+      recordingUrl,
+      category = 'You_Do',
+      subcategory = 'assessments',
+    } = req.body;
+
+    const userId = studentId || req.user._id;
+
+    if (!courseId || !exerciseId || !recordingUrl) {
+      return res.status(400).json({
+        success: false,
+        message: [{ key: 'error', value: 'Missing required fields: courseId, exerciseId, recordingUrl' }],
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: 'User not found' }] });
+    }
+
+    // Ensure course exists in user's enrolled list
+    const courseIndex = user.courses
+      ? user.courses.findIndex(c => c.courseId && c.courseId.toString() === courseId)
+      : -1;
+
+    if (courseIndex === -1) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: 'Course not enrolled' }] });
+    }
+
+    const userCourse = user.courses[courseIndex];
+
+    // Ensure answers map exists
+    if (!userCourse.answers) {
+      userCourse.answers = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
+    }
+    const categoryKey = category;
+    if (!userCourse.answers[categoryKey]) userCourse.answers[categoryKey] = new Map();
+
+    const categoryMap = userCourse.answers[categoryKey];
+
+    // Get or create the exercises array for this subcategory
+    let exercisesArray = categoryMap.get(subcategory) || [];
+    if (exercisesArray.toObject) exercisesArray = exercisesArray.toObject();
+
+    const exerciseIndex = exercisesArray.findIndex(
+      ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
+    );
+
+    if (exerciseIndex > -1) {
+      // Update existing entry
+      exercisesArray[exerciseIndex].screenRecording = recordingUrl;
+    } else {
+      // Create a new entry just to store the recording
+      exercisesArray.push({
+        exerciseId: new mongoose.Types.ObjectId(exerciseId),
+        status: 'in-progress',
+        isLocked: false,
+        questions: [],
+        screenRecording: recordingUrl,
+      });
+    }
+
+    categoryMap.set(subcategory, exercisesArray);
+    user.markModified(`courses.${courseIndex}.answers.${categoryKey}`);
+    await user.save();
+
+    console.log(`✅ Assessment recording saved for user ${userId}, exercise ${exerciseId}`);
+    return res.status(200).json({
+      success: true,
+      message: [{ key: 'success', value: 'Recording saved successfully' }],
+      data: { recordingUrl },
+    });
+  } catch (error) {
+    console.error('saveAssessmentRecording error:', error);
+    return res.status(500).json({
+      success: false,
+      message: [{ key: 'error', value: 'Internal server error' }],
+      error: error.message,
+    });
+  }
+};
+
 
 async function uploadBufferToSupabase(buffer, filePath, mimeType) {
   try {
@@ -6488,19 +6608,60 @@ exports.addMCQQuestions = async (req, res) => {
 
     // Option-based types that require mcqQuestionOptions validation
     const OPTION_BASED_TYPES = ['multiple_choice', 'multiple_select', 'dropdown', 'checkboxes'];
+    // Text-based types that don't require options
+    const TEXT_BASED_TYPES = ['short_answer', 'essay'];
+    // Other types
+    const OTHER_TYPES = ['true_false', 'numeric', 'matching', 'ordering'];
 
     const processedQuestions = [];
 
     for (let i = 0; i < questionsData.length; i++) {
       const question = questionsData[i];
-      if (!question.mcqQuestionTitle ||
-        (typeof question.mcqQuestionTitle === 'string' && !question.mcqQuestionTitle.trim()) ||
-        (Array.isArray(question.mcqQuestionTitle) && question.mcqQuestionTitle.length === 0)) {
+      
+      // Debug log to see what we're receiving
+      console.log(`📝 Question ${i + 1} title type:`, typeof question.mcqQuestionTitle);
+      console.log(`📝 Question ${i + 1} title value:`, question.mcqQuestionTitle);
+      
+      // Validate question title - Handle different data types
+      let isValidTitle = false;
+      let processedTitle = '';
+      
+      if (question.mcqQuestionTitle !== undefined && question.mcqQuestionTitle !== null) {
+        if (typeof question.mcqQuestionTitle === 'string') {
+          processedTitle = question.mcqQuestionTitle.trim();
+          isValidTitle = processedTitle.length > 0;
+        } else if (Array.isArray(question.mcqQuestionTitle)) {
+          processedTitle = question.mcqQuestionTitle;
+          isValidTitle = question.mcqQuestionTitle.length > 0;
+        } else if (typeof question.mcqQuestionTitle === 'object') {
+          // Handle object case - convert to string or use a property
+          console.warn(`⚠️ Question ${i + 1}: mcqQuestionTitle is an object:`, question.mcqQuestionTitle);
+          // Try to extract text from common patterns
+          if (question.mcqQuestionTitle.text) {
+            processedTitle = question.mcqQuestionTitle.text.trim();
+          } else if (question.mcqQuestionTitle.title) {
+            processedTitle = question.mcqQuestionTitle.title.trim();
+          } else {
+            processedTitle = JSON.stringify(question.mcqQuestionTitle);
+          }
+          isValidTitle = processedTitle.length > 0;
+        } else if (typeof question.mcqQuestionTitle === 'number' || typeof question.mcqQuestionTitle === 'boolean') {
+          // Convert numbers and booleans to string
+          processedTitle = String(question.mcqQuestionTitle);
+          isValidTitle = processedTitle.trim().length > 0;
+        } else {
+          processedTitle = String(question.mcqQuestionTitle || '').trim();
+          isValidTitle = processedTitle.length > 0;
+        }
+      }
+      
+      if (!isValidTitle) {
         return res.status(400).json({
-          message: [{ key: "error", value: `Question ${i + 1}: MCQ question title is required` }]
+          message: [{ key: "error", value: `Question ${i + 1}: MCQ question title is required and must be a non-empty string or array` }]
         });
       }
 
+      // Validate question type
       if (!question.mcqQuestionType) {
         return res.status(400).json({
           message: [{ key: "error", value: `Question ${i + 1}: MCQ question type is required` }]
@@ -6508,8 +6669,9 @@ exports.addMCQQuestions = async (req, res) => {
       }
 
       const isOptionBased = OPTION_BASED_TYPES.includes(question.mcqQuestionType);
+      const isTextBased = TEXT_BASED_TYPES.includes(question.mcqQuestionType);
 
-      // Only validate options/correct answers for option-based types
+      // Validate options for option-based types
       if (isOptionBased) {
         if (!Array.isArray(question.mcqQuestionOptions) || question.mcqQuestionOptions.length < 2) {
           return res.status(400).json({
@@ -6579,14 +6741,62 @@ exports.addMCQQuestions = async (req, res) => {
         }
       }
 
-      // Build base question object
+      // Handle mcqQuestionCorrectAnswers for ALL question types
+      let correctAnswers = [];
+      if (isOptionBased) {
+        // For option-based types, use the provided correct answers array
+        correctAnswers = question.mcqQuestionCorrectAnswers || [];
+      } else if (isTextBased) {
+        // For short_answer and essay, store the answer key in mcqQuestionCorrectAnswers
+        if (question.shortAnswer && typeof question.shortAnswer === 'string' && question.shortAnswer.trim()) {
+          correctAnswers = [question.shortAnswer.trim()];
+        } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
+          correctAnswers = question.mcqQuestionCorrectAnswers;
+        } else if (question.mcqQuestionCorrectAnswers && typeof question.mcqQuestionCorrectAnswers === 'string') {
+          correctAnswers = [question.mcqQuestionCorrectAnswers];
+        }
+      } else if (question.mcqQuestionType === 'true_false') {
+        // For true/false, store the boolean as string
+        if (question.trueFalseAnswer !== null && question.trueFalseAnswer !== undefined) {
+          correctAnswers = [String(question.trueFalseAnswer)];
+        } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
+          correctAnswers = question.mcqQuestionCorrectAnswers;
+        }
+      } else if (question.mcqQuestionType === 'numeric') {
+        // For numeric, store the answer as string
+        if (question.numericAnswer !== null && question.numericAnswer !== undefined) {
+          correctAnswers = [String(question.numericAnswer)];
+        } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
+          correctAnswers = question.mcqQuestionCorrectAnswers;
+        }
+      } else if (question.mcqQuestionType === 'matching') {
+        // For matching, store pairs as strings
+        if (question.matchingPairs && question.matchingPairs.length > 0) {
+          correctAnswers = question.matchingPairs.map(p => `${p.left}|${p.right}`);
+        } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
+          correctAnswers = question.mcqQuestionCorrectAnswers;
+        }
+      } else if (question.mcqQuestionType === 'ordering') {
+        // For ordering, store the correct order as strings
+        if (question.orderingItems && question.orderingItems.length > 0) {
+          const sorted = [...question.orderingItems].sort((a, b) => a.order - b.order);
+          correctAnswers = sorted.map(item => item.text.trim());
+        } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
+          correctAnswers = question.mcqQuestionCorrectAnswers;
+        }
+      } else {
+        // Fallback: use provided correct answers or empty array
+        correctAnswers = Array.isArray(question.mcqQuestionCorrectAnswers) 
+          ? question.mcqQuestionCorrectAnswers 
+          : (question.mcqQuestionCorrectAnswers ? [question.mcqQuestionCorrectAnswers] : []);
+      }
+
+      // Build base question object with properly processed title
       const processedQuestion = {
         _id: new mongoose.Types.ObjectId(),
         questionType: 'mcq',
-        sectionId: question.sectionId || null, // 🆕 NEW: Section linking
-        mcqQuestionTitle: Array.isArray(question.mcqQuestionTitle)
-          ? question.mcqQuestionTitle
-          : (question.mcqQuestionTitle || '').trim(),
+        sectionId: question.sectionId || null,
+        mcqQuestionTitle: processedTitle,
         mcqQuestionType: question.mcqQuestionType,
         mcqQuestionDifficulty: question.mcqQuestionDifficulty || undefined,
         mcqQuestionScore: question.mcqQuestionScore || 1,
@@ -6597,7 +6807,7 @@ exports.addMCQQuestions = async (req, res) => {
         isActive: question.isActive !== undefined ? question.isActive : true,
         mcqQuestionOptionsPerRow: question.mcqQuestionOptionsPerRow || 1,
         mcqQuestionOptions: processedOptions,
-        mcqQuestionCorrectAnswers: isOptionBased ? (question.mcqQuestionCorrectAnswers || []) : [],
+        mcqQuestionCorrectAnswers: correctAnswers,
         mcqQuestionImageUrl: questionImageUrl,
         mcqQuestionImageAlignment: question.mcqQuestionImageAlignment || 'left',
         mcqQuestionImageSizePercent: question.mcqQuestionImageSizePercent || 100,
@@ -6606,18 +6816,28 @@ exports.addMCQQuestions = async (req, res) => {
         updatedAt: new Date(),
       };
 
-      // Explanation
-      if (question.hasExplanation && question.mcqQuestionDescription && question.mcqQuestionDescription.trim() !== '') {
+      // Add explanation if provided
+      if (question.hasExplanation && question.mcqQuestionDescription && 
+          typeof question.mcqQuestionDescription === 'string' && 
+          question.mcqQuestionDescription.trim() !== '') {
         processedQuestion.mcqQuestionDescription = question.mcqQuestionDescription.trim();
       }
 
-      // ── Type-specific answer fields ──────────────────────────────────────────
+      // ── Type-specific answer fields (for backward compatibility) ──────────────
       if (question.mcqQuestionType === 'true_false') {
         processedQuestion.trueFalseAnswer = question.trueFalseAnswer ?? null;
       }
 
       if (question.mcqQuestionType === 'short_answer') {
-        processedQuestion.shortAnswer = question.shortAnswer || '';
+        processedQuestion.shortAnswer = (question.shortAnswer && typeof question.shortAnswer === 'string') 
+          ? question.shortAnswer.trim() 
+          : '';
+      }
+
+      if (question.mcqQuestionType === 'essay') {
+        processedQuestion.shortAnswer = (question.shortAnswer && typeof question.shortAnswer === 'string') 
+          ? question.shortAnswer.trim() 
+          : '';
       }
 
       if (question.mcqQuestionType === 'numeric') {
@@ -6722,12 +6942,25 @@ exports.addMCQQuestions = async (req, res) => {
     processedQuestions.forEach((question, index) => {
       question.sequence = startSequence + index;
       exercise.questions.push(question);
+      
+      // Prepare response with safe title representation
+      let responseTitle = question.mcqQuestionTitle;
+      if (Array.isArray(question.mcqQuestionTitle)) {
+        responseTitle = question.mcqQuestionTitle;
+      } else if (typeof question.mcqQuestionTitle === 'string') {
+        responseTitle = question.mcqQuestionTitle;
+      } else {
+        responseTitle = String(question.mcqQuestionTitle);
+      }
+      
       addedQuestions.push({
         questionId: question._id.toString(),
-        mcqQuestionTitle: question.mcqQuestionTitle,
+        mcqQuestionTitle: responseTitle,
         mcqQuestionType: question.mcqQuestionType,
         sequence: question.sequence,
-        sectionId: question.sectionId, // 🆕 Include sectionId in response
+        sectionId: question.sectionId,
+        mcqQuestionCorrectAnswers: question.mcqQuestionCorrectAnswers,
+        shortAnswer: question.shortAnswer,
         optionsCount: question.mcqQuestionOptions.length,
         mcqQuestionRequired: question.mcqQuestionRequired
       });
@@ -6750,7 +6983,7 @@ exports.addMCQQuestions = async (req, res) => {
 
     const totalMCQMarks = processedQuestions.reduce((sum, q) => sum + (q.mcqQuestionScore || 0), 0);
 
-    // 🆕 Group added questions by section for response
+    // Group added questions by section for response
     const addedBySection = {};
     addedQuestions.forEach(q => {
       const secId = q.sectionId || 'unassigned';
@@ -6765,7 +6998,7 @@ exports.addMCQQuestions = async (req, res) => {
       message: `Successfully added ${addedQuestions.length} MCQ question(s)`,
       data: {
         addedQuestions,
-        addedBySection, // 🆕 Questions grouped by section
+        addedBySection,
         exercise: {
           id: exercise._id?.toString(),
           exerciseId: exercise.exerciseInformation?.exerciseId,
@@ -6791,7 +7024,7 @@ exports.addMCQQuestions = async (req, res) => {
     });
   }
 };
-
+ 
 
 exports.updateMCQQuestion = async (req, res) => {
   try {
@@ -7765,12 +7998,15 @@ exports.addYouDoExercise = async (req, res) => {
         testType: exerciseInfo.testType || 'mock',
         description: exerciseInfo.description || '',
         exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
+        exerciseType: exerciseInfo.exerciseType || exerciseTypeParsed || '',
         totalDuration: exerciseInfo.totalDuration || 1,
         totalMarksMCQ: totalMarksForMCQ,
         totalMarksProgramming: totalMarksForProg,
         totalMarks: totalMarksForInfo,
         selectedModule: exerciseInfo.selectedModule || '',
         selectedLanguages: exerciseInfo.selectedLanguages || [],
+        isSectionBased: exerciseInfo.isSectionBased || isSectionBased || false,
+        sectionBasedDuration: exerciseInfo.sectionBasedDuration || false,
       },
 
       securitySettings: securitySettingsData,  // ← Add security settings
@@ -8186,6 +8422,7 @@ exports.updateYouDoExercise = async (req, res) => {
         selectedModule: parsedExerciseInfo.selectedModule || existingExercise.exerciseInformation?.selectedModule,
         selectedLanguages: parsedExerciseInfo.selectedLanguages || existingExercise.exerciseInformation?.selectedLanguages || [],
         isSectionBased: parsedIsSectionBased,
+        sectionBasedDuration: parsedExerciseInfo.sectionBasedDuration !== undefined ? parsedExerciseInfo.sectionBasedDuration : existingExercise.exerciseInformation?.sectionBasedDuration || false,
       };
     }
 

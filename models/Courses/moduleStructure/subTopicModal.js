@@ -103,6 +103,12 @@ const securitySettingsSchema = new mongoose.Schema(
     enableIdVerification: { type: Boolean, default: false },
     enableVoiceVerification: { type: Boolean, default: false },
     captureIntervalSeconds: { type: Number, default: 60 },
+    // Face-detection proctoring (no face / multiple persons → warnings then auto-submit)
+    multipleFaceDetection: { type: Boolean, default: false },
+    faceWarningLimit: { type: Number, default: 3 },
+    // Face-presence monitoring (no face → warnings then auto-submit)
+    faceMonitoringDetection: { type: Boolean, default: false },
+    faceMonitoringWarningLimit: { type: Number, default: 3 },
     
     // Network restrictions
     blockOtherIPs: { type: Boolean, default: false },
@@ -472,20 +478,33 @@ const programmingSettingsSchema = new mongoose.Schema({
 });
 
 // ─── EXERCISE INFORMATION SCHEMA ──────────────────────────────────────────────
-const exerciseInformationSchema = new mongoose.Schema({
-  exerciseId: { type: String, required: true },
-  exerciseName: { type: String, required: true },
-  description: String,
-  exerciseLevel: {
-    type: String,
-    enum: ["beginner", "intermediate", "expert"],
-    default: "beginner",
+const exerciseInformationSchema = new mongoose.Schema(
+  {
+    exerciseId: { type: String, required: true },
+    exerciseName: { type: String, required: true },
+    description: String,
+    exerciseLevel: {
+      type: String,
+      enum: ["beginner", "intermediate", "expert"],
+      default: "beginner",
+    },
+    exerciseType: { type: String },
+    testType: {
+      type: String,
+      enum: ["mock", "final", "practice"],
+      default: "mock",
+    },
+    totalDuration: { type: Number },
+    totalMarksMCQ: { type: Number, default: 0 },
+    totalMarksProgramming: { type: Number, default: 0 },
+    totalMarks: { type: Number, default: 0 },
+    selectedModule: { type: String, default: "" },
+    selectedLanguages: [{ type: String }],
+    isSectionBased: { type: Boolean, default: false },
+    sectionBasedDuration: { type: Boolean, default: false },
   },
-  totalDuration: { type: Number },
-  totalMarksMCQ: { type: Number, default: 0 },
-  totalMarksProgramming: { type: Number, default: 0 },
-  totalMarks: { type: Number, default: 0 },
-});
+  { _id: false, strict: false }
+);
 
 // ─── CONFIGURATION TYPE SCHEMA ────────────────────────────────────────────────
 const configurationTypeSettSchema = new mongoose.Schema({

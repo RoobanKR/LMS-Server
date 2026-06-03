@@ -7,6 +7,11 @@ const cookieParser = require("cookie-parser");
 const http = require('http');
 const socketIO = require('./utils/socket');   // ← shared utility only; NO second socketIo import
 const jwt = require('jsonwebtoken');
+const config = require('config');
+// Socket auth MUST use the same secret that signs tokens (config/secretToken.js
+// + middlewares/userAuth.js both use JWT_TOKEN_KEY). process.env.JWT_SECRET was
+// a different/undefined value, so every socket was unauthenticated.
+const JWT_TOKEN_KEY = config.get('JWT_TOKEN_KEY');
 
 const fileUpload = require("express-fileupload");
 const userAuth = require("./routes/userAuth");
@@ -35,10 +40,17 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const exceriseandQuestionRoutes = require('./routes/courses/moduleStructure/exerciseAndQuestionRoutes');
 const QuestionbankRoutes = require('./routes/courses/questionBankRoutes');
 const liveQuestionRoutes = require('./routes/courses/moduleStructure/liveQuestionRoutes');
+const liveDashboardRoutes = require('./routes/courses/moduleStructure/liveDashboardRoutes');
+const liveScreensRoutes = require('./routes/courses/moduleStructure/liveScreensRoutes');
+const { registerLiveDashboardHandlers } = require('./utils/liveDashboardSocket');
+const { registerLiveScreenHandlers } = require('./utils/liveScreenSocket');
+const { registerMessagingHandlers } = require('./utils/messagingSocket');
 // Import progress routes
 const progressRoutes = require('./routes/progressRoutes')
+const activityLogRoutes = require('./routes/activityLogRoutes')
 const pptConversionRoutes = require('./routes/courses/pptConversionRoutes');
 const testYourSkillsRoutes = require('./routes/courses/moduleStructure/testYourSkillsRoutes');
+const retestRoutes = require('./routes/courses/moduleStructure/retestRoutes');
 
 // Use progress routes
 // Connect Database
@@ -82,7 +94,7 @@ io.use((socket, next) => {
     return next(); // allow unauthenticated (students via public link)
   }
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_TOKEN_KEY);
     socket.userId = decoded.id;
     socket.userName = decoded.name || decoded.firstName || 'User';
     socket.userEmail = decoded.email;
@@ -99,6 +111,15 @@ io.on('connection', (socket) => {
     console.log(`User connected: ${socket.userId}`);
     socket.join(`user-${socket.userId}`);
   }
+
+  // ── Live Dashboard (assessment progress) — teacher rooms + student events ──
+  registerLiveDashboardHandlers(io, socket);
+
+  // ── Live Screen Monitoring — WebRTC signaling relay (proctor ↔ student) ────
+  registerLiveScreenHandlers(io, socket);
+
+  // ── Proctor ↔ Student messaging (individual + broadcast) ───────────────────
+  registerMessagingHandlers(io, socket);
 
   // ── Live MCQ room — teacher joins to receive real-time student events ──────
   socket.on('join-liveq', (liveQuestionId) => {
@@ -179,12 +200,16 @@ app.use('/', notificationRoutes);
 app.use('/', exceriseandQuestionRoutes);
 app.use('/', QuestionbankRoutes);
 app.use('/', liveQuestionRoutes);
+app.use('/', liveDashboardRoutes);
+app.use('/', liveScreensRoutes);
+app.use('/', retestRoutes);
 
 app.use("/api/chat", chatHistoryRoutes);
 app.use("/api/extract-doc", documentExtractionRoutes)
 app.use('/', pptConversionRoutes);
 app.use("/api/video", videoTranscriptionRoutes);
 app.use('/', progressRoutes);
+app.use('/', activityLogRoutes);
 app.use('/you-do', testYourSkillsRoutes);
 
 

@@ -1,11 +1,133 @@
 const User = require('../../../models/UserModel');
 const mongoose = require('mongoose');
+const ActivityLog = require('../../../models/ActivityLog');
+
+// ── We Do / You Do duration tracking (assignments & assessments) ───────────────
+// Start = first answer interaction (a non-test save opens an 'exercise_start' log).
+// End   = test submit (closes the open log with duration = submit − start).
+// Started-but-not-submitted logs stay open (duration === null) and are ignored.
+// Each test submit closes the current cycle, so the next save starts a fresh one.
+// `method` is the pedagogy category: 'We_Do' (assignment) or 'You_Do' (assessment).
+async function trackAssignmentDuration({ user, courseId, exerciseId, exerciseName, subcategory, method, nodeId, nodeName, nodeType, isTestSubmit }) {
+  try {
+    const fallbackName = method === 'You_Do' ? 'Assessment' : 'Assignment';
+    const openMatch = {
+      userId: user._id,
+      action: 'exercise_start',
+      'details.method': method,
+      'details.exerciseId': exerciseId ? String(exerciseId) : null,
+      'details.activity': subcategory || null,
+      'details.duration': null, // still open (not yet submitted)
+    };
+
+    // Build a new start-log doc, resolving the real name + parent node once.
+    const buildDoc = async () => {
+      const info = await resolveExerciseInfo({ nodeId, category: method, subcategory, exerciseId });
+      // Title = real exercise name (structure) → body exerciseName → body nodeName
+      //         (some components send the exercise name here) → subcategory.
+      const finalName = info.exerciseName || exerciseName || nodeName || subcategory || fallbackName;
+      return {
+        userId: user._id,
+        userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+        userEmail: user.email || '',
+        courseId: courseId || null,
+        action: 'exercise_start',
+        details: {
+          exerciseId: exerciseId ? String(exerciseId) : null,
+          exerciseName: finalName,
+          method: method,
+          activity: subcategory || null,
+          // Parent node resolved from the structure (the topic/subtopic it lives under)
+          nodeName: info.nodeName || null,
+          nodeType: info.nodeType || null,
+        },
+      };
+    };
+
+    if (!isTestSubmit) {
+      // First answer interaction → open a start log if one isn't already open
+      const existing = await ActivityLog.findOne(openMatch).select('_id').lean();
+      if (!existing) {
+        const doc = await buildDoc();
+        doc.details.status = 'in-progress';
+        await ActivityLog.create(doc);
+      }
+      return;
+    }
+
+    // Test submit → close the open start log with a duration
+    const now = new Date();
+    const open = await ActivityLog.findOne(openMatch).sort({ createdAt: -1 });
+    if (open) {
+      const durationSec = Math.max(0, Math.round((now.getTime() - new Date(open.createdAt).getTime()) / 1000));
+      open.details.duration = durationSec;
+      open.details.closedAt = now;
+      open.details.status = 'submitted';
+      open.markModified('details');
+      await open.save();
+    } else {
+      // Submitted with no prior save — record a completed cycle with 0 duration
+      const doc = await buildDoc();
+      doc.details.status = 'submitted';
+      doc.details.duration = 0;
+      doc.details.closedAt = now;
+      await ActivityLog.create(doc);
+    }
+  } catch (e) { /* best effort — never block submission */ }
+}
 
 const Module1 = mongoose.model('Module1');
 const SubModule1 = mongoose.model('SubModule1');
 const Topic1 = mongoose.model('Topic1');
 const SubTopic1 = mongoose.model('SubTopic1');
 const CourseStructure = mongoose.model('Course-Structure');
+
+// Resolve, from the course structure, the real exercise/assignment/assessment NAME
+// and the PARENT node (its title + level) using the reliable nodeId. The submitted
+// nodeName/nodeType can't be trusted (some components send the exercise's own
+// name/type, e.g. nodeType 'mcq'), so we find the node by id across all node models.
+// Returns { exerciseName, nodeName, nodeType } (any field may be null).
+async function resolveExerciseInfo({ nodeId, category, subcategory, exerciseId }) {
+  const empty = { exerciseName: null, nodeName: null, nodeType: null };
+  try {
+    if (!nodeId || !category) return empty;
+    const models = [['module', Module1], ['submodule', SubModule1], ['topic', Topic1], ['subtopic', SubTopic1]];
+    for (const [typeLabel, Model] of models) {
+      let doc;
+      try { doc = await Model.findById(nodeId).select(`title pedagogy.${category}`).lean(); }
+      catch { doc = null; }
+      if (!doc) continue;
+
+      const nodeName = doc.title || null;
+      const nodeType = typeLabel;
+
+      // Walk the category subtree to find the exercise by _id (shape varies)
+      let exerciseName = null;
+      const categoryNode = doc?.pedagogy?.[category];
+      if (categoryNode && exerciseId) {
+        const idStr = String(exerciseId);
+        const findInArray = (arr) => Array.isArray(arr) ? arr.find(ex => ex && String(ex._id) === idStr) : null;
+        let exercise = null;
+        if (Array.isArray(categoryNode)) {
+          exercise = findInArray(categoryNode);
+        } else if (typeof categoryNode === 'object') {
+          if (subcategory && categoryNode[subcategory]) exercise = findInArray(categoryNode[subcategory]);
+          if (!exercise) {
+            for (const k of Object.keys(categoryNode)) {
+              const found = findInArray(categoryNode[k]);
+              if (found) { exercise = found; break; }
+            }
+          }
+        }
+        if (exercise) exerciseName = exercise.exerciseInformation?.exerciseName || exercise.exerciseName || exercise.name || null;
+      }
+      return { exerciseName, nodeName, nodeType };
+    }
+    return empty;
+  } catch {
+    return empty;
+  }
+}
 
 // Returns true if the submission is happening after endDate but inside the cutoff window.
 // Server-authoritative — fetches the exercise doc from the node so client cannot fake it.
@@ -109,10 +231,19 @@ exports.submitAnswer = async (req, res) => {
       attemptLimitEnabled,
       maxAttempts,
       isTestSubmission,  // ← KEY FLAG: only true when Submit Test or last question
+      submitType,        // 'USER' (manual) | 'AUTO' (system auto-submit on violation/timeout)
+      autoSubmitReason,  // human-readable reason when submitType === 'AUTO'
     } = req.body;
 
     // Parse isTestSubmission properly from FormData string
     const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
+
+    // Normalize submit type + reason (only meaningful on a full test submission).
+    // Anything other than an explicit 'AUTO' is treated as a manual USER submit.
+    const finalSubmitType = submitType === 'AUTO' ? 'AUTO' : 'USER';
+    const finalAutoSubmitReason = finalSubmitType === 'AUTO'
+      ? String(autoSubmitReason || '').slice(0, 300)
+      : '';
 
     let othersFiles = [];
     if (rawOthersFiles) {
@@ -151,10 +282,15 @@ exports.submitAnswer = async (req, res) => {
 
     const user = await User.findById(userId);
     if (!user) {
-      return res.status(404).json({ 
-        success: false, 
-        message: "User not found" 
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
       });
+    }
+
+    // We Do / You Do duration tracking (start = first save, end = test submit)
+    if (category === 'We_Do' || category === 'You_Do') {
+      trackAssignmentDuration({ user, courseId, exerciseId, exerciseName: req.body.exerciseName, subcategory, method: category, nodeId: req.body.nodeId, nodeName: req.body.nodeName, nodeType: req.body.nodeType, isTestSubmit });
     }
 
     // ── Find or create course entry ──
@@ -247,6 +383,8 @@ exports.submitAnswer = async (req, res) => {
         testSubmissions: isTestSubmit ? 1 : 0,
         lastTestSubmittedAt: isTestSubmit ? new Date() : null,
         lateSubmission: isTestSubmit ? isLate : false,
+        submitType: isTestSubmit ? finalSubmitType : 'USER',
+        autoSubmitReason: isTestSubmit ? finalAutoSubmitReason : '',
         createdAt: new Date(),
         updatedAt: new Date()
       };
@@ -294,6 +432,8 @@ exports.submitAnswer = async (req, res) => {
           existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
           existingExercise.lastTestSubmittedAt = new Date();
           existingExercise.lateSubmission = isLate;
+          existingExercise.submitType = finalSubmitType;
+          existingExercise.autoSubmitReason = finalAutoSubmitReason;
         }
       }
       // ── Individual question submits do NOT touch userAttempts ──
@@ -346,6 +486,8 @@ exports.submitAnswer = async (req, res) => {
       userAttempts: savedExercise?.userAttempts || 0,
       testSubmissions: savedExercise?.testSubmissions || 0,
       lateSubmission: savedExercise?.lateSubmission || false,
+      submitType: savedExercise?.submitType || 'USER',
+      autoSubmitReason: savedExercise?.autoSubmitReason || '',
       data: {
         courseId,
         exerciseId,
@@ -1222,42 +1364,59 @@ exports.getAnswerByQuestionId = async (req, res) => {
     // 3. Find Course in User's Enrolled Courses
     const course = user.courses.find(c => c.courseId && c.courseId.toString() === courseId);
     
-    // If course or answers map doesn't exist, return null data (not an error, just no answer yet)
-    if (!course || !course.answers || !course.answers.get(category)) {
+    // If course or answers map doesn't exist, return null data (not an error, just no answer yet).
+    // NOTE: do not early-return when the requested `category` bucket is missing —
+    // the bucket-agnostic fallback below still needs to scan the other buckets.
+    if (!course || !course.answers) {
       return res.status(200).json({ success: true, data: null });
     }
 
     // 4. Resolve Exercise Key
-    const exerciseKey = category === 'We_Do' ? subcategory : exerciseId;
+    // We_Do AND You_Do both store under `subcategory` (see submitAnswer), so the
+    // previous lookup-by-exerciseId failed for You_Do → no pre-fill on retest.
+    const exerciseKey = (category === 'We_Do' || category === 'You_Do') ? subcategory : exerciseId;
     
+    // Helper: find this exerciseId + questionId inside one exercise array.
+    const findQ = (arr) => {
+      if (!Array.isArray(arr)) return null;
+      const ex = arr.find(e => e.exerciseId && e.exerciseId.toString() === exerciseId);
+      if (!ex || !Array.isArray(ex.questions)) return null;
+      return ex.questions.find(q => q.questionId && q.questionId.toString() === questionId) || null;
+    };
+
+    // 5/6. Exact lookup first: category bucket -> exerciseKey.
     const categoryMap = course.answers.get(category);
-    const exerciseArray = categoryMap ? categoryMap.get(exerciseKey) : null;
+    let questionAnswer = categoryMap ? findQ(categoryMap.get(exerciseKey)) : null;
 
-    if (!exerciseArray || !Array.isArray(exerciseArray)) {
-      return res.status(200).json({ success: true, data: null });
+    // Fallback: the answer may live under a different category/subcategory bucket
+    // (e.g. submitted as You_Do but reopened in a section where the category prop
+    // differs, so the editor queried We_Do). Scan every bucket by exerciseId +
+    // questionId so retest pre-fill is bucket-agnostic — this is what made the
+    // code-editor pre-fill miss while MCQ (URL-derived category) worked.
+    if (!questionAnswer && typeof course.answers.forEach === 'function') {
+      course.answers.forEach((catMap) => {
+        if (questionAnswer || !catMap) return;
+        const arrays = typeof catMap.values === 'function'
+          ? Array.from(catMap.values())
+          : Object.values(catMap || {});
+        for (const arr of arrays) {
+          const found = findQ(arr);
+          if (found) { questionAnswer = found; break; }
+        }
+      });
     }
-
-    // 5. Find the Specific Exercise Document
-    const exercise = exerciseArray.find(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
-    if (!exercise) {
-      return res.status(200).json({ success: true, data: null });
-    }
-
-    // 6. Find the Specific Question Answer
-    const questionAnswer = exercise.questions.find(q => q.questionId && q.questionId.toString() === questionId);
 
     if (questionAnswer) {
-      return res.status(200).json({ 
-        success: true, 
-        data: questionAnswer.codeAnswer, 
+      return res.status(200).json({
+        success: true,
+        data: questionAnswer.codeAnswer,
         language: questionAnswer.language,
         status: questionAnswer.status,
         score: questionAnswer.score,
-        attempts: questionAnswer.attempts || 0 // Added attempts to response for frontend check
+        attempts: questionAnswer.attempts || 0
       });
-    } else {
-      return res.status(200).json({ success: true, data: null });
     }
+    return res.status(200).json({ success: true, data: null });
 
   } catch (error) {
     console.error("Error in getAnswerByQuestionId:", error);
@@ -1297,9 +1456,17 @@ exports.submitMultipleFiles = async (req, res) => {
       language = "multi-file",
       isMultiFile = true,
       isTestSubmission,
+      submitType,        // 'USER' (manual) | 'AUTO' (system auto-submit on violation/timeout)
+      autoSubmitReason,  // human-readable reason when submitType === 'AUTO'
     } = req.body;
 
     const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
+
+    // Normalize submit type + reason (only meaningful on a full test submission).
+    const finalSubmitType = submitType === 'AUTO' ? 'AUTO' : 'USER';
+    const finalAutoSubmitReason = finalSubmitType === 'AUTO'
+      ? String(autoSubmitReason || '').slice(0, 300)
+      : '';
 
     // Validate required fields
     if (!courseId || !exerciseId || !questionId) {
@@ -1364,7 +1531,12 @@ exports.submitMultipleFiles = async (req, res) => {
         message: "User not found"
       });
     }
- 
+
+    // We Do / You Do duration tracking (start = first save, end = test submit)
+    if (category === 'We_Do' || category === 'You_Do') {
+      trackAssignmentDuration({ user, courseId, exerciseId, exerciseName: req.body.exerciseName, subcategory, method: category, nodeId: req.body.nodeId, nodeName: req.body.nodeName, nodeType: req.body.nodeType, isTestSubmit });
+    }
+
     // Generate unique IDs for files and folders if not provided
     const processedFiles = files.map(file => ({
       id: file.id || `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -1556,6 +1728,8 @@ exports.submitMultipleFiles = async (req, res) => {
         testSubmissions: isTestSubmit ? 1 : 0,
         lastTestSubmittedAt: isTestSubmit ? new Date() : null,
         lateSubmission: isTestSubmit ? isLate : false,
+        submitType: isTestSubmit ? finalSubmitType : 'USER',
+        autoSubmitReason: isTestSubmit ? finalAutoSubmitReason : '',
       });
     } else {
       // Update existing exercise
@@ -1594,6 +1768,8 @@ exports.submitMultipleFiles = async (req, res) => {
           existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
           existingExercise.lastTestSubmittedAt = new Date();
           existingExercise.lateSubmission = isLate;
+          existingExercise.submitType = finalSubmitType;
+          existingExercise.autoSubmitReason = finalAutoSubmitReason;
         }
         existingExercise.status = 'completed';
       } else {
@@ -1738,7 +1914,14 @@ exports.submitMultipleFiles = async (req, res) => {
         cssCode: foundQuestion.files?.find(f => f.language === 'css')?.content || "",
         jsCode: foundQuestion.files?.find(f => f.language === 'javascript')?.content || "",
         sqlCode: foundQuestion.files?.find(f => f.language === 'sql')?.content || "",
-        
+
+        // MCQ / single-file / Others answer data (for retest pre-fill)
+        codeAnswer: foundQuestion.codeAnswer || "",
+        isCorrect: typeof foundQuestion.isCorrect === 'boolean' ? foundQuestion.isCorrect : null,
+        language: foundQuestion.language || "",
+        othersFiles: foundQuestion.othersFiles || [],
+        nodeType: foundQuestion.nodeType || "",
+
         // Metadata
         score: foundQuestion.score || 0,
         status: foundQuestion.status || 'submitted',

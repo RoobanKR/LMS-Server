@@ -68,7 +68,7 @@ const questionsSchema = new mongoose.Schema({
   },
 
   // MCQ Specific Fields
-  mcqQuestionTitle: titleandDescriptionSchema,
+    mcqQuestionTitle: { type: mongoose.Schema.Types.Mixed },
   mcqQuestionDescription: titleandDescriptionSchema,
   mcqQuestionType: { 
     type: String, 
@@ -126,7 +126,6 @@ const questionsSchema = new mongoose.Schema({
   },
   difficulty: {
     type: String,
-    enum: ["Easy", "Medium", "Hard"],
   },
   sampleInput: { type: String },
   sampleOutput: { type: String },

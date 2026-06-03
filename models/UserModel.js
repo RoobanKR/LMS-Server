@@ -263,6 +263,33 @@ const exerciseProgressSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
     description: "True if the most recent Submit Exercise happened after endDate but inside the cutOff window"
+  },
+  // How the most recent full Submit Exercise happened:
+  //  'USER' = student manually submitted;
+  //  'AUTO' = system auto-submitted on a rule/proctoring violation or timeout.
+  submitType: {
+    type: String,
+    enum: ['USER', 'AUTO'],
+    default: 'USER',
+    description: "Manual (USER) vs system auto-submit (AUTO) for the most recent submission"
+  },
+  // When submitType === 'AUTO', the human-readable reason that triggered it
+  // (e.g. 'Tab switch limit reached', 'Time limit reached', 'Face not detected',
+  //  'Multiple person detected'). Empty string for manual (USER) submissions.
+  autoSubmitReason: {
+    type: String,
+    default: '',
+    description: "Stored violation/timeout reason for AUTO submissions; blank for USER"
+  },
+  // Per-student retest window granted by a coordinator via "Unlock Assessment".
+  // When present and the current time is within [startDate, endDate], the student
+  // can retake this assessment even if the assessment's own window has ended.
+  // This is isolated to this student only — it never affects other students.
+  retestWindow: {
+    startDate: { type: Date, default: null },
+    endDate: { type: Date, default: null },
+    unlockedAt: { type: Date, default: null },
+    unlockedBy: { type: mongoose.Schema.Types.ObjectId, default: null }
   }
 }, {
   timestamps: true

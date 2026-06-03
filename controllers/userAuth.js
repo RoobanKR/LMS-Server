@@ -1,4 +1,5 @@
 const User = require("../models/UserModel");
+const ActivityLog = require("../models/ActivityLog");
 const Otp = require("../models/OTPModel");
 const { createSecretToken } = require("../config/secretToken");
 const config = require("config");
@@ -361,6 +362,30 @@ module.exports.UserSignIn = async (req, res) => {
       token: token,
     });
     await newToken.save();
+
+    // Fire-and-forget login activity log — never blocks the login response
+    const clientInfo = req.body.clientInfo || {};
+    const rawIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+      || req.socket?.remoteAddress || req.ip || '';
+    // Normalise IPv4-mapped IPv6 loopback (::1, ::ffff:127.0.0.1) to a clean value
+    const resolvedIp = /^(::1|::ffff:127\.0\.0\.1|127\.0\.0\.1)$/.test(rawIp) ? 'localhost' : rawIp;
+    ActivityLog.create({
+      userId: user._id,
+      userName: `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+      userEmail: user.email,
+      userRole: user.role?.originalRole || user.role?.renameRole || '',
+      action: 'login',
+      details: {
+        // Prefer the real public IP the client resolved; fall back to the
+        // server-derived IP (which is 'localhost' in local development).
+        ipAddress: clientInfo.ipAddress || resolvedIp,
+        location:  clientInfo.location  || null,
+        device:    clientInfo.device    || null,
+        browser:   clientInfo.browser   || null,
+        os:        clientInfo.os        || null,
+        userAgent: clientInfo.userAgent || null,
+      },
+    }).catch(() => {});
 
     const sanitizedUser = {
       _id: user._id,

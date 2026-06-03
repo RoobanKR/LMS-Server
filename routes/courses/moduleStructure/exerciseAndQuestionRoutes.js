@@ -26,7 +26,8 @@ const {
   uploadQuestionFile,
   addYouDoExercise,
   updateYouDoExercise,
-  getYouDoExercises  
+  getYouDoExercises,
+  saveAssessmentRecording,
 } = require("../../../controllers/courses/moduleStructure/exerciseAndQuestion");
 const {
   parseBulkDocument,
@@ -110,6 +111,8 @@ router.get(
 router.post("/exercise/lock", userAuth, lockExercise);
 // 2. Check Exercise Status
 router.get("/exercise/status", userAuth, getExerciseStatus);
+// 3. Save proctoring screen-recording URL (client uploads to Cloudinary, sends URL here)
+router.post("/assessment/recording", userAuth, saveAssessmentRecording);
 
 router.get("/exercise/:exerciseId", userAuth, getExerciseById);
 
