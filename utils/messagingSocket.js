@@ -65,16 +65,17 @@ function registerMessagingHandlers(io, socket) {
       }
 
       const senderName = await resolveSenderName(socket.userId);
-      const doc = await ProctorMessage.create({
+
+      // EPHEMERAL test notification — NOT persisted. Delivered live only.
+      const payload = {
+        _id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         assessmentId: String(assessmentId),
         studentId: String(studentId),
-        senderId: String(socket.userId || ""),
         senderName,
         message: text,
         scope: "individual",
-      });
-
-      const payload = toPayload(doc);
+        createdAt: new Date().toISOString(),
+      };
       io.to(`user-${studentId}`).emit("student:message", payload);
       io.to(teachersRoom(assessmentId)).emit("dashboard:message_sent", payload);
       if (typeof ack === "function") ack({ ok: true, message: payload });
@@ -99,25 +100,13 @@ function registerMessagingHandlers(io, socket) {
 
       const senderName = await resolveSenderName(socket.userId);
 
-      // Recipients = students still taking this assessment (not yet submitted).
+      // Recipients = students still taking this assessment (for the ack count only).
       const sessions = await ExamSession.find({ assessmentId: String(assessmentId), submittedAt: null })
         .select("studentId")
         .lean();
       const ids = [...new Set(sessions.map((s) => String(s.studentId)))];
 
-      // Persist one doc per recipient so each student's history stays consistent.
-      if (ids.length) {
-        await ProctorMessage.insertMany(
-          ids.map((sid) => ({
-            assessmentId: String(assessmentId),
-            studentId: sid,
-            senderId: String(socket.userId || ""),
-            senderName,
-            message: text,
-            scope: "broadcast",
-          }))
-        );
-      }
+      // EPHEMERAL — broadcast is delivered live only, never persisted.
 
       // Real-time fan-out to everyone currently connected in the room.
       const payload = {

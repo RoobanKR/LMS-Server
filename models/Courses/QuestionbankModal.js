@@ -61,10 +61,12 @@ const questionsSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-  questionType: { 
-    type: String, 
+  questionType: {
+    type: String,
     required: true,
-    enum: ["MCQ", "Programming"]
+    // Lowercase values are the current convention (mcq + the programming sub-types).
+    // "MCQ" / "Programming" are kept for backward compatibility with existing data.
+    enum: ["mcq", "programming", "frontend", "database", "MCQ", "Programming"]
   },
 
   // MCQ Specific Fields
@@ -129,6 +131,9 @@ const questionsSchema = new mongoose.Schema({
   },
   sampleInput: { type: String },
   sampleOutput: { type: String },
+  // Database sub-type fields
+  sampleQuery: { type: String },
+  expectedResult: { type: String },
   score: { type: Number, min: 0, max: 100 },
   constraints: [{ type: String }],
   hints: [hintSchema],

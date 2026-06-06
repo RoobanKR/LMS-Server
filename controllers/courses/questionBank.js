@@ -382,7 +382,7 @@ exports.createQuestionBank = async (req, res) => {
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
           questionCategory: question.questionCategory || 'General',
-          questionType: 'MCQ',
+          questionType: 'mcq',
           isActive: question.isActive !== undefined ? question.isActive : true,
           mcqQuestionTitle: finalMcqTitleObj, // Now includes the uploaded image URL
           ...(finalMcqDescriptionObj && finalMcqDescriptionObj.text && { mcqQuestionDescription: finalMcqDescriptionObj }),
@@ -487,12 +487,16 @@ exports.createQuestionBank = async (req, res) => {
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
           questionCategory: question.questionCategory || 'Programming',
-          questionType: 'Programming',
+          // Specific sub-type: programming (core) / frontend / database.
+          questionType: (question.questionType || 'programming').toLowerCase(),
           title: question.title,
           description: question.description,
           difficulty: question.difficulty ? question.difficulty.charAt(0).toUpperCase() + question.difficulty.slice(1).toLowerCase() : 'medium',
           sampleInput: question.sampleInput || '',
           sampleOutput: question.sampleOutput || '',
+          // Database sub-type fields (were previously dropped).
+          sampleQuery: question.sampleQuery || '',
+          expectedResult: question.expectedResult || '',
           score: question.score,
           constraints: question.constraints || [],
           hints: hints,
@@ -534,16 +538,17 @@ exports.createQuestionBank = async (req, res) => {
       console.log(`✅ Created new question bank with ${processedQuestions.length} question(s)`);
     }
 
-    const mcqQuestions = processedQuestions.filter(q => q.questionType === 'MCQ');
-    const programmingQuestions = processedQuestions.filter(q => q.questionType === 'Programming');
+    const isMcq = (q) => (q.questionType || '').toLowerCase() === 'mcq';
+    const mcqQuestions = processedQuestions.filter(isMcq);
+    const programmingQuestions = processedQuestions.filter(q => !isMcq(q));
 
     const addedQuestions = processedQuestions.map(q => ({
       questionId: q._id.toString(),
       questionType: q.questionType,
-      title: q.questionType === 'MCQ' ? q.mcqQuestionTitle?.text : q.title,
+      title: isMcq(q) ? q.mcqQuestionTitle?.text : q.title,
       mcqQuestionType: q.mcqQuestionType,
-      difficulty: q.questionType === 'MCQ' ? q.mcqQuestionDifficulty : q.difficulty,
-      score: q.questionType === 'MCQ' ? q.mcqQuestionScore : q.score
+      difficulty: isMcq(q) ? q.mcqQuestionDifficulty : q.difficulty,
+      score: isMcq(q) ? q.mcqQuestionScore : q.score
     }));
 
     const totalMCQMarks = mcqQuestions.reduce((sum, q) => sum + (q.mcqQuestionScore || 0), 0);
@@ -930,7 +935,7 @@ exports.updateQuestionBank = async (req, res) => {
       processedQuestion = {
         _id: existingQuestion._id, // IMPORTANT: Keep the original ID
         questionCategory: question.questionCategory || existingQuestion.questionCategory || 'General',
-        questionType: 'MCQ',
+        questionType: 'mcq',
         isActive: question.isActive !== undefined ? question.isActive : existingQuestion.isActive,
         mcqQuestionTitle: finalMcqTitleObj,
         ...(finalMcqDescriptionObj && finalMcqDescriptionObj.text && { mcqQuestionDescription: finalMcqDescriptionObj }),
@@ -995,12 +1000,16 @@ exports.updateQuestionBank = async (req, res) => {
       processedQuestion = {
         _id: existingQuestion._id, // IMPORTANT: Keep the original ID
         questionCategory: question.questionCategory || existingQuestion.questionCategory || 'Programming',
-        questionType: 'Programming',
+        // Specific sub-type: programming (core) / frontend / database.
+        questionType: (question.questionType || existingQuestion.questionType || 'programming').toLowerCase(),
         title: question.title || existingQuestion.title,
         description: question.description || existingQuestion.description,
         difficulty: question.difficulty ? question.difficulty.charAt(0).toUpperCase() + question.difficulty.slice(1).toLowerCase() : existingQuestion.difficulty || 'medium',
         sampleInput: question.sampleInput || existingQuestion.sampleInput || '',
         sampleOutput: question.sampleOutput || existingQuestion.sampleOutput || '',
+        // Database sub-type fields (were previously dropped).
+        sampleQuery: question.sampleQuery !== undefined ? question.sampleQuery : (existingQuestion.sampleQuery || ''),
+        expectedResult: question.expectedResult !== undefined ? question.expectedResult : (existingQuestion.expectedResult || ''),
         score: question.score || existingQuestion.score || 0,
         constraints: question.constraints || existingQuestion.constraints || [],
         hints: (question.hints || existingQuestion.hints || []).map((h, idx) => ({

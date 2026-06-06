@@ -227,7 +227,7 @@ exports.Addusers = async (req, res) => {
         <p><strong>Important:</strong> Please change your password after your first login for security purposes.</p>
         
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${process.env.BASE_URL || "https://lms-client-jade-three.vercel.app"}/login" 
+          <a href="${process.env.BASE_URL || "http://localhost:3000"}/login" 
              style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
              Login to Your Account
           </a>
@@ -903,7 +903,7 @@ exports.toggleUserStatus = async (req, res) => {
           </div>
           
           <div style="text-align: center; margin: 30px 0;">
-            <a href="${process.env.BASE_URL || "https://lms-client-jade-three.vercel.app"}/login" 
+            <a href="${process.env.BASE_URL || "http://localhost:3000"}/login" 
                style="background-color: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
                Login to Your Account
             </a>
@@ -1012,7 +1012,7 @@ exports.bulkToggleUserStatus = async (req, res) => {
             </div>
             
             <div style="text-align: center; margin: 30px 0;">
-              <a href="${process.env.BASE_URL || "https://lms-client-jade-three.vercel.app"}/signin" 
+              <a href="${process.env.BASE_URL || "http://localhost:3000"}/signin" 
                  style="background-color: #28a745; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
                  Login to Your Account
               </a>
@@ -1276,7 +1276,7 @@ exports.bulkUploadUsers = async (req, res) => {
             <p><strong>Important:</strong> Please change your password after your first login for security purposes.</p>
             
             <div style="text-align: center; margin: 30px 0;">
-              <a href="${process.env.BASE_URL || "https://lms-client-jade-three.vercel.app"}/login" 
+              <a href="${process.env.BASE_URL || "http://localhost:3000"}/login" 
                  style="background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;">
                  Login to Your Account
               </a>
