@@ -728,6 +728,217 @@ exports.getAllCoursesData = async (req, res) => {
 
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LIGHTWEIGHT "tree skeleton" endpoint
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Built for `uploadcourseresources` first-paint. The original `getAllCoursesData`
+// returns the FULL course payload — every student's submission history
+// (`singleParticipants` populated to the user + role + answers level) plus the
+// complete `pedagogy` tree for every module / submodule / topic / subtopic.
+// The Resources page only renders the sidebar tree + course meta on first
+// paint; pedagogy is loaded per-node on demand by `getNodePedagogy` below.
+//
+// This endpoint therefore:
+//   • SKIPS `singleParticipants` entirely (saves the bulk of the payload).
+//   • SELECTS only `_id` + `title` per node — no `pedagogy` field comes
+//     back, so the per-document JSON shrinks drastically.
+//   • Returns course-level fields the page actually reads: `_id`,
+//     `courseName`, `courseCode`, `resourcesType`, `testConfiguration`.
+//
+// `getAllCoursesData` is left untouched — consumers that need the full
+// payload (reviewSubmission, the live-dashboard marks computation) keep
+// hitting the existing route.
+exports.getAllCoursesDataLight = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    // ── Projection strategy ──
+    // Earlier I used a tight allowlist (`.select("_id courseName resourcesType …")`)
+    // and dropped pedagogy / nodeIds / subcategory configs / index along
+    // with it — which broke `subcategories` useMemo (`d.I_Do.map`),
+    // `originalData.courses`, `originalData.topicId`, etc.
+    //
+    // Lesson: this page reads ENOUGH fields off the course/node documents
+    // that maintaining an allowlist is brittle. Switching to an EXCLUSION
+    // projection (just drop the heavy fields) gives the user almost the
+    // same payload-size win without risking another runtime crash on a
+    // field I didn't account for.
+    //
+    // The bulk of the original payload was:
+    //   (a) `singleParticipants` populated to user + role + answers
+    //       → avoided by simply NOT calling `.populate()` here.
+    //   (b) `pedagogy` on every node (folders + files + AI notes + …)
+    //       → excluded via `.select("-pedagogy")` on each node query.
+    //
+    // The `singleParticipants` field on the course doc is just an array of
+    // ObjectIds (refs) when not populated — KBs, not MBs. We can leave it
+    // in or strip it; stripping it (`-singleParticipants`) saves a couple
+    // more KB and makes the contract explicit.
+    const course = await CourseStructure.findById(courseId)
+      .select("-singleParticipants")
+      .lean();
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: "Course not found",
+      });
+    }
+
+    // For each level: exclude pedagogy (heavy), keep everything else.
+    // This gives us moduleId/subModuleId/topicId/courses/index/title/etc.
+    // — all the small metadata fields the client's upload + breadcrumb +
+    // form-data builders depend on.
+    const modules = await Module1.find({ courses: courseId })
+      .select("-pedagogy")
+      .lean();
+
+    const subModules = await SubModule1.find({
+      moduleId: { $in: modules.map(m => m._id) },
+    })
+      .select("-pedagogy")
+      .lean();
+
+    const topics = await Topic1.find({
+      $or: [
+        { moduleId: { $in: modules.map(m => m._id) } },
+        { subModuleId: { $in: subModules.map(sm => sm._id) } },
+      ],
+    })
+      .select("-pedagogy")
+      .lean();
+
+    const subTopics = await SubTopic1.find({
+      topicId: { $in: topics.map(t => t._id) },
+    })
+      .select("-pedagogy")
+      .lean();
+
+    // Same nesting shape as the heavy endpoint so the existing client-side
+    // `transformToCourseNodes` walker keeps working unchanged. The node
+    // objects here carry every field they did before EXCEPT `pedagogy`.
+    const structuredCourse = {
+      ...course,
+      modules: modules.map((module) => {
+        const moduleSubModules = subModules.filter(
+          (sm) => sm.moduleId?.toString() === module._id.toString(),
+        );
+        const processedSubModules = moduleSubModules.map((subModule) => {
+          const subModuleTopics = topics.filter(
+            (t) => t.subModuleId?.toString() === subModule._id.toString(),
+          );
+          const processedTopics = subModuleTopics.map((topic) => ({
+            ...topic,
+            subTopics: subTopics.filter(
+              (st) => st.topicId?.toString() === topic._id.toString(),
+            ),
+          }));
+          return {
+            ...subModule,
+            topics: processedTopics,
+          };
+        });
+
+        const moduleDirectTopics = topics.filter(
+          (t) =>
+            t.moduleId?.toString() === module._id.toString() &&
+            (!t.subModuleId ||
+              !moduleSubModules.some(
+                (sm) => sm._id.toString() === t.subModuleId?.toString(),
+              )),
+        );
+        const processedDirectTopics = moduleDirectTopics.map((topic) => ({
+          ...topic,
+          subTopics: subTopics.filter(
+            (st) => st.topicId?.toString() === topic._id.toString(),
+          ),
+        }));
+
+        return {
+          ...module,
+          subModules: processedSubModules,
+          topics: processedDirectTopics,
+        };
+      }),
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: structuredCourse,
+    });
+  } catch (error) {
+    console.error("Error fetching light course structure:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SINGLE NODE PEDAGOGY endpoint
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns ONLY the pedagogy + a few node-level fields the client needs for
+// the currently-selected sidebar node. Used to replace the second full
+// `/getAll/courses-data/:courseId` fetch the Resources page does inside
+// `fetchAndRefresh` — that round-trip was downloading the entire course
+// payload again just to grab one node's pedagogy.
+//
+// `:type` is one of: module | submodule | topic | subtopic
+// `:id`   is the node's MongoDB `_id`.
+//
+// We also surface `testConfiguration` because the client reads that on the
+// selected node for the I-Do tab strip (line 1087 in page.tsx).
+exports.getNodePedagogy = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+
+    // Map URL type to the right Mongoose model. Keep an allowlist so a
+    // malformed `:type` can't accidentally hit some other model.
+    const MODEL_BY_TYPE = {
+      module: Module1,
+      submodule: SubModule1,
+      topic: Topic1,
+      subtopic: SubTopic1,
+    };
+    const Model = MODEL_BY_TYPE[String(type).toLowerCase()];
+    if (!Model) {
+      return res.status(400).json({
+        success: false,
+        message: `Unknown node type "${type}". Expected one of: module, submodule, topic, subtopic.`,
+      });
+    }
+
+    // We only want pedagogy + a couple of small siblings; everything else on
+    // the document (timestamps, large legacy arrays, etc.) is unnecessary.
+    const node = await Model.findById(id)
+      .select("_id title pedagogy testConfiguration")
+      .lean();
+
+    if (!node) {
+      return res.status(404).json({
+        success: false,
+        message: `${type} not found`,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: node,
+    });
+  } catch (error) {
+    console.error("Error fetching node pedagogy:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
 exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
   try {
     const { courseId, exerciseId } = req.params;

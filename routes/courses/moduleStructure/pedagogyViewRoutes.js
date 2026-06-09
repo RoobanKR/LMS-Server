@@ -10,6 +10,11 @@ const {
   deletePedagogyView,
   deleteDocument,
   getAllCoursesData,
+  // Lightweight Resources-page-only variants. See pedagogyView.js for the
+  // rationale — they exist to avoid the ~95% wasted payload `getAllCoursesData`
+  // ships when the page only renders the sidebar tree + selected-node pedagogy.
+  getAllCoursesDataLight,
+  getNodePedagogy,
   duplicateCourseHierarchy,
   updateEntity,          // ← must be here
   updateFileSettings,    // ← keep this too
@@ -38,11 +43,21 @@ router.delete(
 router.delete("/delete/:model/:id", deleteDocument);
 
 // common data fetch for course related data
-router.get("/getAll/courses-data/:courseId", getAllCoursesData);
+//
+// IMPORTANT ROUTE ORDERING NOTE:
+//   Express resolves routes in declaration order. A more-specific path like
+//   `/getAll/courses-data/light/:courseId` MUST be declared BEFORE the
+//   wildcard `/getAll/courses-data/:courseId`, otherwise the wildcard
+//   swallows the request with `courseId === "light"`. The lightweight
+//   routes therefore come first.
+router.get("/getAll/courses-data/light/:courseId", getAllCoursesDataLight);
+router.get("/getAll/courses-data/node-pedagogy/:type/:id", getNodePedagogy);
 router.get(
   "/getAll/courses-data/without-ai-notes/:courseId/:exerciseId",
   getAllCoursesDataWithoutAINotes
 );
+// Generic catch-all comes LAST.
+router.get("/getAll/courses-data/:courseId", getAllCoursesData);
 
 router.get(
   "/student-Dashboard/courses-data/analytics",
