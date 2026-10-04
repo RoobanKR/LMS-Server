@@ -110,7 +110,7 @@ app.use(express.json({ extended: false }));
 // browser, which looks exactly like the API being down.
 const CORS_ORIGINS = [
   "https://lms-client-five-theta.vercel.app",
-  "https://lms-smartcliff-71ug4ew5q-muthurajanparthsarathys-projects.vercel.app",
+  "http://187.126.118.102",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
