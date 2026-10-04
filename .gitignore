@@ -18,7 +18,9 @@ dist/
 
 # Package files
 *.jar
-
+.env
+.env.*
+!.env.example
 # Maven
 target/
 dist/
@@ -40,5 +42,16 @@ Thumbs.db
 *.exe
 *.war
 
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
 
+# Backup archives written by System Settings > Backup (local destination).
+# These contain full copies of live client, user and course data.
+backups/
 
+# Files students' programs create in the multi-file editor (private, kept one day).
+code-files/
+.env
+.env

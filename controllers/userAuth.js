@@ -17,17 +17,57 @@ const path = require("path");
 const fs = require("fs");
 const tokenModal = require("../models/tokenModal");
 const xlsx = require("xlsx");
+const { autoEnrollUser } = require("../utils/autoEnrollUser");
 
-const { createClient } = require("@supabase/supabase-js");
 const BulkSendMail = require("../models/BulkSendMailCount");
 const InstitutionModal = require("../models/InstitutionModal");
+const { getSuperAdminPermissions, isSuperAdminRoleName } = require("../utils/superAdminPermissions");
 const roleModel = require("../models/RoleModel");
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabaseUrl = process.env.SUPABASE_URL;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
+// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
+// resolving { data, error }), so the call sites below are unchanged — see
+// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+const { storage, publicUrlFor } = require("../utils/storage");
+const { getDefaultProfileImageUrl } = require("../utils/profileImageStorage");
+
+// Build a 2-4 letter prefix from an institution name.
+// Multi-word: first letter of each word ("Peelemedu Samanaidu Govindasamy" -> "PSG").
+// Single-word: first 3 letters of the word ("Anna" -> "ANN").
+// Falls back to "INS" if nothing usable is found.
+const buildInstitutionPrefix = (instName) => {
+  if (!instName || typeof instName !== "string") return "INS";
+  const cleaned = instName.replace(/[^A-Za-z\s]/g, "").trim();
+  if (!cleaned) return "INS";
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) {
+    return words.map((w) => w[0].toUpperCase()).join("").slice(0, 4);
+  }
+  return words[0].slice(0, 3).toUpperCase();
+};
+
+// Atomically reserve the next sequence number for this institution
+// and return the formatted userId (e.g. "PSG0001").
+const generateUserIdForInstitution = async (institutionId) => {
+  if (!institutionId) return null;
+  const updated = await InstitutionModal.findOneAndUpdate(
+    { _id: institutionId },
+    { $inc: { userIdCounter: 1 } },
+    { new: true }
+  );
+  if (!updated) return null;
+  const prefix = buildInstitutionPrefix(updated.inst_name);
+  const seq = String(updated.userIdCounter).padStart(4, "0");
+  return `${prefix}${seq}`;
+};
 
 const getDefaultPermissions = (roleName) => {
+  // Super admin gets the full module catalog (matches "Super Admin",
+  // "super_admin", "Super Administrator", etc.)
+  if (isSuperAdminRoleName(roleName)) {
+    return getSuperAdminPermissions();
+  }
+
   // Student permissions
   if (roleName === 'student') {
     return [
@@ -104,12 +144,20 @@ exports.Addusers = async (req, res) => {
       status,
       course,
       degree,
-      department, 
-      year, 
+      department,
+      year,
       semester,
+      section,
+      rollNumber,
       batch,
+      phase,
+      studentType,
+      serviceModel,
+      serviceMappingId,
+      clientName,
+      clientId,
     } = req.body;
-    
+
     if (!email || !firstName || !lastName || !password) {
       return res.status(400).json({
         message: [{ key: "error", value: "Missing required fields" }],
@@ -123,15 +171,17 @@ exports.Addusers = async (req, res) => {
       });
     }
 
-    const existingEmployee = await User.findOne({ email });
+    // Two independent lookups — run them concurrently.
+    const [existingEmployee, roleDetails] = await Promise.all([
+      User.findOne({ email }),
+      Role.findById(role),
+    ]);
     if (existingEmployee) {
-      return res.status(403).json({
-        message: [{ key: "error", value: "User already exists" }],
+      return res.status(409).json({
+        message: [{ key: "error", value: "A user with this email already exists. Use a different email or edit the existing user." }],
       });
     }
 
-    // Get the role details to determine default permissions
-    const roleDetails = await Role.findById(role);
     if (!roleDetails) {
       return res.status(400).json({
         message: [{ key: "error", value: "Invalid role selected" }],
@@ -153,39 +203,26 @@ exports.Addusers = async (req, res) => {
 
     if (imageFile) {
       const uniqueFileName = `${Date.now()}_${imageFile.name}`;
-      const { data, error } = await supabase.storage
+      const { data, error } = await storage
         .from("smartlms")
         .upload(`users/profile/${uniqueFileName}`, imageFile.data);
 
       if (error) {
-        console.error("Error uploading image to Supabase:", error);
+        console.error("Error uploading profile image to Cloudinary:", error);
         return res.status(500).json({
           message: [
-            { key: "error", value: "Error uploading image to Supabase" },
+            { key: "error", value: "Error uploading profile image" },
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = publicUrlFor(`users/profile/${uniqueFileName}`);
     } else {
-      const currentDate = new Date();
-      const defaultFileName = `default_profile_image_${currentDate.getTime()}.jpg`;
-      const { data, error } = await supabase.storage
-        .from("smartlms")
-        .copy(
-          "users/profile/default_profile_image.jpg",
-          `users/profile/${defaultFileName}`
-        );
-
-      if (error) {
-        console.error("Error copying default image in Supabase:", error);
-        return res.status(500).json({
-          message: [
-            { key: "error", value: "Error setting up default profile image" },
-          ],
-        });
-      }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${defaultFileName}`;
+      // Seed and reuse the shared avatar; no pre-existing storage object is needed.
+      imageUrl = await getDefaultProfileImageUrl();
     }
+
+    // Generate institution-scoped human-readable userId (e.g. "PSG0001")
+    const generatedUserId = await generateUserIdForInstitution(req.user.institution);
 
     const newUser = await User.create({
       email,
@@ -199,16 +236,50 @@ exports.Addusers = async (req, res) => {
       course,
       batch,
       degree,
-      department, 
-      year, 
+      department,
+      year,
       semester,
+      section,
+      rollNumber,
+      phase,
+      clientName,clientId,
+      studentType,
+      serviceModel,
+      serviceMappingId: serviceMappingId || undefined,
       status: status || "active",
       permissions: defaultPermissions, // Assign default permissions
       institution: req.user.institution,
+      userId: generatedUserId,
       createdBy: req.user.email,
     });
 
     const token = createSecretToken(newUser._id);
+
+    // Auto-enrol into every course this user's client ▸ degree ▸ department ▸
+    // section already maps to, so they appear under the course's Enrollment
+    // immediately instead of waiting for someone to open it and pull them in.
+    //
+    // Awaited, but NEVER allowed to fail the request. The user exists by this
+    // point; losing that to an enrolment error — over a course the admin has
+    // probably never heard of — would be a far worse outcome than a student who
+    // has to be enrolled by hand. autoEnrollUser reports rather than throws, and
+    // this try/catch is the second belt on top of that.
+    try {
+      // The actor is an ObjectId ref on the batch, so pass the id — NOT the
+      // email. A string here fails a Mongoose cast and takes the whole save
+      // down, which the catch below would hide as a silent "0 enrolled".
+      const actorId = req.user?.id || req.user?._id;
+      const enrolment = await autoEnrollUser(newUser, req.user.institution, actorId);
+      if (enrolment.error) {
+        console.error(`Auto-enrol error for ${newUser.email}:`, enrolment.error);
+      } else {
+        console.log(
+          `Auto-enrol ${newUser.email}: ${enrolment.enrolled.length} enrolled, ${enrolment.skipped.length} skipped`
+        );
+      }
+    } catch (enrolErr) {
+      console.error(`Auto-enrol threw for ${newUser.email}:`, enrolErr.message);
+    }
 
     const emailSubject = `Welcome to smartlms LMS - Your Account Details`;
     const emailBody = `
@@ -251,6 +322,7 @@ exports.Addusers = async (req, res) => {
         message: [{ key: "success", value: "User registered successfully with welcome email" }],
         user: {
           _id: newUser._id,
+          userId: newUser.userId,
           email: newUser.email,
           firstName: newUser.firstName,
           lastName: newUser.lastName,
@@ -272,6 +344,7 @@ exports.Addusers = async (req, res) => {
         ],
         user: {
           _id: newUser._id,
+          userId: newUser.userId,
           email: newUser.email,
           firstName: newUser.firstName,
           lastName: newUser.lastName,
@@ -295,9 +368,9 @@ exports.Addusers = async (req, res) => {
     }
 
     if (error.code === 11000) {
-      return res.status(400).json({
+      return res.status(409).json({
         message: [
-          { key: "error", value: "User with this email already exists" },
+          { key: "error", value: "A user with these details already exists. Check the email or edit the existing user." },
         ],
       });
     }
@@ -558,17 +631,688 @@ module.exports.UserVerify = async (req, res) => {
     });
   }
 };
+// Collation matching the page's `toLowerCase() + localeCompare(numeric:true)`.
+const LIST_COLLATION = { locale: 'en', strength: 2, numericOrdering: true };
+
+// Escape user input before it becomes a regex — without this a search for
+// "a.b" or "c++" matches the wrong rows, and a pathological pattern is a
+// denial-of-service against a 100k collection.
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * One page of the institution's users, filtered and sorted in Mongo.
+ *
+ * Kept separate from getUserAccess so the untouched full-list path stays
+ * readable and its other three consumers keep the exact response they had.
+ */
+// The report groups users under their client and names the service each one
+// belongs to. Both live behind refs, and on both the legacy first enrolment
+// and every entry of `services[]` — so all four are resolved here rather than
+// leaving the client to guess a display name from an id.
+const CLIENT_BRIEF = 'clientCompany businessModel type clientAddress status';
+function populateExportRefs(query) {
+  return query
+    .populate('clientId', CLIENT_BRIEF)
+    .populate('serviceMappingId', 'service serviceModels')
+    .populate('services.clientId', CLIENT_BRIEF)
+    .populate('services.serviceMappingId', 'service serviceModels');
+}
+
+async function getUserAccessPaginated(req, res, baseFilter) {
+  const {
+    page, limit, search, searchField, roles, status, degree, department, year, batch,
+    sortKey, sortDir,
+    // Multi-select filters added for the User Management filter bar. Each is a
+    // comma-separated list; absent means "no filter" as everywhere else here.
+    clients, services, serviceModels, statuses,
+  } = req.query;
+
+  // Export mode. The page's "Export all" writes a CSV of every row matching the
+  // current filters, not just the visible page — so it needs the whole result
+  // set, which it pulls in large chunks of the THIRTEEN columns the CSV
+  // actually has. Same filters, same sort, ~150 bytes a row instead of ~2.6 KB.
+  const isExport = req.query.export === '1' || req.query.export === 'true';
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const perPage = Math.min(isExport ? 5000 : 200, Math.max(1, parseInt(limit, 10) || 25));
+
+  const filter = { ...baseFilter };
+
+  // Search. `searchField` is the scope picker sitting next to the page's search
+  // box: absent or 'all' searches every searchable field (what the box always
+  // did), otherwise the term is matched against that ONE field so "Raj" under
+  // the Email scope cannot pull in a row that merely has Raj in its name.
+  const term = String(search || '').trim();
+  const scope = String(searchField || 'all').trim().toLowerCase();
+  if (term) {
+    const rx = new RegExp(escapeRegex(term), 'i');
+    // `role` is a ref, so the only way to match a typed role NAME is to resolve
+    // names to ids first. One indexed read over a handful of role documents —
+    // it does not scale with the user count, so it is safe on this path.
+    const needsRoleLookup = scope === 'role' || scope === 'all';
+    const roleMatchIds = needsRoleLookup
+      ? (await Role.find({ renameRole: rx }).select('_id').lean()).map((r) => r._id)
+      : [];
+    const roleClause = roleMatchIds.length ? [{ role: { $in: roleMatchIds } }] : [];
+
+    // 'user' is the USER column on the page, which renders firstName + lastName.
+    const BY_SCOPE = {
+      user: [{ firstName: rx }, { lastName: rx }],
+      email: [{ email: rx }],
+      phone: [{ phone: rx }],
+      role: roleClause,
+      all: [
+        { firstName: rx }, { lastName: rx }, { email: rx }, { phone: rx },
+        { degree: rx }, { department: rx }, ...roleClause,
+      ],
+    };
+    // hasOwnProperty, not `BY_SCOPE[scope] || …`: a scope of "constructor" or
+    // "toString" would otherwise resolve to an inherited FUNCTION and be spread
+    // into `$or` as garbage.
+    const clauses = Object.prototype.hasOwnProperty.call(BY_SCOPE, scope)
+      ? BY_SCOPE[scope]
+      : BY_SCOPE.all;
+    // A scope with no possible match (Role scope, no role name contains the
+    // term) must return nothing. An empty `$or` is a Mongo error, and dropping
+    // it would return EVERY user — the one wrong answer here.
+    filter.$or = clauses.length ? clauses : [{ _id: { $exists: false } }];
+  }
+  // Multi-select roles; the page compared against the user's role id.
+  const roleIds = String(roles || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (roleIds.length) filter.role = { $in: roleIds };
+  // The page treated "" and "all" as no filter for each of these.
+  const eq = (v) => v && v !== 'all';
+  // transformUser (queries/users.ts) does `status: user.status || "active"`,
+  // so a document with NO status counts as active on the page. Matching only
+  // `{status:'active'}` here silently dropped those users — caught by diffing
+  // this against the client predicate (179 vs 174).
+  if (eq(status)) {
+    filter.status = status === 'active'
+      ? { $in: ['active', null, ''] }
+      : status;
+  }
+  if (eq(degree)) filter.degree = degree;
+  if (eq(department)) filter.department = department;
+  if (eq(year)) filter.year = year;
+  if (eq(batch)) filter.batch = batch;
+
+  // ── Client / service / service-model / status, all multi-select ───────────
+  // A user's FIRST enrolment lives in the legacy top-level fields; any later
+  // ones are appended to `services[]`. "Belongs to this client" therefore means
+  // either place, which is why each of these is an $or over two paths.
+  //
+  // They go into $and rather than filter.$or: the search above already owns
+  // filter.$or, and a second assignment would silently replace it — turning a
+  // scoped search into an unscoped one.
+  const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
+  const andClauses = [];
+
+  const clientIds = csv(clients).filter((id) => mongoose.Types.ObjectId.isValid(id));
+  if (clientIds.length) {
+    const ids = clientIds.map((id) => new mongoose.Types.ObjectId(id));
+    andClauses.push({ $or: [{ clientId: { $in: ids } }, { 'services.clientId': { $in: ids } }] });
+  }
+
+  const modelNames = csv(serviceModels);
+  if (modelNames.length) {
+    andClauses.push({ $or: [{ serviceModel: { $in: modelNames } }, { 'services.serviceModel': { $in: modelNames } }] });
+  }
+
+  // Service is the mapping's NAME, which users do not store — they store the
+  // mapping id. Resolve names to ids once (a handful of documents, indexed by
+  // institution) and match on those.
+  const serviceNames = csv(services);
+  if (serviceNames.length) {
+    const ServiceMapping = mongoose.model('LMS-ServiceMapping');
+    const mappingIds = (await ServiceMapping
+      .find({ ...(baseFilter.institution ? { institution: baseFilter.institution } : {}), service: { $in: serviceNames } })
+      .select('_id').lean()).map((m) => m._id);
+    // No mapping carries that name → no user can match. An empty $in would
+    // match nothing anyway, but being explicit keeps the intent readable.
+    andClauses.push({
+      $or: [{ serviceMappingId: { $in: mappingIds } }, { 'services.serviceMappingId': { $in: mappingIds } }],
+    });
+  }
+
+  // Multi-select status supersedes the single `status` above when present. A
+  // document with no status reads as active on the page, so 'active' has to
+  // match null and '' too.
+  const statusList = csv(statuses).filter((v) => v !== 'all');
+  if (statusList.length) {
+    delete filter.status;
+    const wanted = statusList.includes('active')
+      ? [...statusList.filter((v) => v !== 'active'), 'active', null, '']
+      : statusList;
+    andClauses.push({ status: { $in: wanted } });
+  }
+
+  if (andClauses.length) filter.$and = andClauses;
+
+  // Sort. The page's default (no sortKey) is newest-first, which is what the
+  // client-side transform applied; `_id` breaks ties so paging is stable.
+  const dir = sortDir === 'desc' ? -1 : 1;
+  // Tie-break must reproduce the page's own ordering. It sorts a list that is
+  // already newest-first, and Array.prototype.sort is stable — so rows with an
+  // equal sort key keep newest-first. For descending the page sorts ascending
+  // and then `.reverse()`s, which flips the ties too, giving oldest-first.
+  // Hence `-dir`: newest-first when ascending, oldest-first when descending.
+  const tie = { createdAt: -dir, _id: -dir };
+  // KNOWN, BOUNDED DEVIATION — the Name sort.
+  //
+  // The page compared `${firstName} ${lastName}` as ONE concatenated string.
+  // This compares the two fields in order, which is the same ordering EXCEPT
+  // for rows whose stored name has leading/trailing whitespace: concatenation
+  // inserts the separator before the second field, so " " vs the first
+  // character of lastName decides it, where a field-wise compare settles it on
+  // firstName alone. Measured on the live institution: 4 of 179 rows carry
+  // such whitespace ("kiot  ", "VARSINI ", "METHUN ", "DHANUSH ") and exactly
+  // those 4 positions move; every other sort and every filter is identical.
+  //
+  // Reproducing the concatenation would mean sorting on a computed `$concat`,
+  // which no index can serve — a blocking in-memory sort of the whole
+  // collection, which is the thing this endpoint exists to avoid. Trimming the
+  // stored names removes the difference at the source; flagged separately.
+  const SORTABLE = {
+    name: { firstName: dir, lastName: dir, ...tie },
+    phone: { phone: dir, ...tie },
+  };
+  const sort = SORTABLE[sortKey] || { createdAt: -1, _id: -1 };
+
+  // Also drops `permissions` — 45% of a page's bytes. Verified unused on this
+  // path: transformUser (queries/users.ts) never maps it, and PermissionModal
+  // receives only `userId` and loads permissions itself. The FULL-list path
+  // above still returns it, for consumers that may rely on it.
+  let projection = '-password -tokens -notifications -ai_history -courses -permissions';
+  // The CSV's columns, verbatim (see exportUsers in the page). `role` is the id
+  // the populate below resolves to a display name.
+  if (isExport) {
+    // The report groups by client and names each user's service, so the export
+    // needs the client and service fields too. `clientName`/`serviceModel` are
+    // the legacy first enrolment; `services[]` holds any later ones, and
+    // `clientId`/`serviceMappingId` are what the populates below resolve.
+    projection = 'firstName lastName email phone gender role batch degree '
+      + 'department semester section clientName clientId status '
+      + 'serviceModel serviceMappingId services';
+  }
+
+  let Users;
+  let total;
+
+  // ── Sorting by role or status ──────────────────────────────────────────────
+  // Neither is a plain stored field. `role` sorts on the POPULATED display
+  // name, and `status` on the DEFAULTED one ("" and missing both read as
+  // "active" on the page). The obvious implementation computes the value in an
+  // aggregation and sorts on it — correct, but a computed sort can use no
+  // index, so producing ONE page means an in-memory sort of every user in the
+  // institution. That is the exact cost this endpoint exists to remove.
+  //
+  // Instead: both fields have very few DISTINCT values (a handful of roles, two
+  // statuses), and every row sharing a value is a tie. So order the VALUES,
+  // then walk them in order, taking the page's slice out of whichever
+  // value-bucket it lands in. Each bucket read is an equality match plus the
+  // createdAt/_id tie-break — exactly the shape of the compound indexes in
+  // UserModel — so a page reads its 25 documents and no more, at any scale.
+  if (sortKey === 'role' || sortKey === 'status') {
+    // The distinct values under the CURRENT filter AND their counts, in ONE
+    // round trip. `$match` + `$group` on the sort field is served by the
+    // compound index (both fields are in it, so no document is fetched).
+    //
+    // This replaces a `distinct()` followed by a per-bucket countDocuments.
+    // Every hop to this cluster costs ~35 ms, and the serial version — discover
+    // values, then count or read one bucket at a time until the page filled —
+    // measured 551 ms for a role-sorted page against 225 ms for an unsorted
+    // one. Knowing every count up front means the page's buckets can be read
+    // together instead of one after another.
+    //
+    // `aggregate()` does NOT cast a filter against the schema the way `find()`
+    // does, so the institution id (a string from the URL) has to be cast by
+    // hand or `$match` silently matches nothing.
+    const grouped = await User.aggregate([
+      { $match: User.find(filter).cast(User) },
+      { $group: { _id: `$${sortKey}`, n: { $sum: 1 } } },
+    ]);
+    const countByRaw = new Map(grouped.map((g) => [String(g._id), g.n]));
+    const rawValues = grouped.map((g) => g._id);
+
+    const buckets = new Map();
+    const addToBucket = (label, raw) => {
+      if (!buckets.has(label)) buckets.set(label, []);
+      buckets.get(label).push(raw);
+    };
+    if (sortKey === 'status') {
+      // "" and missing both display as active — the page's `status || "active"`.
+      rawValues.forEach((v) => addToBucket(v || 'active', v));
+    } else {
+      const roleIds = rawValues.filter(Boolean);
+      const roleDocs = roleIds.length
+        ? await Role.find({ _id: { $in: roleIds } }).select('renameRole').lean()
+        : [];
+      const nameById = new Map(roleDocs.map((r) => [String(r._id), r.renameRole]));
+      // A role id with no surviving Role document populates to null, which the
+      // page renders as "Unknown Role" — same for a blank renameRole.
+      rawValues.forEach((v) => addToBucket((v && nameById.get(String(v))) || 'Unknown Role', v));
+    }
+
+    // `distinct` reports null for a missing field when unfiltered, but DROPS it
+    // once a filter is applied — so with `status=active` (which matches the
+    // documents that have no status at all) the 5 status-less users had no
+    // bucket to land in and vanished from the count. The fallback bucket
+    // therefore always carries the absent forms explicitly. `role` is an
+    // ObjectId field, so "" is not among them: it would fail to cast.
+    const fallbackLabel = sortKey === 'status' ? 'active' : 'Unknown Role';
+    const absentForms = sortKey === 'status' ? [null, ''] : [null];
+    buckets.set(fallbackLabel, [
+      ...new Set([...(buckets.get(fallbackLabel) || []), ...absentForms]),
+    ]);
+
+    // Order the labels the way the page ordered them, then reverse for desc —
+    // including the ties, which the tie-break below already mirrors.
+    const ordered = [...buckets.keys()].sort((a, b) =>
+      String(a).toLowerCase().localeCompare(String(b).toLowerCase(), undefined, { numeric: true }));
+    if (dir === -1) ordered.reverse();
+
+    // Equality when a label maps to a single stored value (every role bucket,
+    // and "inactive"): a one-point predicate lets the skip walk index keys,
+    // where `$in` makes it fetch each document first. Only the "active" bucket
+    // is multi-valued, since "", null and missing all display as active.
+    const bucketFilter = (label) => {
+      const values = buckets.get(label);
+      const predicate = values.length === 1 ? values[0] : { $in: values };
+      // When the sort field is ALSO being filtered on (sort by status while
+      // filtering status), the bucket must INTERSECT that filter, not replace
+      // it — overwriting the key let the fallback bucket pull in rows the
+      // filter had excluded.
+      if (filter[sortKey] === undefined) return { ...filter, [sortKey]: predicate };
+      const { [sortKey]: existing, ...rest } = filter;
+      return {
+        ...rest,
+        $and: [...(filter.$and || []), { [sortKey]: existing }, { [sortKey]: predicate }],
+      };
+    };
+    // Counts are already known, so the page's slice is pure arithmetic: walk
+    // the labels in order, skip whole buckets the offset clears, and record
+    // the (skip, limit) each remaining bucket owes. No query yet.
+    const bucketCount = (label) => buckets.get(label)
+      .reduce((sum, raw) => sum + (countByRaw.get(String(raw)) || 0), 0);
+    total = ordered.reduce((sum, label) => sum + bucketCount(label), 0);
+
+    const reads = [];
+    let skipLeft = (pageNum - 1) * perPage;
+    let need = perPage;
+    for (let i = 0; i < ordered.length && need > 0; i += 1) {
+      const count = bucketCount(ordered[i]);
+      if (skipLeft >= count) { skipLeft -= count; continue; }
+      const take = Math.min(need, count - skipLeft);
+      reads.push({ label: ordered[i], skip: skipLeft, take });
+      need -= take;
+      skipLeft = 0;
+    }
+
+    // A page usually sits inside ONE bucket; when it straddles a boundary the
+    // reads are independent, so they go together rather than in sequence.
+    // No collation here: within a bucket the sort is on createdAt/_id, which
+    // are not strings — and a collation would demand a collated index that
+    // this one deliberately is not.
+    const chunks = await Promise.all(reads.map((r) => {
+      const q = User.find(bucketFilter(r.label)).select(projection);
+      if (!isExport) q.populate('institution', 'inst_name basedOn');
+      if (isExport) populateExportRefs(q);
+      return q
+        .populate('role', 'originalRole renameRole roleValue institution')
+        .sort(tie)
+        .skip(r.skip)
+        .limit(r.take)
+        .lean();
+    }));
+    Users = chunks.flat();
+  } else {
+    const q = User.find(filter).select(projection);
+    if (!isExport) q.populate('institution', 'inst_name basedOn');
+    if (isExport) populateExportRefs(q);
+    [Users, total] = await Promise.all([
+      q
+        .populate('role', 'originalRole renameRole roleValue institution')
+        .collation(LIST_COLLATION)
+        .sort(sort)
+        .skip((pageNum - 1) * perPage)
+        .limit(perPage)
+        .lean(),
+      User.countDocuments(filter),
+    ]);
+  }
+
+  // A CSV chunk needs neither the facet list nor the client-name join, but the
+  // report does need to name each user's SERVICE. Users created before
+  // `serviceMappingId` existed carry only a service-model name, which on its
+  // own says nothing about which service it belongs to — so the mappings for
+  // the institution travel with the chunk and the report resolves
+  // (client, service model) -> service from them. It is a handful of small
+  // documents, and sending them beats a second round trip per export.
+  if (isExport) {
+    const ServiceMappingRef = mongoose.model('LMS-ServiceMapping');
+    const serviceIndex = await ServiceMappingRef
+      .find(baseFilter.institution ? { institution: baseFilter.institution } : {})
+      .select('client service serviceModels')
+      .lean();
+    return res.status(200).json({
+      message: [{ key: 'success', value: 'Users export chunk retrieved' }],
+      Users, total, page: pageNum, limit: perPage,
+      totalPages: Math.max(1, Math.ceil(total / perPage)),
+      serviceIndex,
+    });
+  }
+
+  // The client's Batch dropdown was built from the loaded rows; with only one
+  // page in hand it has to come from the server, over the whole institution
+  // rather than the current filter (the page listed every batch, always).
+  const batches = (await User.distinct('batch', baseFilter))
+    .filter(Boolean)
+    .sort();
+
+  // Client lookup for just this page's rows, not the whole directory.
+  const clientSubDocIds = [...new Set(Users.map((u) => u.clientId).filter(Boolean))];
+  const ClientManagement = mongoose.model('LMS-ClientManagement');
+  const allClientDocs = clientSubDocIds.length
+    ? await ClientManagement.find({ _id: { $in: clientSubDocIds } }).lean()
+    : [];
+  const clientMap = {};
+  allClientDocs.forEach((c) => { if (c._id) clientMap[c._id.toString()] = c; });
+
+  const transformedUsers = Users.map((user) => {
+    const userObj = { ...user };
+    if (user.clientId) {
+      userObj.clientId = clientMap[user.clientId.toString()] || null;
+    }
+    return userObj;
+  });
+
+  // The filter dropdowns and the four header tiles describe the WHOLE
+  // institution, not the current page and not the current filter — the same
+  // contract Service Mapping's facets have. One aggregation for all of it.
+  // Same casting note as getUserAccessStats and getUserAccessRoleCounts:
+  // aggregate() does not cast a filter the way find() does, so the institution
+  // id — a string off the URL — matches nothing until it is cast.
+  const overviewMatch = User.find(baseFilter).cast(User);
+
+  const [overview] = await User.aggregate([
+    { $match: overviewMatch },
+    {
+      $facet: {
+        counts: [{
+          $group: {
+            _id: null,
+            users: { $sum: 1 },
+            // No status, '' and 'active' all read as active on the page.
+            active: { $sum: { $cond: [{ $in: ['$status', ['inactive']] }, 0, 1] } },
+            // Union with services[] so a user enrolled with a second client
+            // counts that client too — same rule the dropdown uses.
+            clients: { $addToSet: '$clientId' },
+            extraClients: { $push: { $ifNull: ['$services.clientId', []] } },
+          },
+        }],
+        // Every client any user belongs to, legacy field and services[] both.
+        // Only the ids: `clientName` is a denormalised copy that is often blank
+        // on older records, so the display names are read from the client
+        // collection below instead.
+        clientIds: [
+          { $project: { all: { $concatArrays: [{ $cond: [{ $ifNull: ['$clientId', false] }, ['$clientId'], []] }, { $ifNull: ['$services.clientId', []] }] } } },
+          { $unwind: '$all' },
+          { $group: { _id: '$all' } },
+        ],
+        // Union the legacy field with the multi-service array so a user's
+        // later enrolments show up in the dropdowns too.
+        models: [
+          { $project: { all: { $concatArrays: [{ $cond: [{ $ifNull: ['$serviceModel', false] }, ['$serviceModel'], []] }, { $ifNull: ['$services.serviceModel', []] }] } } },
+          { $unwind: '$all' },
+          { $group: { _id: '$all' } },
+        ],
+        mappingIds: [
+          { $project: { all: { $concatArrays: [{ $cond: [{ $ifNull: ['$serviceMappingId', false] }, ['$serviceMappingId'], []] }, { $ifNull: ['$services.serviceMappingId', []] }] } } },
+          { $unwind: '$all' },
+          { $group: { _id: '$all' } },
+        ],
+      },
+    },
+  ]);
+
+  const counts = overview?.counts?.[0] || { users: 0, active: 0, clients: [], extraClients: [] };
+  const allClientKeys = new Set([
+    ...(counts.clients || []).filter(Boolean).map(String),
+    ...(counts.extraClients || []).flat().filter(Boolean).map(String),
+  ]);
+  const usedMappingIds = (overview?.mappingIds || []).map((m) => m._id).filter(Boolean);
+  const ServiceMappingModel = mongoose.model('LMS-ServiceMapping');
+  const serviceNameDocs = usedMappingIds.length
+    ? await ServiceMappingModel.find({ _id: { $in: usedMappingIds } }).select('service').lean()
+    : [];
+
+  const usedClientIds = (overview?.clientIds || []).map((c) => c._id).filter(Boolean);
+  const ClientModel = mongoose.model('LMS-ClientManagement');
+  const clientDocs = usedClientIds.length
+    ? await ClientModel.find({ _id: { $in: usedClientIds } }).select('clientCompany').lean()
+    : [];
+  const distinctClients = clientDocs
+    .map((c) => [String(c._id), c.clientCompany || 'Unnamed client'])
+    .sort((a, b) => a[1].localeCompare(b[1]));
+
+  return res.status(200).json({
+    message: [{ key: 'success', value: 'Users page retrieved' }],
+    Users: transformedUsers,
+    total,
+    page: pageNum,
+    limit: perPage,
+    totalPages: Math.max(1, Math.ceil(total / perPage)),
+    facets: {
+      batches,
+      clients: distinctClients,
+      serviceModels: (overview?.models || []).map((m) => m._id).filter(Boolean).sort(),
+      services: [...new Set(serviceNameDocs.map((m) => m.service).filter(Boolean))].sort(),
+    },
+    stats: {
+      users: counts.users || 0,
+      clients: allClientKeys.size,
+      active: counts.active || 0,
+      inactive: Math.max(0, (counts.users || 0) - (counts.active || 0)),
+    },
+  });
+}
+
+/**
+ * The six roster figures the admin Profile page shows, counted in Mongo.
+ *
+ * Every rule here is a port of that page's own derivation (ProfilePage.tsx,
+ * `dashboardStats`), so the numbers are the ones it has always displayed:
+ *   • the role bucket reads roleValue and falls back to originalRole — with
+ *     `||` semantics, where an EMPTY STRING also falls through;
+ *   • `activeUsers` tests the RAW stored status, so a user with no status is
+ *     NOT counted active (deliberately unlike the user-management list, whose
+ *     transform defaults a missing status to "active");
+ *   • `newUsers` uses a cutoff the BROWSER computed, passed in as epoch ms,
+ *     because the page derived it from local time.
+ */
+async function getUserAccessStats(req, res, filter) {
+  const STUDENT = 'student';
+  const STAFF_ROLES = ['poc', 'trainer'];
+  const ADMIN_ROLES = ['admin', 'ldhead', 'subhead', 'programcoordinator'];
+
+  const since = Number(req.query.since);
+  const cutoff = Number.isFinite(since) ? new Date(since) : new Date(Date.now() - 30 * 86400000);
+
+  // `aggregate()` does not cast a filter the way `find()` does — the
+  // institution id arrives as a string, so an uncast $match matches nothing.
+  const match = User.find(filter).cast(User);
+
+  const [row] = await User.aggregate([
+    { $match: match },
+    { $lookup: { from: 'roles', localField: 'role', foreignField: '_id', as: '_r' } },
+    {
+      $addFields: {
+        _rv: {
+          $toLower: {
+            $let: {
+              vars: { v: { $ifNull: [{ $first: '$_r.roleValue' }, ''] } },
+              in: {
+                $cond: [
+                  { $eq: ['$$v', ''] },
+                  { $ifNull: [{ $first: '$_r.originalRole' }, ''] },
+                  '$$v',
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: 1 },
+        students: { $sum: { $cond: [{ $eq: ['$_rv', STUDENT] }, 1, 0] } },
+        staff: { $sum: { $cond: [{ $in: ['$_rv', STAFF_ROLES] }, 1, 0] } },
+        admin: { $sum: { $cond: [{ $in: ['$_rv', ADMIN_ROLES] }, 1, 0] } },
+        newUsers: { $sum: { $cond: [{ $gte: ['$createdAt', cutoff] }, 1, 0] } },
+        activeUsers: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+      },
+    },
+  ]);
+
+  const stats = row || {
+    total: 0, students: 0, staff: 0, admin: 0, newUsers: 0, activeUsers: 0,
+  };
+  delete stats._id;
+
+  return res.status(200).json({
+    message: [{ key: 'success', value: 'User stats retrieved' }],
+    stats,
+  });
+}
+
+/**
+ * How many users hold each role, counted in Mongo.
+ *
+ * Behind the user-count button on the User Management page: the button shows
+ * the institution total, the modal breaks it down. Counting is the entire job,
+ * so no documents cross the wire and the response stays a few hundred bytes
+ * whether the institution has 179 users or 100,000.
+ *
+ * Scoped to the INSTITUTION only, deliberately — it answers "who is in this
+ * directory", not "what is the table filtered to right now", so the figures do
+ * not move while the operator types in the search box.
+ */
+async function getUserAccessRoleCounts(req, res, filter) {
+  // Same casting note as getUserAccessStats: aggregate() does not cast a
+  // filter the way find() does, so an uncast institution id matches nothing.
+  const match = User.find(filter).cast(User);
+
+  const roles = await User.aggregate([
+    { $match: match },
+    { $group: { _id: '$role', count: { $sum: 1 } } },
+    { $lookup: { from: 'roles', localField: '_id', foreignField: '_id', as: '_r' } },
+    {
+      $project: {
+        _id: 0,
+        count: 1,
+        // Null for users carrying no role at all — they still get a row, since
+        // a directory total that silently omits them would not add up.
+        roleId: { $ifNull: [{ $toString: '$_id' }, ''] },
+        // renameRole is the label the admin UI shows everywhere else;
+        // originalRole is the fallback for roles predating renaming. An EMPTY
+        // string has to fall through too, which $ifNull alone would not do.
+        //
+        // `role` is not one shape across the collection: measured live, 359
+        // users hold an ObjectId ref and 20 legacy rows hold a plain STRING
+        // like "Student". The $lookup finds nothing for those, and the stored
+        // string IS the name — without that branch a whole institution's
+        // users are reported under "No role".
+        name: {
+          $let: {
+            vars: {
+              renamed: { $ifNull: [{ $first: '$_r.renameRole' }, ''] },
+              original: { $ifNull: [{ $first: '$_r.originalRole' }, ''] },
+              raw: { $cond: [{ $eq: [{ $type: '$_id' }, 'string'] }, '$_id', ''] },
+            },
+            in: {
+              $switch: {
+                branches: [
+                  { case: { $ne: ['$$renamed', ''] }, then: '$$renamed' },
+                  { case: { $ne: ['$$original', ''] }, then: '$$original' },
+                  { case: { $ne: ['$$raw', ''] }, then: '$$raw' },
+                ],
+                default: 'No role',
+              },
+            },
+          },
+        },
+      },
+    },
+    // Biggest bucket first, which is the order the modal lists them in.
+    { $sort: { count: -1, name: 1 } },
+  ]);
+
+  const total = roles.reduce((sum, r) => sum + r.count, 0);
+
+  return res.status(200).json({
+    message: [{ key: 'success', value: 'User role counts retrieved' }],
+    total,
+    roles,
+  });
+}
 
 exports.getUserAccess = async (req, res) => {
   try {
-    const { instutionId } = req.params; 
+    const { instutionId } = req.params;
     
     let filter = {};
     if (instutionId && instutionId !== 'all') {
       filter.institution = instutionId;
     }
-    
-    const Users = await User.find(filter).populate('institution').populate('role');
+
+    // ── Paginated mode (opt-in via `page`) ────────────────────────────────────
+    // Sized for a six-figure directory. Without `page` this endpoint returns
+    // the whole institution, which is what EnrollmentTab, EnrollUsersModal and
+    // the Profile stats still expect — so that path is left exactly as it was.
+    //
+    // With `page`, the search, the six filters and the sort all run in Mongo
+    // and only one page crosses the wire. The predicates below are ports of
+    // the user-management page's own `filteredUsersList` useMemo, field for
+    // field, so a given filter set selects the same rows it always did.
+    //
+    // Collation matters: the client compared with
+    // `String(x).toLowerCase().localeCompare(y, undefined, { numeric: true })`.
+    // `{ locale: 'en', strength: 2, numericOrdering: true }` is the Mongo
+    // equivalent — case-insensitive, and "Batch 10" sorts after "Batch 9"
+    // rather than before it.
+    if (req.query.page !== undefined) {
+      return await getUserAccessPaginated(req, res, filter);
+    }
+
+    // ── Counts-only mode (opt-in via `stats=1`) ──────────────────────────────
+    // The admin Profile page displays six numbers derived from the roster and
+    // nothing else — no rows are rendered. It was fetching the ENTIRE user list
+    // to count them: 583,744 bytes for 179 users, and about 311 MB at 100,000.
+    // Counting is what a database is for.
+    if (req.query.stats === '1' || req.query.stats === 'true') {
+      return await getUserAccessStats(req, res, filter);
+    }
+
+    // ── Role-count mode (opt-in via `roleCounts=1`) ──────────────────────────
+    // The user-count button and its breakdown modal. Same reasoning as stats
+    // above: the page renders numbers, so only numbers are fetched.
+    if (req.query.roleCounts === '1' || req.query.roleCounts === 'true') {
+      return await getUserAccessRoleCounts(req, res, filter);
+    }
+
+    // Get all users. The exclusion projection drops the fields no consumer of
+    // this endpoint reads (verified: usermanagement page, EnrollmentTab,
+    // EnrollUsersModal, ProfilePage) — password hashes, session tokens,
+    // private notifications, AI chat history and full course answer state
+    // were ~1.2 MB of a measured 1.77 MB response for a 179-user institution,
+    // and none of them belong in an admin list payload. The scoped populates
+    // keep exactly the sub-fields consumers use.
+    const Users = await User.find(filter)
+      .select('-password -tokens -notifications -ai_history -courses')
+      .populate('institution', 'inst_name basedOn')
+      .populate('role', 'originalRole renameRole roleValue institution')
+      .lean();
     
     if (!Users || Users.length === 0) {
       const message = instutionId && instutionId !== 'all'
@@ -578,14 +1322,48 @@ exports.getUserAccess = async (req, res) => {
       return res.status(404).json({ message });
     }
     
+    // Get all unique client IDs referenced by users
+    const clientSubDocIds = [...new Set(Users.map(user => user.clientId).filter(id => id))];
+
+    // Fetch the referenced Client Management documents (standalone client management)
+    const ClientManagement = mongoose.model('LMS-ClientManagement');
+    const allClientDocs = await ClientManagement.find({
+      _id: { $in: clientSubDocIds }
+    }).lean();
+
+    // Create a map of client _id to the client object
+    const clientMap = {};
+    allClientDocs.forEach(client => {
+      if (client._id) {
+        clientMap[client._id.toString()] = client;
+      }
+    });
+    
+    // Transform the users to include the specific client
+    const transformedUsers = Users.map(user => {
+      const userObj = { ...user };
+      
+      // If user has clientId, find it in the map
+      if (user.clientId) {
+        const clientIdStr = user.clientId.toString();
+        if (clientMap[clientIdStr]) {
+          userObj.clientId = clientMap[clientIdStr];
+        } else {
+          userObj.clientId = null;
+        }
+      }
+      
+      return userObj;
+    });
+    
     const successMessage = instutionId && instutionId !== 'all'
       ? `Users retrieved for institution ID: ${instutionId}`
       : "All users retrieved successfully";
     
     res.status(200).json({
       message: [{ key: "success", value: successMessage }],
-      Users: Users,
-      totalCount: Users.length,
+      Users: transformedUsers,
+      totalCount: transformedUsers.length,
     });
   } catch (error) {
     console.error("Error in getUserAccess:", error);
@@ -618,6 +1396,135 @@ exports.getUserAccessById = async (req, res) => {
   }
 };
 
+/**
+ * Self-service profile update — photo and password ONLY.
+ *
+ * Deliberately separate from UpdateUser above rather than folded into it.
+ * UpdateUser is the admin path: it takes a :userId and writes role, status,
+ * permissions and placement. Teaching it to set passwords would hand anyone
+ * who can reach it the ability to set SOMEONE ELSE'S password without knowing
+ * it. This one ignores any id in the request and acts on req.user._id, and it
+ * writes exactly two fields.
+ *
+ * The password change verifies the current one first, so an unattended logged-in
+ * session cannot be used to lock the real owner out.
+ */
+exports.UpdateMyProfile = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) {
+      return res.status(401).json({
+        message: [{ key: "error", value: "User is not logged in" }],
+      });
+    }
+
+    // Only what this handler reads: the hash to compare against and the old
+    // image path to clean up.
+    const user = await User.findById(userId).select("password profile email");
+    if (!user) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+
+    const { currentPassword, newPassword } = req.body;
+    const imageFile = req.files?.profile;
+
+    if (!imageFile && !newPassword) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Nothing to update" }],
+      });
+    }
+
+    // ── Password ──
+    let hashedPassword;
+    if (newPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Current password is required" }],
+        });
+      }
+      const ok = await bcrypt.compare(String(currentPassword), user.password);
+      if (!ok) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Current password is incorrect" }],
+        });
+      }
+      if (String(newPassword).length < 8) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "New password must be at least 8 characters" }],
+        });
+      }
+      if (String(newPassword) === String(currentPassword)) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "New password must differ from the current one" }],
+        });
+      }
+      // The schema hashes on save(), and this writes with findByIdAndUpdate —
+      // which does NOT run that hook. Hashing here, with the same cost factor
+      // the hook uses, is what keeps a plaintext password out of the document.
+      hashedPassword = await bcrypt.hash(String(newPassword), 12);
+    }
+
+    // ── Photo ── (same upload + old-image cleanup as UpdateUser)
+    let imageUrl;
+    if (imageFile) {
+      if (user.profile && !user.profile.includes("default_profile_image")) {
+        try {
+          const oldImagePath = user.profile.split("/").pop();
+          const { error: deleteError } = await storage
+            .from("smartlms")
+            .remove([`users/profile/${oldImagePath}`]);
+          if (deleteError) console.error("Error deleting old image:", deleteError);
+        } catch (deleteErr) {
+          console.error("Error extracting old image path:", deleteErr);
+        }
+      }
+
+      const uniqueFileName = `${Date.now()}_${imageFile.name}`;
+      const { error } = await storage
+        .from("smartlms")
+        .upload(`users/profile/${uniqueFileName}`, imageFile.data);
+
+      if (error) {
+        console.error("Error uploading image to Supabase:", error);
+        return res.status(500).json({
+          message: [{ key: "error", value: "Error uploading image to Supabase" }],
+        });
+      }
+      imageUrl = publicUrlFor(`users/profile/${uniqueFileName}`);
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        ...(hashedPassword && { password: hashedPassword }),
+        ...(imageUrl && { profile: imageUrl }),
+        updatedBy: req.user.email,
+        updatedAt: new Date(),
+      },
+      { new: true, runValidators: true }
+    ).select("_id email firstName lastName phone gender profile updatedAt");
+
+    return res.status(200).json({
+      message: [{
+        key: "success",
+        value: hashedPassword && imageUrl
+          ? "Photo and password updated"
+          : hashedPassword
+            ? "Password updated"
+            : "Profile photo updated",
+      }],
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Error updating own profile:", error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Error updating profile" }],
+    });
+  }
+};
+
 exports.UpdateUser = async (req, res) => {
   try {
     const { userId } = req.params;
@@ -632,10 +1539,14 @@ exports.UpdateUser = async (req, res) => {
       status,
       batch,
       degree,
-      department, year, semester,
+      department, year, semester, section, rollNumber,
+      phase,
+      studentType,serviceModel,clientName,clientId
     } = req.body;
 
-    const existingUser = await User.findById(userId);
+    // Only email (duplicate check) and profile (old-image cleanup) are read
+    // off this doc — no need to materialize notifications/courses/etc.
+    const existingUser = await User.findById(userId).select("email profile");
     if (!existingUser) {
       return res.status(404).json({
         message: [{ key: "error", value: "User not found" }],
@@ -661,7 +1572,7 @@ exports.UpdateUser = async (req, res) => {
       ) {
         try {
           const oldImagePath = existingUser.profile.split("/").pop();
-          const { error: deleteError } = await supabase.storage
+          const { error: deleteError } = await storage
             .from("smartlms")
             .remove([`users/profile/${oldImagePath}`]);
 
@@ -674,7 +1585,7 @@ exports.UpdateUser = async (req, res) => {
       }
 
       const uniqueFileName = `${Date.now()}_${imageFile.name}`;
-      const { data, error } = await supabase.storage
+      const { data, error } = await storage
         .from("smartlms")
         .upload(`users/profile/${uniqueFileName}`, imageFile.data);
 
@@ -686,7 +1597,7 @@ exports.UpdateUser = async (req, res) => {
           ],
         });
       }
-      imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/users/profile/${uniqueFileName}`;
+      imageUrl = publicUrlFor(`users/profile/${uniqueFileName}`);
     }
 
     const updateData = {
@@ -700,10 +1611,17 @@ exports.UpdateUser = async (req, res) => {
       ...(department && { department }),
       ...(year && { year }),
       ...(semester && { semester }),
+      ...(section && { section }),
+      ...(rollNumber && { rollNumber }),
+      ...(phase && { phase }),
       ...(role && { role }),
       ...(status && { status }),
       ...(permission && { permission }),
       ...(imageUrl && { profile: imageUrl }),
+      ...(studentType && { studentType }),
+      ...(serviceModel && { serviceModel }),
+      ...(clientName && { clientName }),
+      ...(clientId && { clientId }),
       updatedBy: req.user.email,
       updatedAt: new Date(),
     };
@@ -766,7 +1684,8 @@ exports.DeleteUser = async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const existingUser = await User.findById(userId);
+    // Only profile is read (for storage cleanup) before the delete.
+    const existingUser = await User.findById(userId).select("profile");
     if (!existingUser) {
       return res.status(404).json({
         message: [{ key: "error", value: "User not found" }],
@@ -778,7 +1697,7 @@ exports.DeleteUser = async (req, res) => {
         const imageUrlParts = existingUser.profile.split("/");
         const imageName = imageUrlParts[imageUrlParts.length - 1];
 
-        const { error: removeError } = await supabase.storage
+        const { error: removeError } = await storage
           .from("smartlms")
           .remove([`users/profile/${imageName}`]);
 
@@ -850,7 +1769,8 @@ exports.toggleUserStatus = async (req, res) => {
       });
     }
 
-    const user = await User.findById(userId);
+    // Only status is read (to compute the toggle when none was sent).
+    const user = await User.findById(userId).select("status");
     if (!user) {
       return res.status(404).json({
         message: [{ key: "error", value: "User not found" }],
@@ -950,6 +1870,112 @@ exports.toggleUserStatus = async (req, res) => {
   }
 };
 
+// ─── Bulk-add a service to many users (Reassign Users flow) ──────────────────
+// ADDITIVE by design: the user keeps every service they already have (the
+// legacy single serviceModel/serviceMappingId fields AND the services[] array)
+// and gains one more entry in services[]. Nothing is overwritten or cleared.
+//
+// Auto-enrolment runs per user, scoped to the NEW service only, through a shim
+// object: the real doc's identity/hierarchy fields plus the new service's
+// client/mapping. autoEnrollUser is add-only and idempotent, so existing
+// enrolments are never touched, and course links land on the real doc through
+// the shared courses[] reference.
+exports.bulkAddServiceToUsers = async (req, res) => {
+  try {
+    const { userIds, service } = req.body;
+
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "User IDs array is required" }],
+      });
+    }
+    if (!service || !service.serviceMappingId || !service.clientId) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "service.serviceMappingId and service.clientId are required" }],
+      });
+    }
+
+    const actorId = req.user?.id || req.user?._id;
+    const results = [];
+
+    for (const userId of userIds) {
+      try {
+        const doc = await User.findById(userId);
+        if (!doc) {
+          results.push({ userId, status: "error", reason: "User not found" });
+          continue;
+        }
+
+        const targetMapping = String(service.serviceMappingId);
+        const alreadyLegacy =
+          doc.serviceMappingId && String(doc.serviceMappingId) === targetMapping;
+        const alreadyInArray = (doc.services || []).some(
+          (s) => s.serviceMappingId && String(s.serviceMappingId) === targetMapping
+        );
+        if (alreadyLegacy || alreadyInArray) {
+          results.push({ userId, status: "already_mapped", email: doc.email });
+          continue;
+        }
+
+        doc.services = doc.services || [];
+        doc.services.push({
+          serviceMappingId: service.serviceMappingId,
+          serviceModel: service.serviceModel || "",
+          clientId: service.clientId,
+          clientName: service.clientName || "",
+        });
+        doc.updatedAt = new Date();
+        await doc.save();
+
+        // Enrol into the new service's courses. The shim scopes autoEnrollUser
+        // to the added service; `courses` is the doc's own array so link pushes
+        // are persisted by the shim's save().
+        try {
+          const shim = {
+            _id: doc._id,
+            role: doc.role,
+            degree: doc.degree,
+            department: doc.department,
+            section: doc.section,
+            phase: "",
+            clientId: service.clientId,
+            serviceModel: service.serviceModel || "",
+            serviceMappingId: service.serviceMappingId,
+            courses: doc.courses,
+            save: () => doc.save(),
+          };
+          const enrolment = await autoEnrollUser(shim, req.user.institution, actorId);
+          if (enrolment.error) {
+            console.error(`bulk-add-service auto-enrol error for ${doc.email}:`, enrolment.error);
+          }
+          results.push({
+            userId,
+            status: "added",
+            email: doc.email,
+            enrolled: enrolment.enrolled?.length || 0,
+          });
+        } catch (enrolErr) {
+          console.error(`bulk-add-service auto-enrol threw for ${doc.email}:`, enrolErr.message);
+          // Service was added even if enrolment failed — report as added.
+          results.push({ userId, status: "added", email: doc.email, enrolled: 0 });
+        }
+      } catch (err) {
+        results.push({ userId, status: "error", reason: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      message: [{ key: "success", value: "Bulk add service completed" }],
+      results,
+    });
+  } catch (error) {
+    console.error("bulkAddServiceToUsers error:", error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Internal server error" }],
+    });
+  }
+};
+
 exports.bulkToggleUserStatus = async (req, res) => {
   try {
     const { userIds, status } = req.body;
@@ -975,9 +2001,12 @@ exports.bulkToggleUserStatus = async (req, res) => {
       }
     );
 
+    // Positive projection: the response maps _id/email/firstName/lastName/
+    // role/status and the notification emails read the same fields — the old
+    // exclusion projection still dragged every user's notifications/courses.
     const updatedUsers = await User.find(
       { _id: { $in: userIds } }
-    ).select("-password -tokens");
+    ).select("email firstName lastName role status");
 
     const emailSubject = "Account Status Update - smartlms HUB";
     
@@ -1063,7 +2092,17 @@ exports.bulkUploadUsers = async (req, res) => {
   let filePath = null;
 
   try {
-    const { notificationMethod, batch } = req.body;
+    const {
+      notificationMethod,
+      // Placement context chosen once in the modal and applied to every row, so
+      // bulk users land with the same ObjectId refs the single Add User form
+      // writes (role / clientId / serviceMappingId) instead of bare strings.
+      role: formRoleId,
+      clientId: formClientId,
+      clientName: formClientName,
+      serviceModel: formServiceModel,
+      serviceMappingId: formServiceMappingId,
+    } = req.body;
     let courses = req.body.courses;
     const institutionId = req.user.institution;
 
@@ -1145,41 +2184,133 @@ exports.bulkUploadUsers = async (req, res) => {
     const validationErrors = [];
     let creditExceeded = false;
 
-    const existingRoles = await roleModel.find({ institution: institutionId });
-    
-    const findOrCreateRole = async (roleName) => {
-      if (!roleName) return null;
-      
-      let role = existingRoles.find(r => 
-        r.originalRole?.toLowerCase() === roleName.toLowerCase() ||
-        r.renameRole?.toLowerCase() === roleName.toLowerCase()
-      );
-      
-      if (role) {
-        return role._id;
-      }
-      
+    // ── Resolve the modal's context into real refs, once for the whole file ──
+    //
+    // Everything below mirrors Addusers. Before this, bulk-created users were
+    // saved with no userId, no permissions (so they could log in and see
+    // nothing), no profile image, no client/service refs, and their courses were
+    // written to `enrolledCourses` — a field the User schema does not define, so
+    // Mongoose silently dropped it and nobody was enrolled in anything.
+    const isObjectId = (v) => !!v && mongoose.Types.ObjectId.isValid(String(v));
+
+    // Client: prefer the id the modal picked; fall back to matching a name from
+    // the sheet so the older name-only template still resolves to a real ref.
+    let resolvedClientId = isObjectId(formClientId) ? formClientId : null;
+    let resolvedClientName = (formClientName || "").trim();
+    if (resolvedClientId && !resolvedClientName) {
       try {
-        const newRole = new roleModel({
-          institution: institutionId,
-          originalRole: roleName,
-          renameRole: roleName,
-          roleValue: roleName.toLowerCase().replace(/\s+/g, '_'),
-          createdBy: req.user.email || "system"
-        });
-        
-        await newRole.save();
-        existingRoles.push(newRole);
-        return newRole._id;
-      } catch (error) {
-        console.error(`Error creating role ${roleName}:`, error);
-        return null;
+        const ClientManagement = mongoose.model("LMS-ClientManagement");
+        const clientDoc = await ClientManagement.findById(resolvedClientId);
+        if (clientDoc) resolvedClientName = clientDoc.clientCompany || "";
+      } catch (e) {
+        console.warn("Bulk upload: could not read client", e.message);
       }
+    }
+
+    const resolvedServiceMappingId = isObjectId(formServiceMappingId)
+      ? formServiceMappingId
+      : undefined;
+    const resolvedServiceModel = (formServiceModel || "").trim() || undefined;
+
+    // Role chosen in the modal wins over the sheet's role-name column.
+    let formRole = null;
+    if (isObjectId(formRoleId)) {
+      formRole = await roleModel.findById(formRoleId);
+      if (!formRole) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Invalid role selected" }],
+        });
+      }
+    }
+
+    // Reuse the same seeded avatar as single-user creation.
+    let sharedDefaultProfileUrl = null;
+    try {
+      sharedDefaultProfileUrl = await getDefaultProfileImageUrl();
+    } catch (e) {
+      console.warn("Bulk upload: default profile setup failed:", e.message);
+    }
+
+    const roleNameOf = (roleDoc) =>
+      roleDoc?.renameRole
+        ? roleDoc.renameRole.toLowerCase()
+        : roleDoc?.originalRole
+          ? roleDoc.originalRole.toLowerCase()
+          : "staff";
+
+    const existingRoles = await roleModel.find({ institution: institutionId });
+
+    // Match a role NAME from the sheet against this institution's roles, so one
+    // file can mix a Student row with an Admin row.
+    //
+    // Match-only, deliberately: this used to CREATE any role name it did not
+    // recognise, so a typo ("Studnet") silently minted a new role, and everyone
+    // on those rows got an account nobody could make sense of. An unmatched name
+    // is now reported as a row error naming the roles that do exist.
+    const findRoleByName = (roleName) => {
+      if (!roleName) return null;
+      const wanted = String(roleName).trim().toLowerCase();
+      if (!wanted) return null;
+      return (
+        existingRoles.find(
+          (r) =>
+            r.originalRole?.toLowerCase() === wanted ||
+            r.renameRole?.toLowerCase() === wanted
+        ) || null
+      );
     };
+
+    const availableRoleNames = existingRoles
+      .map((r) => r.renameRole || r.originalRole)
+      .filter(Boolean)
+      .join(", ");
+
+    // Per-row clientName / serviceModel columns are resolved to the real refs
+    // here, so a sheet can place users with different clients and services in one
+    // upload. A spreadsheet can only carry names; clientId and serviceMappingId
+    // are what actually get stored.
+    const ClientManagement = mongoose.model("LMS-ClientManagement");
+    const ServiceMapping = mongoose.model("LMS-ServiceMapping");
+
+    const institutionClients = await ClientManagement.find({ institution: institutionId }).lean();
+    const institutionMappings = await ServiceMapping.find({ institution: institutionId }).lean();
+
+    const findClientByName = (name) => {
+      const wanted = String(name || "").trim().toLowerCase();
+      if (!wanted) return null;
+      return institutionClients.find((c) => (c.clientCompany || "").trim().toLowerCase() === wanted) || null;
+    };
+
+    const clientIdOfMapping = (m) =>
+      m.client && typeof m.client === "object" ? String(m.client._id) : String(m.client || "");
+
+    // A client can run several mappings sharing one model name, so the model name
+    // alone is ambiguous. Resolve within the row's client and, when more than one
+    // still matches, say so rather than silently picking the first.
+    const findMappingByModel = (modelName, forClientId) => {
+      const wanted = String(modelName || "").trim().toLowerCase();
+      if (!wanted || !forClientId) return { matches: [] };
+      const matches = institutionMappings.filter((m) => {
+        if (clientIdOfMapping(m) !== String(forClientId)) return false;
+        const models = (m.serviceModels || []).map((s) => String(s).trim().toLowerCase());
+        if (models.includes(wanted)) return true;
+        return String(m.service || "").trim().toLowerCase() === wanted;
+      });
+      return { matches };
+    };
+
+    const availableClientNames = institutionClients
+      .map((c) => c.clientCompany)
+      .filter(Boolean)
+      .join(", ");
 
     // Process each user
     for (const userData of results) {
-      const { email, firstName, lastName, phone, role, gender, password } = userData;
+      const {
+        email, firstName, lastName, phone, role,  gender, password,
+        studentType, clientName, degree, department, year, semester,
+        rollNumber, section, phase
+      } = userData;
 
       if (!email) {
         validationErrors.push({
@@ -1199,52 +2330,192 @@ exports.bulkUploadUsers = async (req, res) => {
         continue;
       }
       
-      const roleId = await findOrCreateRole(role);
-      
-      if (!roleId) {
+      // A row's own role wins, so one file can hold a Student row and an Admin
+      // row. The modal's pick is the fallback for rows that leave it blank.
+      const rowRoleName = role !== undefined && String(role).trim() ? String(role).trim() : "";
+      const rowRole = rowRoleName ? findRoleByName(rowRoleName) : null;
+
+      if (rowRoleName && !rowRole) {
         validationErrors.push({
           user: userData,
-          error: `Invalid role: ${role}`
+          error: `Unknown role "${rowRoleName}". Available roles: ${availableRoleNames || "none configured"}`,
         });
         notSentEmails.push({ email, firstName, lastName, role });
         continue;
+      }
+
+      const roleDoc = rowRole || formRole;
+      if (!roleDoc) {
+        validationErrors.push({
+          user: userData,
+          error: "No role for this row — set a role column or choose a default role",
+        });
+        notSentEmails.push({ email, firstName, lastName, role });
+        continue;
+      }
+      const roleId = roleDoc._id;
+
+      // Permissions are derived from the role NAME, exactly as Addusers does.
+      // Without this a bulk user logs in to an empty app.
+      const rowRoleLabel = roleNameOf(roleDoc);
+      const defaultPermissions = getDefaultPermissions(rowRoleLabel);
+      // Service placement is a student concept — the New user form only offers
+      // Service Model for students, so an Admin row in the same file must not
+      // inherit it. Client still applies to everyone, as it does on that form.
+      const rowIsStudent = rowRoleLabel === "student";
+
+      // ── Row-level client / service model ────────────────────────────────
+      // A named column wins over the modal's pick, so one file can span several
+      // clients. Names are resolved to ids; an unknown name is a row error
+      // rather than a user filed against nothing.
+      let rowClientId = resolvedClientId;
+      let rowClientNameValue = resolvedClientName;
+      const sheetClientName = clientName !== undefined && String(clientName).trim()
+        ? String(clientName).trim()
+        : "";
+      if (sheetClientName) {
+        const clientDoc = findClientByName(sheetClientName);
+        if (!clientDoc) {
+          validationErrors.push({
+            user: userData,
+            error: `Unknown client "${sheetClientName}". Available clients: ${availableClientNames || "none configured"}`,
+          });
+          notSentEmails.push({ email, firstName, lastName, role });
+          continue;
+        }
+        rowClientId = clientDoc._id;
+        rowClientNameValue = clientDoc.clientCompany || sheetClientName;
+      }
+
+      let rowServiceModel = rowIsStudent ? resolvedServiceModel : undefined;
+      let rowServiceMappingId = rowIsStudent ? resolvedServiceMappingId : undefined;
+      const sheetServiceModel = userData.serviceModel !== undefined && String(userData.serviceModel).trim()
+        ? String(userData.serviceModel).trim()
+        : "";
+      if (sheetServiceModel) {
+        if (!rowClientId) {
+          validationErrors.push({
+            user: userData,
+            error: `serviceModel "${sheetServiceModel}" needs a client — set a clientName column or pick a client`,
+          });
+          notSentEmails.push({ email, firstName, lastName, role });
+          continue;
+        }
+        const { matches } = findMappingByModel(sheetServiceModel, rowClientId);
+        if (matches.length === 0) {
+          validationErrors.push({
+            user: userData,
+            error: `Unknown service model "${sheetServiceModel}" for client "${rowClientNameValue || ""}"`,
+          });
+          notSentEmails.push({ email, firstName, lastName, role });
+          continue;
+        }
+        if (matches.length > 1) {
+          validationErrors.push({
+            user: userData,
+            error: `Service model "${sheetServiceModel}" matches ${matches.length} services for "${rowClientNameValue || ""}" — pick the Service Model above instead so the right one is used`,
+          });
+          notSentEmails.push({ email, firstName, lastName, role });
+          continue;
+        }
+        rowServiceModel = (matches[0].serviceModels && matches[0].serviceModels[0]) || matches[0].service || sheetServiceModel;
+        rowServiceMappingId = matches[0]._id;
       }
 
       totalEmail.push({ email, firstName, phone, lastName, role, gender });
       const existingUser = await User.findOne({ email, institution: institutionId });
       if (existingUser) {
         existingUsers.push({ ...userData, error: "User already exists" });
-        notSentEmails.push({ email, firstName, lastName, role });
+        notSentEmails.push({ email, firstName, lastName, role, gender });
         continue;
       }
 
       try {
+        // Same institution-scoped human-readable id the single Add User issues
+        // (e.g. "KIO0042"). Bulk users previously had none at all.
+        const generatedUserId = await generateUserIdForInstitution(institutionId);
+
         // Prepare user data
         const userDataToSave = {
           email,
           firstName,
           lastName,
-          password, 
-          role: roleId, 
+          password,
+          role: roleId,
           phone,
-          institution: institutionId, 
+          institution: institutionId,
           createdBy: req.user.email || "system",
           gender,
+          userId: generatedUserId,
+          permissions: defaultPermissions,
+          status: "active",
+          ...(sharedDefaultProfileUrl && { profile: sharedDefaultProfileUrl }),
+          // Placement context from the modal — real ObjectId refs, so these
+          // users are scoped to the right client/service like form-created ones.
+          ...(rowClientId && { clientId: rowClientId }),
+          ...(rowServiceModel && { serviceModel: rowServiceModel }),
+          ...(rowServiceMappingId && { serviceMappingId: rowServiceMappingId }),
+          // courses is the schema's real field ([{ courseId, progress }]);
+          // the old `enrolledCourses` was not in the schema and was dropped.
+          ...(validCourses.length > 0 && {
+            courses: validCourses.map((courseId) => ({ courseId })),
+          }),
         };
 
-        // Add batch if provided
-        if (batch && batch.trim()) {
-          userDataToSave.batch = batch.trim();
+        // Stored name always comes from the resolved client record, so it stays
+        // in step with clientId rather than echoing whatever the sheet typed.
+        if (rowClientNameValue) {
+          userDataToSave.clientName = rowClientNameValue;
         }
 
-        // Add enrolled courses if provided
-        if (validCourses.length > 0) {
-          userDataToSave.enrolledCourses = validCourses;
+      
+        if (rollNumber !== undefined && String(rollNumber).trim()) {
+          userDataToSave.rollNumber = String(rollNumber).trim();
+        }
+        if (section && String(section).trim()) {
+          userDataToSave.section = String(section).trim();
+        }
+        if (phase && String(phase).trim()) {
+          userDataToSave.phase = String(phase).trim();
+        }
+
+        // Add student/degree fields if provided
+        if (studentType && String(studentType).trim()) {
+          userDataToSave.studentType = String(studentType).trim();
+        }
+        if (clientName && String(clientName).trim()) {
+          userDataToSave.clientName = String(clientName).trim();
+        }
+        if (degree && String(degree).trim()) {
+          userDataToSave.degree = String(degree).trim();
+        }
+        if (department && String(department).trim()) {
+          userDataToSave.department = String(department).trim();
+        }
+        if (year && String(year).trim()) {
+          userDataToSave.year = String(year).trim();
+        }
+        if (semester && String(semester).trim()) {
+          userDataToSave.semester = String(semester).trim();
         }
 
         const newUser = new User(userDataToSave);
         await newUser.save();
         users.push(newUser);
+
+        // Auto-enrol exactly as Addusers does, so a bulk user shows up under
+        // their courses' Enrollment without anyone opening it. Reported, never
+        // thrown: the account already exists, and losing it to an enrolment
+        // error would be the worse outcome.
+        try {
+          const actorId = req.user?.id || req.user?._id;
+          const enrolment = await autoEnrollUser(newUser, institutionId, actorId);
+          if (enrolment.error) {
+            console.error(`Auto-enrol error for ${newUser.email}:`, enrolment.error);
+          }
+        } catch (enrolErr) {
+          console.error(`Auto-enrol threw for ${newUser.email}:`, enrolErr.message);
+        }
 
         // Create course enrollments if you have a separate model
         // if (validCourses.length > 0) {
@@ -1269,7 +2540,7 @@ exports.bulkUploadUsers = async (req, res) => {
               <p><strong>Name:</strong> ${firstName} ${lastName}</p>
               <p><strong>Email:</strong> ${email}</p>
               <p><strong>Role:</strong> ${role}</p>
-              ${batch ? `<p><strong>Batch:</strong> ${batch}</p>` : ''}
+
               <p><strong>Password:</strong> ${password}</p>
             </div>
             
@@ -1346,10 +2617,7 @@ exports.bulkUploadUsers = async (req, res) => {
       sendBy: req.user.email || "system",
     };
 
-    // Add batch and courses to record if provided
-    if (batch && batch.trim()) {
-      uploadRecord.batch = batch.trim();
-    }
+  
     if (validCourses.length > 0) {
       uploadRecord.courses = validCourses;
       uploadRecord.courseCount = validCourses.length;
@@ -1387,7 +2655,7 @@ exports.bulkUploadUsers = async (req, res) => {
 
     // Create logs if functions exist
     if (typeof createAddUserBulkLog === 'function') {
-      const logData = { batch, courses: validCourses };
+      const logData = { courses: validCourses };
       await createAddUserBulkLog(req, users, "email", logData);
     }
     if (typeof createBulkUploadLog === 'function') {
@@ -1399,7 +2667,6 @@ exports.bulkUploadUsers = async (req, res) => {
         sentEmails: sentEmails.length,
         notSentEmails: notSentEmails.length,
         existingUsers: existingUsers.length,
-        batch: batch && batch.trim() ? batch.trim() : undefined,
         courses: validCourses.length > 0 ? validCourses : undefined,
       });
     }
@@ -1410,9 +2677,7 @@ exports.bulkUploadUsers = async (req, res) => {
 
     // Prepare response message
     let successMessage = `Successfully registered ${users.length} users`;
-    if (batch && batch.trim()) {
-      successMessage += ` to batch "${batch.trim()}"`;
-    }
+  
     if (sentEmails.length > 0) {
       successMessage += ` and sent ${sentEmails.length} welcome emails`;
     }
@@ -1442,31 +2707,37 @@ exports.bulkUploadUsers = async (req, res) => {
       users: users.map(user => {
         const userResponse = {
           _id: user._id,
+          userId: user.userId,
           email: user.email,
           firstName: user.firstName,
           lastName: user.lastName,
           role: user.role
         };
-        
-        // Add batch if exists
-        if (user.batch) {
-          userResponse.batch = user.batch;
+
+      
+
+        // Add student/degree fields if exist
+        if (user.studentType) userResponse.studentType = user.studentType;
+        if (user.clientName) userResponse.clientName = user.clientName;
+        if (user.degree) userResponse.degree = user.degree;
+        if (user.department) userResponse.department = user.department;
+        if (user.year) userResponse.year = user.year;
+        if (user.semester) userResponse.semester = user.semester;
+        if (user.rollNumber) userResponse.rollNumber = user.rollNumber;
+        if (user.serviceModel) userResponse.serviceModel = user.serviceModel;
+
+        // Reads the schema's real field — `enrolledCourses` never existed, so
+        // this block always reported nothing.
+        if (user.courses && user.courses.length > 0) {
+          userResponse.courses = user.courses.map((c) => c.courseId);
         }
-        
-        // Add courses if exist
-        if (user.enrolledCourses && user.enrolledCourses.length > 0) {
-          userResponse.enrolledCourses = user.enrolledCourses;
-        }
-        
+
         return userResponse;
       }),
       creditExceeded,
     };
 
-    // Add batch and courses to response if provided
-    if (batch && batch.trim()) {
-      response.summary.batch = batch.trim();
-    }
+  
     if (validCourses.length > 0) {
       response.summary.courses = validCourses;
       response.summary.courseCount = validCourses.length;
@@ -1498,8 +2769,8 @@ exports.UpdateUserWithPermission = async (req, res) => {
     const { userId } = req.params;
     const { permissions } = req.body;
 
-    // Find existing user
-    const existingUser = await User.findById(userId);
+    // Existence check only — nothing else is read off the doc.
+    const existingUser = await User.findById(userId).select("_id");
     if (!existingUser) {
       return res.status(404).json({
         message: [{ key: "error", value: "User not found" }],
@@ -1641,9 +2912,10 @@ exports.bulkUpdatePermissions = async (req, res) => {
           continue;
         }
 
-        // Find user
-        const user = await User.findById(userId);
-        if (!user) {
+        // Existence check first (cheap indexed read) so the error precedence
+        // matches the old read-then-save flow exactly.
+        const exists = await User.exists({ _id: userId });
+        if (!exists) {
           errors.push({ userId, error: "User not found" });
           continue;
         }
@@ -1658,8 +2930,8 @@ exports.bulkUpdatePermissions = async (req, res) => {
           return {
             permissionName: perm.permissionName,
             permissionKey: perm.permissionKey,
-            permissionFunctionality: Array.isArray(perm.permissionFunctionality) 
-              ? perm.permissionFunctionality 
+            permissionFunctionality: Array.isArray(perm.permissionFunctionality)
+              ? perm.permissionFunctionality
               : [],
             icon: perm.icon || "Shield",
             color: perm.color || "blue",
@@ -1677,11 +2949,26 @@ exports.bulkUpdatePermissions = async (req, res) => {
           continue;
         }
 
-        // Update user permissions
-        user.permissions = validPermissions;
-        user.updatedAt = new Date();
-
-        await user.save();
+        // Targeted update — mirrors UpdateUserWithPermission above. The old
+        // read-then-save pair materialized the FULL user doc (notifications,
+        // course answer state, …) and rewrote all of it per user, running
+        // every pre-save hook, just to set one array.
+        const user = await User.findByIdAndUpdate(
+          userId,
+          {
+            $set: { permissions: validPermissions },
+            updatedAt: new Date()
+          },
+          {
+            new: true,
+            runValidators: true,
+            select: "email firstName lastName role"
+          }
+        );
+        if (!user) {
+          errors.push({ userId, error: "User not found" });
+          continue;
+        }
 
         results.push({
           userId,

@@ -1,6 +1,45 @@
 const User = require('../../../models/UserModel');
 const mongoose = require('mongoose');
 const ActivityLog = require('../../../models/ActivityLog');
+// Server-authoritative timer for assessment attempts. Loaded lazily inside
+// `enforceAttemptExpiry` so unit tests / imports don't require it eagerly.
+const ExamSession = require('../../../models/Courses/moduleStructure/ExamSessionModel');
+// Resources by Batch — the two lookups below resolve an exercise from its own
+// `_id` in order to name it / check its deadline. That id is unique, so the
+// owning batch does not change the answer; what matters is that a batch-wise
+// exercise is visible at all. `mergeSectionAcrossBatches` walks the shared
+// container AND every batch's, which a plain `doc.pedagogy[category]` cannot.
+const { mergeSectionAcrossBatches, locateExerciseContainer } = require('../../../utils/pedagogyScope');
+// Server-authoritative code judge. When a programming submission arrives, the
+// server re-runs the student's code against the trainer's stored testCases
+// (including hidden ones) and computes score + breakdown here — the client
+// score is treated as an untrusted hint and overwritten. See
+// server/services/codeJudge.js for the loop, driverInjector.js for the
+// LeetCode-style bare-function auto-driver, and questionResolver.js for the
+// authoritative testCases lookup.
+const { judge: judgeCode } = require('../../../services/codeJudge');
+const { loadForJudge } = require('../../../services/questionResolver');
+
+// Does the server-side test-case judge run for this exercise?
+//
+// ONLY when the trainer picked "Test Case Based". The other two methods must
+// be left alone:
+//   • manual — the trainer grades on Review; the server auto-scoring a
+//     submission would stamp a mark the trainer never gave.
+//   • ai     — the score comes from the client-side Gemini evaluation and
+//     arrives on the request; re-judging would overwrite it with a
+//     test-case percentage.
+//
+// LEGACY FALLBACK (exercise predates the field, `evaluationMethod` is null):
+// You_Do assessments were historically auto-scored from test cases, every
+// other tab posted score:0. This mirrors `resolveEvaluationMethod` on the
+// client exactly, so both ends agree on what an un-migrated exercise means.
+const shouldServerJudge = (evaluationMethod, category) => {
+  const method = evaluationMethod && evaluationMethod.method;
+  if (method === 'testcase') return true;
+  if (method === 'manual' || method === 'ai') return false;
+  return String(category) === 'You_Do';
+};
 
 // ── We Do / You Do duration tracking (assignments & assessments) ───────────────
 // Start = first answer interaction (a non-test save opens an 'exercise_start' log).
@@ -76,6 +115,81 @@ async function trackAssignmentDuration({ user, courseId, exerciseId, exerciseNam
   } catch (e) { /* best effort — never block submission */ }
 }
 
+// ── Assessment expiry guard (Recovery & Resume, You_Do only) ──────────────
+// ELAPSED-TIME model (freeze at last submit). A write is rejected when:
+//   remaining = totalDurationSeconds - max(0, (lastSubmittedAt || now) - startedAt)
+// has run out. Time WHILE the student was away doesn't count — matching the
+// product spec ("remaining = 30min − (lastSubmittedAt − startedAt)").
+//
+// If the attempt is still `active` we flip it to `terminated`/`timer` on the
+// same request so the dashboard sees the terminal state immediately.
+//
+// Also stamps `lastSubmittedAt` when the write is allowed — the frozen-clock
+// anchor moves forward on every real submission.
+async function enforceAttemptExpiry({ userId, exerciseId, category, isTestSubmit }) {
+  if (category !== 'You_Do' || !userId || !exerciseId) return null;
+  try {
+    const session = await ExamSession.findOne({
+      assessmentId: String(exerciseId),
+      studentId: String(userId),
+    });
+    if (!session) return null; // no attempt started — legacy call, allow
+    if (session.status === 'submitted' || session.status === 'terminated') {
+      return {
+        status: 410,
+        body: {
+          success: false,
+          message: [{ key: 'attempt_terminal', value: 'This assessment attempt is already complete.' }],
+          attemptStatus: session.status,
+          terminationReason: session.terminationReason,
+        },
+      };
+    }
+    // Elapsed-time expiry check. `serverExpiresAt` is legacy; only fall back
+    // to it when the row was created before this feature (no
+    // `totalDurationSeconds`).
+    const total = Number(session.totalDurationSeconds);
+    let expired = false;
+    if (Number.isFinite(total) && total > 0 && session.startedAt) {
+      const anchor = session.lastSubmittedAt || session.startedAt;
+      const elapsedSec = Math.max(0, Math.floor((new Date(anchor).getTime() - new Date(session.startedAt).getTime()) / 1000));
+      expired = elapsedSec >= total;
+    } else if (session.serverExpiresAt && session.serverExpiresAt.getTime() < Date.now()) {
+      expired = true;
+    }
+    if (expired) {
+      session.status = 'terminated';
+      session.terminationReason = 'timer';
+      session.submittedAt = new Date();
+      session.inProgress = false;
+      await session.save();
+      return {
+        status: 410,
+        body: {
+          success: false,
+          message: [{ key: 'attempt_expired', value: 'Time is up. This attempt has been auto-submitted.' }],
+          attemptStatus: 'terminated',
+          terminationReason: 'timer',
+        },
+      };
+    }
+    // Write is allowed — stamp `lastSubmittedAt` so the frozen clock moves.
+    // Done here so the timer-anchor is coherent with every real save.
+    session.lastSubmittedAt = new Date();
+    session.lastActivityAt = session.lastSubmittedAt;
+    // If the write is a full test submission the finaliseAttempt endpoint
+    // will also flip status → 'submitted' when the client calls it; the
+    // stamp here is safe either way (submittedAt gets set there too).
+    await session.save();
+    return null;
+  } catch (err) {
+    // Never block a legitimate submit on a monitoring-layer error — log and
+    // fall through to the existing answer write path.
+    console.error('[enforceAttemptExpiry] error:', err);
+    return null;
+  }
+}
+
 const Module1 = mongoose.model('Module1');
 const SubModule1 = mongoose.model('SubModule1');
 const Topic1 = mongoose.model('Topic1');
@@ -94,27 +208,31 @@ async function resolveExerciseInfo({ nodeId, category, subcategory, exerciseId }
     const models = [['module', Module1], ['submodule', SubModule1], ['topic', Topic1], ['subtopic', SubTopic1]];
     for (const [typeLabel, Model] of models) {
       let doc;
-      try { doc = await Model.findById(nodeId).select(`title pedagogy.${category}`).lean(); }
+      try { doc = await Model.findById(nodeId).select(`title pedagogy.${category} batchPedagogy`).lean(); }
       catch { doc = null; }
       if (!doc) continue;
 
       const nodeName = doc.title || null;
       const nodeType = typeLabel;
 
-      // Walk the category subtree to find the exercise by _id (shape varies)
+      // Walk the category subtree to find the exercise by _id (shape varies).
+      // Entries come from the shared container and every batch's, as a flat
+      // list — batches reuse subcategory names, so merging them into an object
+      // would drop all but the last.
       let exerciseName = null;
-      const categoryNode = doc?.pedagogy?.[category];
-      if (categoryNode && exerciseId) {
+      const categoryEntries = mergeSectionAcrossBatches(doc, category);
+      if (categoryEntries.length && exerciseId) {
         const idStr = String(exerciseId);
         const findInArray = (arr) => Array.isArray(arr) ? arr.find(ex => ex && String(ex._id) === idStr) : null;
         let exercise = null;
-        if (Array.isArray(categoryNode)) {
-          exercise = findInArray(categoryNode);
-        } else if (typeof categoryNode === 'object') {
-          if (subcategory && categoryNode[subcategory]) exercise = findInArray(categoryNode[subcategory]);
+        {
+          // Prefer the caller's subcategory, then fall back to any of them.
+          for (const [k, v] of categoryEntries) {
+            if (subcategory && k === subcategory) { const f = findInArray(v); if (f) { exercise = f; break; } }
+          }
           if (!exercise) {
-            for (const k of Object.keys(categoryNode)) {
-              const found = findInArray(categoryNode[k]);
+            for (const [, v] of categoryEntries) {
+              const found = findInArray(v);
               if (found) { exercise = found; break; }
             }
           }
@@ -148,10 +266,16 @@ async function isLateSubmissionForExercise({ nodeId, nodeType, category, subcate
       return false;
     }
 
-    // Fetch the whole category subtree — covers any subcategory shape.
-    const doc = await Model.findById(nodeId).select(`pedagogy.${category}`).lean();
-    const categoryNode = doc?.pedagogy?.[category];
-    if (!categoryNode) {
+    // Fetch the whole category subtree — covers any subcategory shape, and
+    // (Resources by Batch) both the shared container and every batch's own.
+    // A batch-wise exercise is invisible to `doc.pedagogy[category]`, and this
+    // check FAILS OPEN — not finding the exercise returns false, i.e. "not
+    // late", so a missed lookup would silently accept every late submission.
+    const doc = await Model.findById(nodeId)
+      .select(`pedagogy.${category} batchPedagogy`)
+      .lean();
+    const categoryEntries = mergeSectionAcrossBatches(doc, category);
+    if (!categoryEntries.length) {
       console.log('[lateCheck] no category in node:', { nodeId, category });
       return false;
     }
@@ -161,20 +285,18 @@ async function isLateSubmissionForExercise({ nodeId, nodeType, category, subcate
       Array.isArray(arr) ? arr.find(ex => ex && String(ex._id) === exerciseIdStr) : null;
 
     let exercise = null;
-    if (Array.isArray(categoryNode)) {
-      // category is directly an array of exercises
-      exercise = findInArray(categoryNode);
-    } else if (typeof categoryNode === 'object') {
-      // Try the requested subcategory first
-      if (subcategory && categoryNode[subcategory]) {
-        exercise = findInArray(categoryNode[subcategory]);
+    // Try the requested subcategory first, then every other one.
+    if (subcategory) {
+      for (const [k, v] of categoryEntries) {
+        if (k !== subcategory) continue;
+        const found = findInArray(v);
+        if (found) { exercise = found; break; }
       }
-      // Fall back: search every subcategory until we find the exercise
-      if (!exercise) {
-        for (const k of Object.keys(categoryNode)) {
-          const found = findInArray(categoryNode[k]);
-          if (found) { exercise = found; break; }
-        }
+    }
+    if (!exercise) {
+      for (const [, v] of categoryEntries) {
+        const found = findInArray(v);
+        if (found) { exercise = found; break; }
       }
     }
 
@@ -224,15 +346,19 @@ exports.submitAnswer = async (req, res) => {
       nodeName = "",
       nodeType = "",
       code = "",
-      score = 0,
+      score: clientScore = 0,
       language = "",
-      status = "attempted",
+      status: clientStatus = "attempted",
       othersFiles: rawOthersFiles,
       attemptLimitEnabled,
       maxAttempts,
       isTestSubmission,  // ← KEY FLAG: only true when Submit Test or last question
       submitType,        // 'USER' (manual) | 'AUTO' (system auto-submit on violation/timeout)
       autoSubmitReason,  // human-readable reason when submitType === 'AUTO'
+      // Per-question evaluation breakdown — populated by the client at Submit
+      // time based on the exercise's evaluationMethod. See UserModel.js.
+      // Not set for 'manual' submissions.
+      evaluationBreakdown: rawEvaluationBreakdown,
     } = req.body;
 
     // Parse isTestSubmission properly from FormData string
@@ -279,6 +405,12 @@ exports.submitAnswer = async (req, res) => {
         message: "Category must be one of: I_Do, We_Do, You_Do"
       });
     }
+
+    // Server-authoritative timer check for You_Do assessments — rejects
+    // writes past `serverExpiresAt` and finalises the attempt as
+    // `terminated`/`timer` on the same request. See enforceAttemptExpiry().
+    const expiry = await enforceAttemptExpiry({ userId, exerciseId, category });
+    if (expiry) return res.status(expiry.status).json(expiry.body);
 
     const user = await User.findById(userId);
     if (!user) {
@@ -346,6 +478,179 @@ exports.submitAnswer = async (req, res) => {
       }
     }
 
+    // FormData strings JSON-encode complex objects — the multipart submitter
+    // stringifies evaluationBreakdown before appending. Parse back here.
+    //
+    // Sanitisation is done inline because Mongoose enum validation doesn't fire
+    // for schemas nested through Map + array (answers[category].get(key)[i]),
+    // so an invalid method / criterion key would silently persist without this.
+    const ALLOWED_METHOD = new Set(['manual', 'testcase', 'ai']);
+    const ALLOWED_CRIT = new Set(['correctness','codeQuality','efficiency','readability','edgeCases','bestPractices']);
+    const sanitizeBreakdown = (raw) => {
+      const b = (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw);
+      if (!b || typeof b !== 'object') return null;
+      if (!ALLOWED_METHOD.has(b.method)) return null; // reject unknown method outright
+      const out = { method: b.method };
+      if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
+        // Per-case rows (which case failed + input/expected/got) — capped at
+        // 50 rows / 2000-char strings like the AI test-case list, so the
+        // answer doc stays bounded. Older clients that only send counts still
+        // sanitize fine (cases → []).
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
+        out.testcase = {
+          passed: Number(b.testcase.passed) || 0,
+          total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
+        };
+      }
+      if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {
+        const criteria = Array.isArray(b.ai.criteria) ? b.ai.criteria : [];
+        const testCases = Array.isArray(b.ai.testCases) ? b.ai.testCases : [];
+        out.ai = {
+          perCriterionMax: Number(b.ai.perCriterionMax) || 0,
+          criteria: criteria
+            .filter(c => c && ALLOWED_CRIT.has(c.key))
+            .map(c => ({
+              key: c.key,
+              percentage: Math.max(0, Math.min(100, Number(c.percentage) || 0)),
+              score: Math.max(0, Number(c.score) || 0),
+              comment: typeof c.comment === 'string' ? c.comment.slice(0, 500) : '',
+            })),
+          // AI-judged test cases — capped at 50 rows to keep the answer doc bounded.
+          testCases: testCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            source: t?.source === 'ai' ? 'ai' : 'question',
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            passed: !!t?.passed,
+            comment: typeof t?.comment === 'string' ? t.comment.slice(0, 500) : '',
+            // Trainer-authored hidden cases stay hidden in the student's
+            // Test Result panel exactly like they do under Test Case scoring.
+            hidden: !!t?.hidden,
+          })),
+          passedTestCases: Math.max(0, Number(b.ai.passedTestCases) || 0),
+          totalTestCases: Math.max(0, Number(b.ai.totalTestCases) || 0),
+          criteriaPortion: Math.max(0, Number(b.ai.criteriaPortion) || 0),
+          testCasePortion: Math.max(0, Number(b.ai.testCasePortion) || 0),
+          model: typeof b.ai.model === 'string' ? b.ai.model.slice(0, 100) : '',
+          failed: !!b.ai.failed,
+        };
+      }
+      return out;
+    };
+    let evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let score = clientScore;
+    let status = clientStatus;
+
+    // ─── Server-authoritative judge (Phase 1 P0) ─────────────────────────
+    // For any submission that carries programming code, re-run the code
+    // against the trainer's stored testCases and OVERWRITE the score,
+    // status, and evaluationBreakdown coming from the client. This closes
+    // the tamper hole where a student could POST `score: 10, status:
+    // "solved"` from the browser and be marked complete without ever
+    // running the code.
+    //
+    // Gated on:
+    //   • non-empty `code`
+    //   • a resolvable `selectedProgrammingLanguage`
+    //   • notionPages absent (Notion journals aren't programming answers)
+    //
+    // If the question can't be resolved (deleted from tree, wrong
+    // nodeType, etc.) we fall through and keep the client values so we
+    // don't lose the submission — a log line surfaces the gap.
+    const canJudge =
+      !!code &&
+      typeof code === 'string' &&
+      !notionPages &&
+      !!selectedProgrammingLanguage;
+    if (canJudge) {
+      try {
+        const q = await loadForJudge({
+          nodeType, nodeId, category, subcategory, exerciseId, questionId,
+        });
+        const judgeThis = q && shouldServerJudge(q.evaluationMethod, category);
+        if (judgeThis && Array.isArray(q.testCases) && q.testCases.length > 0) {
+          const judged = await judgeCode({
+            language: selectedProgrammingLanguage || language,
+            files: [{ path: 'main', content: code, isEntryPoint: true }],
+            testCases: q.testCases,
+            functionName: q.functionName,
+            maxMarks: q.maxMarks,
+          });
+          score = judged.score;
+          status = judged.status;
+          // Hidden-case reveal policy — PROGRESSIVE. Once every visible
+          // case passes, hidden cases unlock ONE BY ONE in order: reveal
+          // the first hidden case; keep revealing subsequent ones only
+          // while each one passes. Stop AT the first failing hidden case
+          // (that one is revealed too so the student can debug it, but
+          // nothing beyond it is). If any visible case still fails, no
+          // hidden case is revealed. `actualOutput` (the student's own
+          // program output) is always safe to show — this only gates
+          // trainer input/expected.
+          const visibleCases = judged.perCase.filter((c) => !c.hidden);
+          const allVisiblePassed = visibleCases.length > 0 && visibleCases.every((c) => c.passed);
+          const unlockedHiddenIdx = new Set();
+          if (allVisiblePassed) {
+            for (const c of judged.perCase) {
+              if (!c.hidden) continue;
+              unlockedHiddenIdx.add(c.index);
+              if (!c.passed) break;
+            }
+          }
+          evaluationBreakdown = {
+            method: 'testcase',
+            testcase: {
+              passed: judged.passed,
+              total: judged.total,
+              cases: judged.perCase.map((c) => {
+                const revealed = !c.hidden || unlockedHiddenIdx.has(c.index);
+                return {
+                  index: c.index,
+                  passed: c.passed,
+                  hidden: c.hidden,
+                  // `unlocked` = client should show this hidden case's chip.
+                  // Non-hidden cases don't need the flag but leaving it as
+                  // true keeps the client filter uniform.
+                  unlocked: revealed,
+                  input: revealed ? c.input : '',
+                  expectedOutput: revealed ? c.expectedOutput : '',
+                  actualOutput: c.actualOutput,
+                };
+              }),
+            },
+          };
+        } else if (q && !judgeThis) {
+          // Manual / AI exercise — by design. Keep whatever the client sent
+          // (score 0 for Manual, the Gemini score for AI).
+          console.info(
+            `[judge] question ${questionId} skipped — evaluationMethod is ` +
+            `${(q.evaluationMethod && q.evaluationMethod.method) || `legacy/${category}`}, not testcase`,
+          );
+        } else if (q) {
+          console.warn(
+            `[judge] question ${questionId} has 0 testCases — keeping client-computed score`,
+          );
+        } else {
+          console.warn(
+            `[judge] could not resolve question ${questionId} under ${nodeType}/${nodeId} ${category}/${subcategory}/${exerciseId} — keeping client-computed score`,
+          );
+        }
+      } catch (e) {
+        // Never fail the submission because judging failed — the code is
+        // still saved with the client-computed score, and the trainer can
+        // re-run judgment from the rerun flow.
+        console.error('[judge] error during server-side judge, keeping client score:', e?.message || e);
+      }
+    }
+
     const questionAnswer = {
       questionId: new mongoose.Types.ObjectId(questionId),
       codeAnswer: code,
@@ -359,6 +664,9 @@ exports.submitAnswer = async (req, res) => {
       updatedAt: new Date(),
       ...(othersFiles.length > 0 ? { othersFiles } : {}),
       ...(notionPages ? { notionPages } : {}),
+      // Only include when the client actually provided a breakdown, so Manual
+      // submissions don't stamp an empty object onto the answer.
+      ...(evaluationBreakdown ? { evaluationBreakdown } : {}),
     };
 
     // ── Late submission detection (server-authoritative) ──
@@ -401,11 +709,28 @@ exports.submitAnswer = async (req, res) => {
         existingExercise.questions.push(questionAnswer);
       } else {
         const existingQuestion = existingExercise.questions[existingQuestionIndex];
+        // A navigation/skip save ('attempted'/'skipped') must never downgrade an
+        // already-earned score or a 'solved' status. Preserve the prior score and
+        // keep a solved question solved, while still saving the latest code.
+        const isNavSave = status === 'attempted' || status === 'skipped';
+        const preservedScore = isNavSave
+          ? Math.max(Number(existingQuestion.score) || 0, Number(score) || 0)
+          : score;
+        const preservedStatus = isNavSave && existingQuestion.status === 'solved'
+          ? 'solved'
+          : status;
         existingExercise.questions[existingQuestionIndex] = {
           ...questionAnswer,
+          score: preservedScore,
+          status: preservedStatus,
+          isCorrect: preservedStatus === 'solved' || preservedScore >= 70,
           attempts: (existingQuestion.attempts || 0) + 1,
           createdAt: existingQuestion.createdAt || new Date(),
-          updatedAt: new Date()
+          updatedAt: new Date(),
+          // On nav-saves the client doesn't send a fresh breakdown — preserve
+          // the last one so a Manual "moved to next question" nav doesn't
+          // clobber the AI or Test Case breakdown from an earlier real Submit.
+          evaluationBreakdown: evaluationBreakdown || existingQuestion.evaluationBreakdown || null,
         };
       }
 
@@ -493,11 +818,15 @@ exports.submitAnswer = async (req, res) => {
         exerciseId,
         questionId,
         category,
-        subcategory: (category === 'We_Do' || category === 'You_Do') 
-          ? subcategory 
+        subcategory: (category === 'We_Do' || category === 'You_Do')
+          ? subcategory
           : undefined,
         status,
         score,
+        // Echo the server-authored breakdown so the single-file editor
+        // terminal can render per-case results after Submit without
+        // running any code client-side.
+        evaluationBreakdown,
         isCorrect: questionAnswer.isCorrect,
         user: {
           id: user._id,
@@ -526,13 +855,10 @@ exports.getAllUsers = async (req, res) => {
 
     // 1. Get course with populated participants
     const course = await CourseStructure.findById(courseId)
-      .select('courseName courseCode description startDate endDate singleParticipants')
+      .select('courseName courseCode description startDate endDate batchAndParticipants')
       .populate({
-        path: "singleParticipants",
-        populate: {
-          path: "user",
-          select: '_id email firstName lastName status'
-        }
+        path: "batchAndParticipants.users.user",
+        select: '_id email firstName lastName status'
       })
       .lean();
 
@@ -543,10 +869,13 @@ exports.getAllUsers = async (req, res) => {
       });
     }
 
-    // 2. Extract user IDs from participants
-    const participantUserIds = course.singleParticipants
-      .filter(participant => participant.user && participant.user._id)
-      .map(participant => participant.user._id.toString());
+    // 2. Extract user IDs from participants across all batches (deduped)
+    const participantUserIds = [...new Set(
+      (course.batchAndParticipants || [])
+        .flatMap(batch => batch.users || [])
+        .filter(participant => participant.user && participant.user._id)
+        .map(participant => participant.user._id.toString())
+    )];
 
     if (participantUserIds.length === 0) {
       return res.status(200).json({
@@ -685,18 +1014,22 @@ exports.getAllUsers = async (req, res) => {
                   const Model = modelMap[nodeType];
                   
                   if (Model) {
-                    const query = {
-                      _id: practice.nodeId,
-                      'pedagogy.We_Do.practical._id': practice.exerciseId
-                    };
-                    
-                    const documentData = await Model.findOne(query)
-                      .select('title pedagogy.We_Do.practical.$')
+                    // Resources by Batch — this used a positional `$`
+                    // projection pinned to `pedagogy.We_Do.practical`, which
+                    // cannot reach a batch-wise exercise (its path contains the
+                    // batch id). Fetch the node and resolve by _id across the
+                    // shared container and every batch instead; the id is
+                    // unique, so the owning batch does not change the result.
+                    const documentData = await Model.findById(practice.nodeId)
+                      .select('title pedagogy.We_Do batchPedagogy')
                       .lean();
 
-                    if (documentData?.pedagogy?.We_Do?.practical?.[0]) {
-                      const exercise = documentData.pedagogy.We_Do.practical[0];
-                      
+                    const exercise = mergeSectionAcrossBatches(documentData, 'We_Do')
+                      .flatMap(([, v]) => (Array.isArray(v) ? v : v ? [v] : []))
+                      .find(ex => ex && String(ex._id) === String(practice.exerciseId));
+
+                    if (exercise) {
+
                       // Add exercise details only
                       exerciseData.exerciseDetails = {
                         exerciseName: exercise.exerciseInformation?.exerciseName,
@@ -994,6 +1327,31 @@ exports.evaluateStudentAnswer = async (req, res) => {
       exerciseKey = subcategory;
     } else {
       exerciseKey = exerciseId.toString();
+    }
+
+    // The grade belongs on the student's OWN answer. The grading console sends
+    // the pedagogy map key as `subcategory`, but the answer was filed under
+    // whatever subcategory the student's player sent — and when the two
+    // differ, a lookup by key alone missed it and wrote a second, code-less
+    // answer beside it, which the console then read past (marks showed 0).
+    // So find the bucket already holding this exercise + question, preferring
+    // the entry that carries the student's work over an earlier grade-only one.
+    if (category && typeof categoryMap.entries === "function") {
+      const holds = (requireWork) => {
+        for (const [key, arr] of categoryMap.entries()) {
+          if (!Array.isArray(arr)) continue;
+          const hit = arr.some((ex) =>
+            ex?.exerciseId?.toString() === exerciseId &&
+            (ex.questions || []).some((q) =>
+              q?.questionId?.toString() === questionId &&
+              (!requireWork || !!(q.codeAnswer || q.files?.length || q.othersFiles?.length))
+            )
+          );
+          if (hit) return key;
+        }
+        return null;
+      };
+      exerciseKey = holds(true) || holds(false) || exerciseKey;
     }
 
     // Get or create the exercise array for this key
@@ -1449,16 +1807,154 @@ exports.submitMultipleFiles = async (req, res) => {
       hasFolders = false,
       folderCount = 0,
       totalFiles = 0,
-      status = "submitted",
+      status: clientStatus = "submitted",
       totalScore = 0,
-      score = 0,
+      score: clientScore = 0,
       feedback = "",
       language = "multi-file",
       isMultiFile = true,
       isTestSubmission,
       submitType,        // 'USER' (manual) | 'AUTO' (system auto-submit on violation/timeout)
       autoSubmitReason,  // human-readable reason when submitType === 'AUTO'
+      // Per-question breakdown (Test Case / AI). Sent as an object here (JSON
+      // payload, not multipart), so no JSON.parse needed — sanitise only.
+      evaluationBreakdown: rawEvaluationBreakdown,
     } = req.body;
+
+    // Sanitise breakdown the same way submitAnswer does, so the multi-file
+    // submit path never persists an invalid method / criterion key.
+    const ALLOWED_METHOD_MF = new Set(['manual', 'testcase', 'ai']);
+    const ALLOWED_CRIT_MF = new Set(['correctness','codeQuality','efficiency','readability','edgeCases','bestPractices']);
+    const sanitizeBreakdown = (b) => {
+      if (!b || typeof b !== 'object') return null;
+      if (!ALLOWED_METHOD_MF.has(b.method)) return null;
+      const out = { method: b.method };
+      if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
+        // Same per-case cap as the other sanitizeBreakdown copies in this file.
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
+        out.testcase = {
+          passed: Number(b.testcase.passed) || 0,
+          total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
+        };
+      }
+      if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {
+        const crit = Array.isArray(b.ai.criteria) ? b.ai.criteria : [];
+        const tc = Array.isArray(b.ai.testCases) ? b.ai.testCases : [];
+        out.ai = {
+          perCriterionMax: Number(b.ai.perCriterionMax) || 0,
+          criteria: crit.filter(c => c && ALLOWED_CRIT_MF.has(c.key)).map(c => ({
+            key: c.key,
+            percentage: Math.max(0, Math.min(100, Number(c.percentage) || 0)),
+            score: Math.max(0, Number(c.score) || 0),
+            comment: typeof c.comment === 'string' ? c.comment.slice(0, 500) : '',
+          })),
+          testCases: tc.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            source: t?.source === 'ai' ? 'ai' : 'question',
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            passed: !!t?.passed,
+            comment: typeof t?.comment === 'string' ? t.comment.slice(0, 500) : '',
+            // Trainer-authored hidden cases stay hidden in the student's
+            // Test Result panel exactly like they do under Test Case scoring.
+            hidden: !!t?.hidden,
+          })),
+          passedTestCases: Math.max(0, Number(b.ai.passedTestCases) || 0),
+          totalTestCases: Math.max(0, Number(b.ai.totalTestCases) || 0),
+          criteriaPortion: Math.max(0, Number(b.ai.criteriaPortion) || 0),
+          testCasePortion: Math.max(0, Number(b.ai.testCasePortion) || 0),
+          model: typeof b.ai.model === 'string' ? b.ai.model.slice(0, 100) : '',
+          failed: !!b.ai.failed,
+        };
+      }
+      return out;
+    };
+    let evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
+    let score = clientScore;
+    let status = clientStatus;
+
+    // ─── Server-authoritative judge (Phase 1 P0, multi-file path) ────────
+    // Multi-file editor's client-side testcase loop is now gone; we re-run
+    // the project here against the trainer's authoritative testCases so
+    // students can't POST a fabricated score. See submitAnswer above for
+    // the single-file mirror of this block.
+    if (Array.isArray(files) && files.length > 0 && selectedProgrammingLanguage) {
+      try {
+        const q = await loadForJudge({
+          nodeType, nodeId, category, subcategory, exerciseId, questionId,
+        });
+        const judgeThis = q && shouldServerJudge(q.evaluationMethod, category);
+        if (judgeThis && Array.isArray(q.testCases) && q.testCases.length > 0) {
+          const judgeFiles = files.map((f) => ({
+            path: f.path || `/${f.filename}`,
+            content: f.content || '',
+            isEntryPoint: !!f.isEntryPoint,
+          }));
+          const judged = await judgeCode({
+            language: selectedProgrammingLanguage,
+            files: judgeFiles,
+            testCases: q.testCases,
+            functionName: q.functionName,
+            maxMarks: q.maxMarks,
+          });
+          score = judged.score;
+          status = judged.status;
+          // Multi-file mirror of the single-file progressive reveal —
+          // hidden cases unlock one by one once every visible case passes;
+          // stop AT the first failing hidden (that one is revealed for
+          // debugging; nothing beyond it is).
+          const visibleCases = judged.perCase.filter((c) => !c.hidden);
+          const allVisiblePassed = visibleCases.length > 0 && visibleCases.every((c) => c.passed);
+          const unlockedHiddenIdx = new Set();
+          if (allVisiblePassed) {
+            for (const c of judged.perCase) {
+              if (!c.hidden) continue;
+              unlockedHiddenIdx.add(c.index);
+              if (!c.passed) break;
+            }
+          }
+          evaluationBreakdown = {
+            method: 'testcase',
+            testcase: {
+              passed: judged.passed,
+              total: judged.total,
+              cases: judged.perCase.map((c) => {
+                const revealed = !c.hidden || unlockedHiddenIdx.has(c.index);
+                return {
+                  index: c.index,
+                  passed: c.passed,
+                  hidden: c.hidden,
+                  unlocked: revealed,
+                  input: revealed ? c.input : '',
+                  expectedOutput: revealed ? c.expectedOutput : '',
+                  actualOutput: c.actualOutput,
+                };
+              }),
+            },
+          };
+        } else if (q && !judgeThis) {
+          // Manual / AI exercise — see shouldServerJudge.
+          console.info(
+            `[judge:mf] question ${questionId} skipped — evaluationMethod is ` +
+            `${(q.evaluationMethod && q.evaluationMethod.method) || `legacy/${category}`}, not testcase`,
+          );
+        } else if (!q) {
+          console.warn(
+            `[judge:mf] could not resolve question ${questionId} — keeping client score`,
+          );
+        }
+      } catch (e) {
+        console.error('[judge:mf] server-side judge error, keeping client score:', e?.message || e);
+      }
+    }
 
     const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
 
@@ -1484,6 +1980,10 @@ exports.submitMultipleFiles = async (req, res) => {
         message: "Category must be one of: I_Do, We_Do, You_Do"
       });
     }
+
+    // Server-authoritative timer check — same as submitAnswer.
+    const expiry = await enforceAttemptExpiry({ userId, exerciseId, category });
+    if (expiry) return res.status(expiry.status).json(expiry.body);
 
     // Validate files array
     if (!files || !Array.isArray(files) || files.length === 0) {
@@ -1613,7 +2113,10 @@ exports.submitMultipleFiles = async (req, res) => {
           path: f.path,
           fileCount: f.fileCount
         }))
-      }
+      },
+      // Only include when the client actually produced a breakdown, so Manual
+      // submissions don't stamp an empty object onto the answer.
+      ...(evaluationBreakdown ? { evaluationBreakdown } : {}),
     };
  
     // Helper function to build folder tree for DB storage
@@ -1812,10 +2315,17 @@ exports.submitMultipleFiles = async (req, res) => {
           fileCount: f.fileCount
         })),
         entryPoints: questionAnswer.entryPoints,
-        projectStructure: questionAnswer.projectStructure
+        projectStructure: questionAnswer.projectStructure,
+        // Echo the server-authored score and per-case breakdown back so the
+        // client can paint "✓ Test #1 passed / ✗ Test #2 failed" in the
+        // terminal without re-running anything. Hidden-case fields were
+        // already blanked when the breakdown was assembled.
+        score,
+        status,
+        evaluationBreakdown,
       }
     });
- 
+
   } catch (error) {
     console.error("Submit multi-files error:", error);
     res.status(500).json({
@@ -2403,5 +2913,501 @@ exports.submitMultipleFiles = async (req, res) => {
 //   }
 // };
 
+// ── Persist AI-generated test cases on the question doc ──────────────────────
+// Called fire-and-forget by the first student's Submit when the exercise's
+// evaluationMethod is 'ai' and no cached cases exist on the question yet.
+// Every subsequent student reuses these cached cases (same 20 for every
+// student). If the cache was populated in the meantime by a concurrent request,
+// this call is idempotent — we DO NOT overwrite existing cases, ever.
+exports.persistAiTestCases = async (req, res) => {
+  try {
+    const {
+      exerciseId, questionId, nodeId, nodeType, category, subcategory,
+      testCases, model,
+    } = req.body;
 
+    if (!exerciseId || !questionId || !nodeId || !nodeType || !category || !subcategory) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
+    }
+    if (!Array.isArray(testCases) || testCases.length === 0) {
+      return res.status(400).json({ success: false, message: 'testCases must be a non-empty array' });
+    }
+
+    // Sanitise + cap the incoming test cases so a malicious client can't stuff
+    // huge payloads onto the question doc.
+    const MAX_CASES = 50;
+    const MAX_FIELD_CHARS = 4000;
+    const clean = testCases.slice(0, MAX_CASES).map(tc => ({
+      input: (tc?.input ?? '').toString().slice(0, MAX_FIELD_CHARS),
+      expectedOutput: (tc?.expectedOutput ?? '').toString().slice(0, MAX_FIELD_CHARS),
+    })).filter(tc => tc.input.length > 0 || tc.expectedOutput.length > 0);
+    if (clean.length === 0) {
+      return res.status(400).json({ success: false, message: 'testCases had no usable rows' });
+    }
+
+    // Resolve the entity model + load the node.
+    const modelMap = {
+      module: mongoose.model('Module1'),
+      submodule: mongoose.model('SubModule1'),
+      topic: mongoose.model('Topic1'),
+      subtopic: mongoose.model('SubTopic1'),
+    };
+    const Model = modelMap[String(nodeType).toLowerCase()];
+    if (!Model) {
+      return res.status(400).json({ success: false, message: `Invalid nodeType: ${nodeType}` });
+    }
+    const entity = await Model.findById(nodeId);
+    if (!entity) {
+      return res.status(404).json({ success: false, message: 'Node not found' });
+    }
+
+    const located = locateExerciseContainer(entity, category, subcategory, exerciseId);
+    if (!located) {
+      return res.status(404).json({ success: false, message: 'Exercise not found in this node' });
+    }
+    const { exercise, basePath, index: exerciseIndex } = located;
+    if (!exercise) {
+      return res.status(404).json({ success: false, message: 'Exercise container empty' });
+    }
+
+    const question = (exercise.questions || []).find(q => q && String(q._id) === String(questionId));
+    if (!question) {
+      return res.status(404).json({ success: false, message: 'Question not found in exercise' });
+    }
+
+    // Idempotency — a concurrent first-student race could try to write twice.
+    // Whoever gets there second is a no-op; the "same 20 for every student"
+    // guarantee holds because the FIRST winning write is what everyone reads.
+    if (Array.isArray(question.aiGeneratedTestCases) && question.aiGeneratedTestCases.length > 0) {
+      return res.status(200).json({ success: true, alreadyCached: true, count: question.aiGeneratedTestCases.length });
+    }
+
+    question.aiGeneratedTestCases = clean;
+    question.aiGeneratedTestCasesModel = typeof model === 'string' ? model.slice(0, 100) : '';
+    question.aiGeneratedTestCasesAt = new Date();
+
+    // Because the exercise lives inside a Map inside pedagogy/batchPedagogy,
+    // Mongoose needs the exact path marked modified to persist a nested
+    // subdoc mutation. `basePath` is the pedagogy root ('pedagogy' or
+    // 'batchPedagogy.<id>'); the section+subcategory+index is unstable to
+    // encode, so we mark the pedagogy root — small overwrite cost, correct.
+    entity.markModified(basePath);
+    await entity.save();
+
+    return res.status(200).json({ success: true, count: clean.length });
+  } catch (err) {
+    console.error('persistAiTestCases error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// RERUN — bulk re-score submissions against the CURRENT question test cases /
+// AI prompt. The teacher's browser runs the actual code execution and AI
+// evaluation (same client-side pipeline the student's Submit uses), builds a
+// fresh `evaluationBreakdown` per student × question, and POSTs the batch here.
+//
+// This endpoint is a persistence-only path: it does NOT execute code and does
+// NOT call the LLM. It just walks the User doc to each affected submission,
+// pushes the OLD score onto `scoreHistory[]` for audit, and overwrites with
+// the new values. On successful batch it can also clear the
+// `lastEditedAfterSubmissionAt` flag on the affected questions (in the node
+// tree) so the "Recently edited" filter shows them as back in sync.
+//
+// Request body:
+//   {
+//     courseId, exerciseId, category, subcategory,   // path
+//     nodeId, nodeType,                              // for flag-clear lookup
+//     updates: [
+//       { userId, questionId, score, status, evaluationBreakdown, note? }
+//     ],
+//     clearFlagsForQuestionIds?: string[]            // question _ids to clear
+//   }
+// Response: { success, updated, failed:[{userId, questionId, reason}], flagsCleared }
+exports.rerunSubmissions = async (req, res) => {
+  try {
+    const {
+      courseId, exerciseId, category, subcategory,
+      nodeId, nodeType,
+      updates,
+      clearFlagsForQuestionIds,
+    } = req.body || {};
+
+    if (!courseId || !exerciseId || !category) {
+      return res.status(400).json({ success: false, message: 'courseId, exerciseId, category are required' });
+    }
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ success: false, message: 'updates must be a non-empty array' });
+    }
+    const validCategories = ['I_Do', 'We_Do', 'You_Do'];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({ success: false, message: 'category must be I_Do | We_Do | You_Do' });
+    }
+
+    // Reuse the same sanitiser semantics submitAnswer uses, so a rerun-produced
+    // breakdown lands with the same shape any first-submit breakdown does.
+    const ALLOWED_METHOD = new Set(['manual', 'testcase', 'ai']);
+    const ALLOWED_CRIT = new Set(['correctness','codeQuality','efficiency','readability','edgeCases','bestPractices']);
+    const sanitizeBreakdown = (raw) => {
+      const b = (typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw);
+      if (!b || typeof b !== 'object') return null;
+      if (!ALLOWED_METHOD.has(b.method)) return null;
+      const out = { method: b.method };
+      if (b.method === 'testcase' && b.testcase && typeof b.testcase === 'object') {
+        // Per-case rows (which case failed + input/expected/got) — capped at
+        // 50 rows / 2000-char strings like the AI test-case list, so the
+        // answer doc stays bounded. Older clients that only send counts still
+        // sanitize fine (cases → []).
+        const tcCases = Array.isArray(b.testcase.cases) ? b.testcase.cases : [];
+        out.testcase = {
+          passed: Number(b.testcase.passed) || 0,
+          total: Number(b.testcase.total) || 0,
+          cases: tcCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            passed: !!t?.passed,
+            hidden: !!t?.hidden,
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            actualOutput: typeof t?.actualOutput === 'string' ? t.actualOutput.slice(0, 2000) : '',
+          })),
+        };
+      }
+      if (b.method === 'ai' && b.ai && typeof b.ai === 'object') {
+        const criteria = Array.isArray(b.ai.criteria) ? b.ai.criteria : [];
+        const testCases = Array.isArray(b.ai.testCases) ? b.ai.testCases : [];
+        out.ai = {
+          perCriterionMax: Number(b.ai.perCriterionMax) || 0,
+          criteria: criteria
+            .filter(c => c && ALLOWED_CRIT.has(c.key))
+            .map(c => ({
+              key: c.key,
+              percentage: Math.max(0, Math.min(100, Number(c.percentage) || 0)),
+              score: Math.max(0, Number(c.score) || 0),
+              comment: typeof c.comment === 'string' ? c.comment.slice(0, 500) : '',
+            })),
+          testCases: testCases.slice(0, 50).map((t, i) => ({
+            index: Number(t?.index) === Number(t?.index) ? Number(t.index) : i,
+            source: t?.source === 'ai' ? 'ai' : 'question',
+            input: typeof t?.input === 'string' ? t.input.slice(0, 2000) : '',
+            expectedOutput: typeof t?.expectedOutput === 'string' ? t.expectedOutput.slice(0, 2000) : '',
+            passed: !!t?.passed,
+            comment: typeof t?.comment === 'string' ? t.comment.slice(0, 500) : '',
+            // Trainer-authored hidden cases stay hidden in the student's
+            // Test Result panel exactly like they do under Test Case scoring.
+            hidden: !!t?.hidden,
+          })),
+          passedTestCases: Math.max(0, Number(b.ai.passedTestCases) || 0),
+          totalTestCases: Math.max(0, Number(b.ai.totalTestCases) || 0),
+          criteriaPortion: Math.max(0, Number(b.ai.criteriaPortion) || 0),
+          testCasePortion: Math.max(0, Number(b.ai.testCasePortion) || 0),
+          model: typeof b.ai.model === 'string' ? b.ai.model.slice(0, 100) : '',
+          failed: !!b.ai.failed,
+        };
+      }
+      return out;
+    };
+
+    // Group updates by userId so we do at most one save per user.
+    const byUser = new Map();
+    for (const u of updates) {
+      if (!u || !u.userId || !u.questionId) continue;
+      const arr = byUser.get(String(u.userId)) || [];
+      arr.push(u);
+      byUser.set(String(u.userId), arr);
+    }
+
+    const failed = [];
+    let updatedCount = 0;
+
+    for (const [userId, userUpdates] of byUser.entries()) {
+      let user;
+      try {
+        user = await User.findById(userId);
+      } catch (e) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'user lookup failed' }));
+        continue;
+      }
+      if (!user) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'user not found' }));
+        continue;
+      }
+
+      // Walk to the exercise entry.
+      const courseIdx = user.courses.findIndex(c => c.courseId && c.courseId.toString() === courseId);
+      if (courseIdx === -1) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'course entry missing' }));
+        continue;
+      }
+      const answers = user.courses[courseIdx].answers;
+      if (!answers || !answers[category]) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'category map missing' }));
+        continue;
+      }
+      const exerciseKey = (category === 'We_Do' || category === 'You_Do') ? subcategory : exerciseId.toString();
+      const exerciseArray = answers[category].get(exerciseKey);
+      if (!Array.isArray(exerciseArray) || exerciseArray.length === 0) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'exercise array missing' }));
+        continue;
+      }
+      const exerciseIdx = exerciseArray.findIndex(ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId);
+      if (exerciseIdx === -1) {
+        userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'exercise entry missing' }));
+        continue;
+      }
+      const exercise = exerciseArray[exerciseIdx];
+
+      let userDirty = false;
+      for (const u of userUpdates) {
+        const qIdx = (exercise.questions || []).findIndex(q => q.questionId && q.questionId.toString() === String(u.questionId));
+        if (qIdx === -1) {
+          failed.push({ userId, questionId: u.questionId, reason: 'question submission not found' });
+          continue;
+        }
+        const q = exercise.questions[qIdx];
+
+        const newBreakdown = sanitizeBreakdown(u.evaluationBreakdown);
+        const newScore = Math.max(0, Math.min(100, Number(u.score) || 0));
+        const newStatus = ['solved','attempted','skipped','submitted','evaluated'].includes(u.status)
+          ? u.status
+          : (q.status || 'submitted');
+        const newIsCorrect = newStatus === 'solved' || newScore >= 70;
+
+        // Push previous values to scoreHistory before overwriting. This is the
+        // audit trail — teachers can see "was 3, now 7 (rerun on 2026-08-07)".
+        if (!Array.isArray(q.scoreHistory)) q.scoreHistory = [];
+        q.scoreHistory.push({
+          previousScore: Number(q.score) || 0,
+          previousStatus: q.status || '',
+          previousIsCorrect: !!q.isCorrect,
+          at: new Date(),
+          source: 'rerun',
+          note: typeof u.note === 'string' ? u.note.slice(0, 300) : '',
+        });
+
+        q.score = newScore;
+        q.status = newStatus;
+        q.isCorrect = newIsCorrect;
+        q.lastRerunAt = new Date();
+        q.updatedAt = new Date();
+        if (newBreakdown) q.evaluationBreakdown = newBreakdown;
+
+        exercise.questions[qIdx] = q;
+        userDirty = true;
+        updatedCount++;
+      }
+
+      if (userDirty) {
+        // Mongoose Map + nested array — the same `markModified` dance
+        // submitAnswer uses to persist deep changes reliably.
+        answers[category].set(exerciseKey, exerciseArray);
+        user.markModified(`courses.${courseIdx}.answers.${category}`);
+        try {
+          await user.save();
+        } catch (saveErr) {
+          userUpdates.forEach(u => failed.push({ userId, questionId: u.questionId, reason: 'save failed: ' + saveErr.message }));
+          updatedCount -= userUpdates.length; // roll back the count optimistically added above
+        }
+      }
+    }
+
+    // ── Clear the "recently edited" flag on the affected questions ──────────
+    // The client passes the list of question _ids that were fully rerun for
+    // every affected student — those questions are now in sync with all stored
+    // scores again, so the flag can be cleared.
+    let flagsCleared = 0;
+    if (Array.isArray(clearFlagsForQuestionIds) && clearFlagsForQuestionIds.length > 0 && nodeId && nodeType) {
+      try {
+        // Reuse the same node-model resolver the rest of the file uses; falls
+        // back gracefully across module/submodule/topic/subtopic.
+        const modelForNodeType = {
+          module: require('../../../models/Courses/moduleStructure/moduleModal'),
+          submodule: require('../../../models/Courses/moduleStructure/subModuleModal'),
+          topic: require('../../../models/Courses/moduleStructure/topicModal'),
+          subtopic: require('../../../models/Courses/moduleStructure/subTopicModal'),
+        }[String(nodeType).toLowerCase()];
+
+        if (modelForNodeType) {
+          const nodeDoc = await modelForNodeType.findById(nodeId);
+          if (nodeDoc && nodeDoc.pedagogy) {
+            // pedagogy is a single nested subdoc { I_Do, We_Do, You_Do }, not an
+            // array. Wrap it in an array so the walking loop below works uniformly.
+            let touched = false;
+            const wanted = new Set(clearFlagsForQuestionIds.map(String));
+            for (const ped of [nodeDoc.pedagogy]) {
+              const groups = ped?.[category];
+              if (!groups) continue;
+              // groups is a Map (or plain object) keyed by subcategory.
+              const groupIter = typeof groups.entries === 'function' ? groups.entries() : Object.entries(groups);
+              for (const [, subExercises] of groupIter) {
+                if (!Array.isArray(subExercises)) continue;
+                for (const ex of subExercises) {
+                  // Pedagogy exercises use Mongoose _id, not a top-level
+                  // exerciseId field. The human-readable id lives at
+                  // ex.exerciseInformation.exerciseId — accept either match.
+                  const matches = (ex && ex._id && ex._id.toString() === String(exerciseId))
+                    || (ex && ex.exerciseInformation && ex.exerciseInformation.exerciseId === exerciseId);
+                  if (!matches) continue;
+                  for (const q of ex.questions || []) {
+                    if (q && q._id && wanted.has(q._id.toString()) && q.lastEditedAfterSubmissionAt) {
+                      q.lastEditedAfterSubmissionAt = null;
+                      touched = true;
+                      flagsCleared++;
+                    }
+                  }
+                }
+              }
+            }
+            if (touched) {
+              nodeDoc.markModified('pedagogy');
+              await nodeDoc.save();
+            }
+          }
+        }
+      } catch (flagErr) {
+        // Flag clearing is best-effort — the score updates already committed.
+        console.warn('[rerunSubmissions] flag clear failed:', flagErr.message);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      updated: updatedCount,
+      failed,
+      flagsCleared,
+    });
+  } catch (err) {
+    console.error('rerunSubmissions error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+// RERUN CONTEXT — the client calls this before showing the Rerun dialog to
+// know (a) which questions in the exercise are "recently edited" and (b) how
+// many student submissions each question has. Also returns each question's
+// current test cases + evaluation method + language so the client-side runner
+// can score locally against the CURRENT state.
+//
+// GET /courses/exercises/:exerciseId/rerun-context
+// Query: courseId, category, subcategory, nodeId, nodeType
+exports.getRerunContext = async (req, res) => {
+  try {
+    const { exerciseId } = req.params;
+    const { courseId, category, subcategory, nodeId, nodeType } = req.query;
+
+    if (!courseId || !exerciseId || !category || !nodeId || !nodeType) {
+      return res.status(400).json({ success: false, message: 'courseId, exerciseId, category, nodeId, nodeType required' });
+    }
+
+    const modelForNodeType = {
+      module: require('../../../models/Courses/moduleStructure/moduleModal'),
+      submodule: require('../../../models/Courses/moduleStructure/subModuleModal'),
+      topic: require('../../../models/Courses/moduleStructure/topicModal'),
+      subtopic: require('../../../models/Courses/moduleStructure/subTopicModal'),
+    }[String(nodeType).toLowerCase()];
+    if (!modelForNodeType) {
+      return res.status(400).json({ success: false, message: 'unknown nodeType' });
+    }
+
+    const nodeDoc = await modelForNodeType.findById(nodeId).lean();
+    if (!nodeDoc) return res.status(404).json({ success: false, message: 'node not found' });
+
+    // Find the target exercise + collect its questions. pedagogy is an object
+    // { I_Do, We_Do, You_Do }, not an array — wrap for uniform traversal.
+    let targetExercise = null;
+    let evaluationMethod = null;
+    for (const ped of (nodeDoc.pedagogy ? [nodeDoc.pedagogy] : [])) {
+      const groups = ped?.[category];
+      if (!groups) continue;
+      const groupIter = typeof groups.entries === 'function' ? groups.entries() : Object.entries(groups);
+      for (const [, subExercises] of groupIter) {
+        if (!Array.isArray(subExercises)) continue;
+        for (const ex of subExercises) {
+          // Pedagogy exercise identity: match on Mongoose _id (the primary key
+          // the client passes as exerciseId in the URL) or on the human-readable
+          // exerciseInformation.exerciseId as a fallback.
+          const matches = (ex && ex._id && ex._id.toString() === String(exerciseId))
+            || (ex && ex.exerciseInformation && ex.exerciseInformation.exerciseId === exerciseId);
+          if (!matches) continue;
+          targetExercise = ex;
+          evaluationMethod = ex.evaluationMethod || null;
+          break;
+        }
+        if (targetExercise) break;
+      }
+      if (targetExercise) break;
+    }
+    if (!targetExercise) return res.status(404).json({ success: false, message: 'exercise not found in this node' });
+
+    // Only programming questions are eligible (Manual has no auto-scorer).
+    const eligibleQuestions = (targetExercise.questions || [])
+      .filter(q => q && (q.questionType === 'programming' || Array.isArray(q.testCases)))
+      .map(q => ({
+        _id: q._id,
+        title: q.title || q.programmingQuestionDescription?.text || '',
+        difficulty: q.difficulty || null,
+        testCases: q.testCases || [],
+        sampleInput: q.sampleInput || '',
+        sampleOutput: q.sampleOutput || '',
+        constraints: q.constraints || [],
+        score: q.score || 100,
+        lastEditedAfterSubmissionAt: q.lastEditedAfterSubmissionAt || null,
+      }));
+
+    // Count submissions per question (across ALL enrolled users for this course).
+    // Best-effort — batch scans the whole User collection filtered by course.
+    // For a large user base this can be slow; acceptable for the rerun panel
+    // which is trainer-only and rare.
+    const users = await User.find({ 'courses.courseId': courseId })
+      .select('_id firstName lastName email courses')
+      .lean();
+
+    const perQuestionSubmitCount = new Map();
+    const submissionsIndex = []; // { userId, userName, questionId, codeAnswer, language, currentScore, currentStatus }
+    const exerciseKey = (category === 'We_Do' || category === 'You_Do') ? subcategory : String(exerciseId);
+
+    for (const u of users) {
+      const courseEntry = (u.courses || []).find(c => c.courseId && c.courseId.toString() === String(courseId));
+      if (!courseEntry) continue;
+      const catMap = courseEntry.answers && courseEntry.answers[category];
+      if (!catMap) continue;
+      // Lean docs come back as plain objects for Maps too.
+      const subArr = catMap instanceof Map ? catMap.get(exerciseKey) : catMap[exerciseKey];
+      if (!Array.isArray(subArr)) continue;
+      const exEntry = subArr.find(ex => ex && ex.exerciseId && ex.exerciseId.toString() === String(exerciseId));
+      if (!exEntry || !Array.isArray(exEntry.questions)) continue;
+      for (const q of exEntry.questions) {
+        if (!q || !q.questionId) continue;
+        const qid = q.questionId.toString();
+        perQuestionSubmitCount.set(qid, (perQuestionSubmitCount.get(qid) || 0) + 1);
+        submissionsIndex.push({
+          userId: u._id,
+          userName: `${u.firstName || ''} ${u.lastName || ''}`.trim() || u.email,
+          userEmail: u.email,
+          questionId: qid,
+          codeAnswer: q.codeAnswer || '',
+          language: q.language || '',
+          currentScore: q.score || 0,
+          currentStatus: q.status || 'attempted',
+          hasBreakdown: !!q.evaluationBreakdown,
+          currentBreakdownMethod: q.evaluationBreakdown ? q.evaluationBreakdown.method : null,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      exerciseId,
+      evaluationMethod, // { method: 'testcase' | 'ai' | 'manual', ... }
+      questions: eligibleQuestions.map(q => ({
+        ...q,
+        submissionCount: perQuestionSubmitCount.get(String(q._id)) || 0,
+      })),
+      submissions: submissionsIndex,
+    });
+  } catch (err) {
+    console.error('getRerunContext error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
 

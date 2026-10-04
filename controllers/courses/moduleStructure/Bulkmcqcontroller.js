@@ -7,13 +7,15 @@
  */
 
 const mongoose = require("mongoose");
-const { createClient } = require("@supabase/supabase-js");
 const Papa = require("papaparse"); // npm i papaparse
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY
-);
+// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
+// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
+// resolving { data, error }), so the call sites below are unchanged — see
+// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+const { storage, publicUrlFor } = require("../../../utils/storage");
+
+const { resolvePedagogyScope } = require("../../../utils/pedagogyScope");
 
 const modelMap = {
   modules:   { model: () => mongoose.model("Module1") },
@@ -347,7 +349,7 @@ async function storeDocumentInSupabase(fileBuffer, originalName, exerciseId, upl
   const safeName   = originalName.replace(/[^a-zA-Z0-9._-]/g, "_");
   const filePath   = `bulk-uploads/${exerciseId}/${timestamp}_${safeName}`;
 
-  const { data, error } = await supabase.storage
+  const { data, error } = await storage
     .from("smartlms")
     .upload(filePath, fileBuffer, {
       contentType: "application/octet-stream",
@@ -357,7 +359,7 @@ async function storeDocumentInSupabase(fileBuffer, originalName, exerciseId, upl
 
   if (error) throw new Error(`Supabase upload failed: ${error.message}`);
 
-  const publicUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+  const publicUrl = publicUrlFor(filePath);
   return { filePath, publicUrl };
 }
 
@@ -456,10 +458,17 @@ exports.parseBulkDocument = async (req, res) => {
     try {
       const Model  = modelMap[type].model();
       const entity = await Model.findById(id);
-      if (entity?.pedagogy?.[tabType]) {
-        const tabData = entity.pedagogy[tabType] instanceof Map
-          ? Object.fromEntries(entity.pedagogy[tabType])
-          : entity.pedagogy[tabType];
+      // Resources by Batch — read capacity from the SAME container the
+      // questions will be written to. Against the shared container a
+      // batch-wise exercise looks absent, and the upload gets sized against
+      // the wrong exercise (or refused outright).
+      const { container: pedagogyRoot } = entity
+        ? await resolvePedagogyScope(entity, tabType, req)
+        : { container: null };
+      if (pedagogyRoot?.[tabType]) {
+        const tabData = pedagogyRoot[tabType] instanceof Map
+          ? Object.fromEntries(pedagogyRoot[tabType])
+          : pedagogyRoot[tabType];
         const exercises = tabData[subcategory] || [];
         const found = exercises.find(
           (ex) => ex._id?.toString() === exerciseId || ex.exerciseInformation?.exerciseId === exerciseId
@@ -565,7 +574,10 @@ exports.insertBulkQuestions = async (req, res) => {
     }
 
     // ── Locate the exercises array for this tabType + subcategory ─────────────
-    const tabData = entity.pedagogy?.[tabType];
+    // Resources by Batch — resolve the container first, so a batch-wise
+    // exercise is found in its own batch instead of reported missing.
+    const { container: pedagogyRoot } = await resolvePedagogyScope(entity, tabType, req);
+    const tabData = pedagogyRoot?.[tabType];
     if (!tabData) {
       return res.status(404).json({
         message: [{ key: "error", value: `tabType "${tabType}" not found` }],
@@ -678,6 +690,10 @@ exports.insertBulkQuestions = async (req, res) => {
       const newQ = {
         _id:          qId,
         questionType: "mcq",
+        // Bulk-document imports bill the Manual quota slice — same tag the
+        // in-form .txt upload stamps ('scratch-manual'), so per-source
+        // quota math and the source badge cover this ingress too.
+        source:       q.source || "scratch-manual",
 
         mcqQuestionTitle:      q.mcqQuestionTitle,
         mcqQuestionType:       q.mcqQuestionType      || "multiple_choice",

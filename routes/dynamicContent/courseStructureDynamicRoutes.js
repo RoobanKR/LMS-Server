@@ -1,10 +1,5 @@
 const express = require("express");
 const {
-  addClient,
-  getAllClients,
-  getClientById,
-  updateClient,
-  deleteClient,
   addCategory,
   getAllCategories,
   getCategoryById,
@@ -22,7 +17,6 @@ const {
   deleteServiceModal,
   getOrCreateCourseStructure,
   getAllCourseStructureWithPopulated,
-  toggleClientStatus
 } = require("../../controllers/dynamicContent/courseStructureDynamic");
 const { userAuth } = require("../../middlewares/userAuth");
 const router = express.Router();
@@ -32,13 +26,9 @@ router.get('/course-structure', getOrCreateCourseStructure);
 
 router.get('/getAll/course-dynamic',userAuth, getAllCourseStructureWithPopulated);
 
-// CLIENT ROUTES
-router.post('/clients/create',userAuth, addClient);
-router.get('/clients/getAll',userAuth, getAllClients);
-router.get('/clients/getById/:clientId',userAuth, getClientById);
-router.put('/clients/update/:clientId',userAuth, updateClient);
-router.delete('/clients/delete/:clientId',userAuth, deleteClient);
-router.put('/clients/toggle-status/:clientId',userAuth, toggleClientStatus);
+// CLIENT ROUTES — removed. Clients are managed by the standalone Client
+// Management module (/client-management/*, models/ClientManagementModel.js),
+// not by the Dynamic Field Settings tab that used to own /clients/*.
 
 // CATEGORY ROUTES
 router.post('/categories/create',userAuth, addCategory);

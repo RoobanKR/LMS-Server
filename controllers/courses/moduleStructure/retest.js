@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const User = require("../../../models/UserModel");
 const Role = require("../../../models/RoleModel");
 const RetestRequest = require("../../../models/Courses/RetestRequestModel");
+const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
 
 // ── Helper: find all coordinator/admin user ids (to notify on new requests) ──
 async function findCoordinatorUserIds() {
@@ -220,15 +221,36 @@ exports.unlockAssessment = async (req, res) => {
     if (!userCourse.answers[category]) userCourse.answers[category] = new Map();
     const categoryMap = userCourse.answers[category];
 
-    let exercisesArray = categoryMap.get(subcategory) || [];
+    // Unlock the student's REAL attempt. Manage Users sends the subcategory
+    // LABEL ("Assesment") while the student's player filed the attempt under
+    // the pedagogy map key ("assesment"); a lookup by the label alone missed
+    // it and pushed a second, empty record beside it — the real attempt
+    // stayed submitted and the student never got Start back. Find the bucket
+    // already holding this exercise, preferring the one with answers in it.
+    let bucketKey = subcategory;
+    if (typeof categoryMap.entries === "function") {
+      let best = null;
+      for (const [key, arr] of categoryMap.entries()) {
+        if (!Array.isArray(arr)) continue;
+        const ex = arr.find((e) => e?.exerciseId && e.exerciseId.toString() === exerciseId);
+        if (ex && (!best || (ex.questions || []).length > best.count)) {
+          best = { key, count: (ex.questions || []).length };
+        }
+      }
+      if (best) bucketKey = best.key;
+    }
+
+    let exercisesArray = categoryMap.get(bucketKey) || [];
     if (exercisesArray.toObject) exercisesArray = exercisesArray.toObject();
 
     const start = retestStart ? new Date(retestStart) : null;
     const end = retestEnd ? new Date(retestEnd) : null;
-    const retestWindow =
-      start || end
-        ? { startDate: start, endDate: end, unlockedAt: new Date(), unlockedBy: coordinatorId }
-        : null;
+    // Stamped on EVERY unlock, dates or not: `unlockedAt` is how the student's
+    // list tells the kept answers of the previous attempt (pre-filled for the
+    // retake) from a fresh submission, so it can show Start again. Without
+    // start/end it opens no extra window — the assessment's own schedule
+    // still applies.
+    const retestWindow = { startDate: start, endDate: end, unlockedAt: new Date(), unlockedBy: coordinatorId };
 
     const idx = exercisesArray.findIndex(
       (ex) => ex.exerciseId && ex.exerciseId.toString() === exerciseId
@@ -245,7 +267,7 @@ exports.unlockAssessment = async (req, res) => {
       exercisesArray[idx].isLocked = false;
       exercisesArray[idx].lastTestSubmittedAt = null;
       exercisesArray[idx].lateSubmission = false;
-      if (retestWindow) exercisesArray[idx].retestWindow = retestWindow;
+      exercisesArray[idx].retestWindow = retestWindow;
     } else {
       // No prior submission (e.g. missed the test entirely) — create a fresh entry
       exercisesArray.push({
@@ -256,14 +278,26 @@ exports.unlockAssessment = async (req, res) => {
         isLocked: false,
         testSubmissions: 0,
         userAttempts: 0,
-        subcategory,
-        ...(retestWindow ? { retestWindow } : {}),
+        subcategory: bucketKey,
+        retestWindow,
       });
     }
 
-    categoryMap.set(subcategory, exercisesArray);
+    categoryMap.set(bucketKey, exercisesArray);
     user.markModified(`courses.${courseIndex}.answers.${category}`);
     await user.save();
+
+    // The previous attempt's exam SESSION (timer + submitted/terminated state)
+    // outlives the answer reset, and every You_Do write checks it: while it
+    // says "terminated", each save is refused with `attempt_terminal`, so the
+    // retake can't keep a line of code. One session exists per student per
+    // assessment — removing it makes the retake's Start open a fresh attempt
+    // with a full timer.
+    try {
+      await ExamSession.deleteOne({ assessmentId: String(exerciseId), studentId: String(targetUserId) });
+    } catch (e) {
+      console.error("reset exam session failed:", e.message);
+    }
 
     // Mark the related request Approved (by id if given, else any pending one)
     let updatedRequest = null;

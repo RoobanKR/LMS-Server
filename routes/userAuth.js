@@ -9,12 +9,14 @@ const {
   UserVerify,
   verifyToken,
   UpdateUser,
+  UpdateMyProfile,
   DeleteUser,
   UserLogout,
   UserLogoutAll,
   getAllTokens,
   toggleUserStatus,
   bulkToggleUserStatus,
+  bulkAddServiceToUsers,
   bulkUploadUsers,
   UpdateUserWithPermission,
   GetMyPermission,
@@ -43,12 +45,18 @@ router.get('/getById/userAccess/:id',userAuth, getUserAccessById);
 router.get('/user/Verify', userAuth, UserVerify) // for testing only
 
 router.put('/update/users/:userId',userAuth, UpdateUser);
+// Self-service: photo + password for the CALLER only. Takes no :userId —
+// see UpdateMyProfile for why that separation matters.
+router.put('/user/me/profile', userAuth, UpdateMyProfile);
 router.delete('/delete/users/:userId',userAuth, DeleteUser)
 
 
 router.put("/user/status/:userId",userAuth,  toggleUserStatus);
 
 router.put("/user/bulk-status",userAuth,  bulkToggleUserStatus);
+
+// Reassign Users: ADD one service to many users (keeps their existing services)
+router.put("/user/bulk-add-service",userAuth,  bulkAddServiceToUsers);
 
 
 router.post('/user/bulk-upload-users',userAuth, bulkUploadUsers)

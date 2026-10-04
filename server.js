@@ -1,6 +1,7 @@
 const express = require("express");
 const connectDB = require("./config/db");
 const cors = require("cors");
+const compression = require("compression");
 const app = express();
 const path = require("path");
 const cookieParser = require("cookie-parser");
@@ -16,7 +17,10 @@ const JWT_TOKEN_KEY = config.get('JWT_TOKEN_KEY');
 const fileUpload = require("express-fileupload");
 const userAuth = require("./routes/userAuth");
 const institutionRoutes = require("./routes/institutionRoutes");
+const reportSettingsRoutes = require("./routes/reportSettingsRoutes");
 const dynamicContentRoutes = require("./routes/dynamicContent/courseStructureDynamicRoutes");
+const clientManagementRoutes = require("./routes/clientManagementRoutes");
+const serviceMappingRoutes = require("./routes/serviceMappingRoutes");
 const pedagogyStructureRoutes = require("./routes/dynamicContent/pedagogyStructureRoutes");
 const courseStructureRoutes = require("./routes/courses/courseStructureRoutes");
 const moduleStructureRoutes = require("./routes/courses/moduleStructureRoutes");
@@ -29,6 +33,8 @@ const CalendarScheduleRoutes = require("./routes/courses/calendarScheduleRoutes"
 const levelRoutes = require("./routes/courses/moduleStructure/levelsRoutes");
 const printSettingRoutes = require("./routes/dynamicContent/printSettingRoutes");
 const compilerRoutes = require("./routes/compilerRoutes");
+const studentWorkspaceRoutes = require("./routes/studentWorkspaceRoutes");
+const questionDraftRoutes = require("./routes/questionDraftRoutes");
 const documentExtractionRoutes = require("./routes/documentExtractionRoutes");
 const videoTranscriptionRoutes = require("./routes/videoTranscriptionRoutes");
 const roleRoutes = require("./routes/roleRoutes");
@@ -45,22 +51,77 @@ const liveScreensRoutes = require('./routes/courses/moduleStructure/liveScreensR
 const { registerLiveDashboardHandlers } = require('./utils/liveDashboardSocket');
 const { registerLiveScreenHandlers } = require('./utils/liveScreenSocket');
 const { registerMessagingHandlers } = require('./utils/messagingSocket');
+// Live interactive compiler (Java/C/C++/C#): gateway to the self-hosted
+// compiler service. Stays off until COMPILER_REDIS_URL is set.
+const { initCompiler, registerCompilerSocket, compilerRouter } = require('./compiler');
 // Import progress routes
 const progressRoutes = require('./routes/progressRoutes')
 const activityLogRoutes = require('./routes/activityLogRoutes')
 const pptConversionRoutes = require('./routes/courses/pptConversionRoutes');
 const testYourSkillsRoutes = require('./routes/courses/moduleStructure/testYourSkillsRoutes');
 const retestRoutes = require('./routes/courses/moduleStructure/retestRoutes');
+const feedbackRoutes = require('./routes/feedbackRoutes');  // Import feedback routes
+const { startStatusSyncCron } = require("./cron/feedbackStatusSync");
+const backupRoutes = require('./routes/backupRoutes');
+const { startBackupScheduler } = require("./cron/backupScheduler");
+const { startCodeFilesCleanupCron } = require("./cron/codeFilesCleanup");
+const { startAttendanceMissingCron } = require("./cron/attendanceMissingNotify");
 
+const programCalendarRoutes = require("./routes/courses/programCalendarRoutes");
+const instituteHolidayCalendarRoutes = require("./routes/instituteHolidayCalendarRoutes");
+const degreeAndDepartmentRoutes = require("./routes/dynamicContent/degreeAndDepartmentRoutes");
+const attendanceRoutes = require("./routes/courses/attendanceRoutes");
+const glossaryRoutes = require("./routes/courses/glossaryRoutes");
 // Use progress routes
 // Connect Database
 connectDB();
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
 
+// Public static assets uploaded through the API (currently just client
+// logos — see /client-management/upload-logo). Files are written under
+// Server/uploads/... and read back at http[s]://<host>/uploads/... so the
+// URL saved on the record works for anyone whose browser can reach this
+// server. Kept small on purpose: image logos only. The subdirectory is
+// created on demand by the upload handler; static() itself does not
+// require it to exist upfront.
+app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
+
 // Init Middleware
+// gzip every compressible response. The big JSON list endpoints (users
+// directory, courses analytics) are highly repetitive and shrink ~85-90%;
+// no streaming/SSE endpoints exist in this app (checked), so buffering is
+// safe. Binary uploads/downloads are skipped by the default content-type
+// filter.
+app.use(compression());
+// Saved program output files (routes/codeFileRoutes.js) can be a few MB, above
+// the 100 KB default below: 5 MB of files, up to twice that as JSON (base64,
+// escaped quotes). Parsing them here first makes the later json() calls skip
+// the already-parsed body. A rejected body is handed to the route instead of
+// failing here, before cors() — the browser could not read that.
+const codeFilesJson = express.json({ limit: '12mb' });
+app.use('/api/code-files', (req, res, next) => codeFilesJson(req, res, (err) => {
+  if (err) { req._body = true; req.codeFilesBodyError = err; }
+  next();
+}));
 app.use(express.json({ extended: false }));
+// Allowed browser origins. The built-in list is the Vercel deployments plus
+// local dev; CORS_ORIGINS adds any others (comma-separated) so a new host does
+// not need a code change — an unlisted origin has every API call blocked by the
+// browser, which looks exactly like the API being down.
+const CORS_ORIGINS = [
+  "https://lms-client-five-theta.vercel.app",
+  "https://lms-smartcliff-71ug4ew5q-muthurajanparthsarathys-projects.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "http://localhost:3002",
+  ...String(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim().replace(/\/+$/, ""))
+    .filter(Boolean),
+];
+
 app.use(cors({
-  origin: ["https://lms-client-jade-three.vercel.app","http://localhost:3000", "http://localhost:3001", "http://localhost:3002"],
+  origin: CORS_ORIGINS,
   methods: ["GET", "POST", "PUT", "DELETE","PATCH"],
   credentials: true,
   exposedHeaders: ["Content-Length", "Authorization"],
@@ -85,6 +146,11 @@ socketIO.init(server);
 
 // ─── Attach auth middleware + room handlers to the SAME io instance ───────────
 const io = socketIO.getIO();
+initCompiler(io);
+startStatusSyncCron();
+startBackupScheduler();
+startCodeFilesCleanupCron();
+startAttendanceMissingCron();
 
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
@@ -120,6 +186,9 @@ io.on('connection', (socket) => {
 
   // ── Proctor ↔ Student messaging (individual + broadcast) ───────────────────
   registerMessagingHandlers(io, socket);
+
+  // ── Live interactive compiler (compiler:start / :input / :stop) ───────────
+  registerCompilerSocket(socket);
 
   // ── Live MCQ room — teacher joins to receive real-time student events ──────
   socket.on('join-liveq', (liveQuestionId) => {
@@ -178,8 +247,12 @@ io.on('connection', (socket) => {
 app.get("/", (req, res) => res.send("API Running"));
 
 app.use("/", institutionRoutes);
+app.use("/", reportSettingsRoutes);
+app.use('/', backupRoutes);
 app.use("/", userAuth);
 app.use("/", dynamicContentRoutes);
+app.use("/", clientManagementRoutes);
+app.use("/", serviceMappingRoutes);
 app.use("/", pedagogyStructureRoutes);
 app.use("/", courseStructureRoutes);
 app.use("/", moduleStructureRoutes);
@@ -192,6 +265,8 @@ app.use("/", CalendarScheduleRoutes);
 app.use("/", levelRoutes);
 app.use("/", printSettingRoutes);
 app.use("/", compilerRoutes);
+app.use("/", studentWorkspaceRoutes);
+app.use("/", questionDraftRoutes);
 app.use("/", roleRoutes);
 app.use('/', NoteRoutes);
 app.use('/', GroupParticipantsRoutes);
@@ -211,6 +286,33 @@ app.use("/api/video", videoTranscriptionRoutes);
 app.use('/', progressRoutes);
 app.use('/', activityLogRoutes);
 app.use('/you-do', testYourSkillsRoutes);
+app.use('/', feedbackRoutes);
+app.use("/", programCalendarRoutes);
+app.use("/", instituteHolidayCalendarRoutes);
+app.use("/", degreeAndDepartmentRoutes);
+app.use("/", attendanceRoutes);
+app.use("/", glossaryRoutes);
+// Read-only proxies over public coding-platform profile data (LeetCode,
+// CodeChef, HackerRank, AtCoder) for the Coding Analytics dashboard.
+app.use("/", require("./routes/codingAnalyticsRoutes"));
+
+// ─── Piston proxy (auth-gated; replaces the direct browser→Piston path) ──────
+app.use("/api", require("./routes/executionRoutes"));
+// Files a student's program creates while running (kept for the current day).
+app.use("/api", require("./routes/codeFileRoutes"));
+
+// ─── Live interactive compiler: GET /compiler/health ─────────────────────────
+app.use(compilerRouter);
+
+// ─── Super Admin module (independent, namespaced under /superadmin) ──────────
+app.use(require("./routes/superadmin"));
+
+// ─── External Assessment module (independent; two namespaces) ────────────────
+//   /api/admin/external/*  — admin CRUD, userAuth required
+//   /api/external/*        — participant access by invitation token, NO auth
+// External participants are not LMS users: nothing under this mount reads or
+// writes the `lms-users` collection.
+app.use(require("./routes/external"));
 
 
 // ─── Start ────────────────────────────────────────────────────────────────────

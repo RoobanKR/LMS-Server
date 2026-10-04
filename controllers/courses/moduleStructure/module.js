@@ -3,7 +3,7 @@ const Module1 = require('../../../models/Courses/moduleStructure/moduleModal');
 // Create a new Module
 exports.createModule = async (req, res) => {
   try {
-    const {  courses, title, description, duration, level,index,testConfiguration } = req.body;
+    const {  courses, title, description, duration, level,index,testConfiguration, phase } = req.body;
 
     // Basic validation
     if (  !courses || !title) {
@@ -13,6 +13,9 @@ exports.createModule = async (req, res) => {
     const newModule = new Module1({
       institution:req.user.institution,
       courses,
+      // Stamped from whichever phase was selected when the module was added.
+      // Strict mode would drop it silently if it were not whitelisted here.
+      phase: typeof phase === "string" ? phase.trim() : "",
       index,
       title,
       description,

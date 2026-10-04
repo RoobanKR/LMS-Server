@@ -28,7 +28,11 @@ const institutionSchema = new mongoose.Schema({
     },
    basedOn: {
         type: String,
-        required: [true, "basedOn is required"] 
+        required: [true, "basedOn is required"]
+    },
+    userIdCounter: {
+        type: Number,
+        default: 0,
     },
     createdAt: {
         type: Date,

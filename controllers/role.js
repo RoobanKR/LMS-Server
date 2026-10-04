@@ -30,7 +30,7 @@ exports.getAllRole = async (req, res) => {
       });
     }
 
-    const roles = await Role.find({ institution: userInstitutionId });
+    const roles = await Role.find({ institution: userInstitutionId }).lean();
 
     return res.status(200).json({
       message: [{ key: 'success', value: 'Role Retrieved successfully' }],

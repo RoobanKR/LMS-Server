@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { assignmentNotifyPlugin } = require('../../../utils/assignmentStudentNotify');
 
 // ─── TEST CASE SCHEMA ─────────────────────────────────────────────────────────
 const testCaseSchema = new mongoose.Schema(
@@ -81,10 +82,13 @@ const securitySettingsSchema = new mongoose.Schema(
     preventPrinting: { type: Boolean, default: true },
     preventScreenshot: { type: Boolean, default: true },
     preventScreenRecording: { type: Boolean, default: true },
-    
+    // Proctor capture — records the student's screen; URL replays in reviewSubmission
+    screenRecordingEnabled: { type: Boolean, default: false },
+
     // Browser restrictions
     requireFullscreen: { type: Boolean, default: true },
     preventTabSwitch: { type: Boolean, default: true },
+    maxTabSwitches: { type: Number, default: 3 },
     preventBrowserClose: { type: Boolean, default: true },
     preventDevTools: { type: Boolean, default: true },
     
@@ -261,10 +265,50 @@ const sectionConfigSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ─── QUESTION-LEVEL APPROVAL (for approvalScope = "settings_and_questions") ──
+// Each question carries an `approval` block scoped to the workflow's CURRENT
+// step. When the step advances, every question's approval is reset to
+// 'pending' so the next approver starts from a clean slate (queries thread
+// is reset too — past-step conversations are scoped per-step).
+const questionQuerySchema = new mongoose.Schema({
+  raisedBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User" },
+  raisedByName: { type: String, default: "" },
+  raisedAt: { type: Date, default: Date.now },
+  text: { type: String, default: "" },
+  resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  resolvedByName: { type: String, default: "" },
+  resolvedAt: { type: Date, default: null },
+  resolutionNote: { type: String, default: "" },
+}, { _id: true });
+
+const questionApprovalSchema = new mongoose.Schema({
+  status: {
+    type: String,
+    enum: ["pending", "queried", "approved", "rejected"],
+    default: "pending",
+  },
+  currentStepOrder: { type: Number, default: null },
+  decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  decidedAt: { type: Date, default: null },
+  rejectionMessage: { type: String, default: "" },
+  editedSinceReject: { type: Boolean, default: false },
+  queries: { type: [questionQuerySchema], default: [] },
+}, { _id: false });
+
 // ─── QUESTION SCHEMA (UPDATED) ────────────────────────────────────────────────
 const questionSchema = new mongoose.Schema(
   {
     questionType: { type: String },
+    // Who originally authored the question — used when an approver raises a
+    // query so the right trainer gets the notification.
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+    createdByEmail: { type: String, default: "" },
+    approval: { type: questionApprovalSchema, default: () => ({}) },
+    // Phase 3/4/6 — per-question source tag (scratch-manual, scratch-bank, ai,
+    // thirdParty:<providerId>) preserved for analytics and Question Bank reuse.
+    source: { type: String, default: null },
+    // Origin id of the Question Bank doc this was imported from — null for authored questions; drives duplicate-import rejection.
+    bankQuestionId: { type: String, default: null },
 
     // ── NEW: Section linking field ────────────────────────────────────────────
     sectionId: { type: String, default: null },
@@ -313,6 +357,7 @@ const questionSchema = new mongoose.Schema(
     // ── Type-specific answer fields ──────────────────────────────────────────
     trueFalseAnswer: { type: Boolean, default: null },
     shortAnswer: { type: String, default: "" },
+    essayAnswer: { type: String, default: "" },
     numericAnswer: { type: Number, default: null },
     numericTolerance: { type: Number, default: null },
     matchingPairs: [matchingPairSchema],
@@ -332,9 +377,48 @@ const questionSchema = new mongoose.Schema(
     constraints: [{ type: String }],
     hints: [hintSchema],
     testCases: [testCaseSchema],
+    // Per-question AI test case count. Read at Submit time when the exercise's
+    // evaluationMethod.ai.testCasesCountMode === 'perQuestion'. Enforced as a
+    // required field in the Programming question authoring form for questions
+    // authored under per-question mode; legacy questions may lack this and
+    // fall back to the exercise's testCasesCount.
+    aiTestCasesCount: { type: Number, default: null, min: 0, max: 50 },
+    // AI-generated test cases cached on the question. Populated by the FIRST
+    // student's Submit when evaluationMethod is 'ai' and the exercise's
+    // ai.testCasesCount > 0. Reused for every subsequent student so the whole
+    // cohort is judged against the same generated set. Cleared by the trainer
+    // "Regenerate AI Test Cases" action (not built in the first pass).
+    aiGeneratedTestCases: {
+      type: [{
+        input: { type: String, default: '' },
+        expectedOutput: { type: String, default: '' },
+      }],
+      default: [],
+    },
+    aiGeneratedTestCasesModel: { type: String, default: '' },
+    aiGeneratedTestCasesAt: { type: Date, default: null },
     solutions: solutionSchema,
     timeLimit: { type: Number, min: 0, max: 10000 },
     memoryLimit: { type: Number, min: 0, max: 1024 },
+    // Link questions: teacher pastes one external URL instead of authoring
+    // the question; students get it in an iframe instead of the compiler.
+    isLinkQuestion: { type: Boolean, default: false },
+    questionLink: { type: String, default: '' },
+    // Code Setup — Starter shown to students on attempt start; Solution is
+    // author-only (stripped for students by testCaseVisibility.js). A code
+    // string for Programming/SQL, or { html, css, javascript } for Frontend.
+    starterCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+    solutionCode: { type: mongoose.Schema.Types.Mixed, default: '' },
+    codeSetupLanguage: { type: String, default: '' },
+    // Execution Setup — how the student submission is executed and graded.
+    // Persist alongside starterCode so re-opening the question editor
+    // restores the exact Function/Full Program + Blank/Generated/Custom
+    // choice the teacher last saved. Mixed on functionContract so the
+    // { functionName, returnType, parameters[] } shape round-trips without
+    // needing a nested sub-schema per question type.
+    executionType: { type: String, enum: ['function', 'fullProgram'], default: 'fullProgram' },
+    functionContract: { type: mongoose.Schema.Types.Mixed, default: null },
+    startingExperience: { type: String, enum: ['blank', 'generated', 'custom'], default: 'blank' },
 
     // ── Database Fields ───────────────────────────────────────────────────────
     sampleQuery: { type: String, default: '' },
@@ -343,6 +427,8 @@ const questionSchema = new mongoose.Schema(
     moduleType: { type: String },
     databaseType: { type: String },
     points: { type: Number, min: 0, max: 100 },
+    // See topicModal.js for the full docstring on this field.
+    lastEditedAfterSubmissionAt: { type: Date, default: null },
   },
   {
     _id: true,
@@ -362,6 +448,66 @@ const notificationGradeSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ─── APPROVAL WORKFLOW SCHEMA ─────────────────────────────────────────────────
+// Snapshot copy of the parent Course's approvalHierarchy.steps, plus per-step
+// runtime status. Created on the exercise when availabilityPeriod.requiresAdminApproval
+// flips to true; gates visibility until the last step approves.
+const approvalWorkflowStepSchema = new mongoose.Schema({
+  order: { type: Number, required: true },
+  roleId: { type: mongoose.Schema.Types.ObjectId, ref: "Role", required: true },
+  roleName: { type: String, required: true },
+  // Person-specific approver snapshotted from the course template at request
+  // time. When set, ONLY this user's approve/reject is accepted and only they
+  // are notified. Null on legacy chains — the code falls back to the role.
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  userName: { type: String, default: "" },
+  status: {
+    type: String,
+    enum: ["waiting", "pending", "approved", "rejected"],
+    default: "waiting",
+  },
+  decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  decidedAt: { type: Date, default: null },
+  comment: { type: String, default: "" },
+  // Timestamp of the notification we sent to this step's approvers. Used to
+  // keep step-1 notification idempotent: for "settings_and_questions" scope
+  // the workflow is snapshot on exercise create but the notification is
+  // deferred until the exercise is fully configured — this field lets us
+  // fire exactly once.
+  notifiedAt: { type: Date, default: null },
+}, { _id: false });
+
+const approvalWorkflowSchema = new mongoose.Schema({
+  steps: { type: [approvalWorkflowStepSchema], default: [] },
+  currentStep: { type: Number, default: 0 },          // 1-based pointer to active step; 0 = none
+  overallStatus: {
+    type: String,
+    enum: ["in_progress", "approved", "rejected"],
+    default: "in_progress",
+  },
+  studentVisible: { type: Boolean, default: false },  // gates student visibility
+  initiatedAt: { type: Date, default: null },
+  // Who submitted the exercise for approval. Captured at snapshot time so
+  // the approver's queue can show the trainer's name/email without needing
+  // to look up the exercise's createdBy separately, and so the record
+  // survives an edit to the trainer's account name (or its later
+  // deletion) — the pending row keeps the frozen identity.
+  initiatedByUserId: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+  initiatedByName: { type: String, default: "" },
+  initiatedByEmail: { type: String, default: "" },
+  completedAt: { type: Date, default: null },
+  // Set to true whenever the trainer saves an edit (or adds a question)
+  // while the workflow is in `rejected`. Lets the approver's UI show a
+  // regular "Approve" instead of "Approve anyway" — the content has been
+  // re-worked since their reject. Cleared on approve-override / resubmit.
+  editedSinceReject: { type: Boolean, default: false },
+  // How many times the trainer has re-requested approval after a reject.
+  // > 0 while in_progress means the current run is a re-request — approver
+  // UIs badge it so reviewers know it's a re-review, not a first pass.
+  resubmissionCount: { type: Number, default: 0 },
+  lastResubmittedAt: { type: Date, default: null },
+}, { _id: false });
+
 // ─── AVAILABILITY PERIOD SCHEMA ───────────────────────────────────────────────
 const availabilityPeriodSchema = new mongoose.Schema({
   startDate: { type: Date },
@@ -374,6 +520,15 @@ const availabilityPeriodSchema = new mongoose.Schema({
   gracePeriodEnabled: { type: Boolean, default: false },
   gracePeriodDate: { type: Date },
   extendedDays: { type: Number, default: 0 },
+  requiresAdminApproval: { type: Boolean, default: false },
+  // Approver review scope — what each approver is reviewing.
+  //   "settings"               → only the exercise settings (schedule, grade, etc.)
+  //   "settings_and_questions" → settings + the question content
+  approvalScope: {
+    type: String,
+    enum: ["settings", "settings_and_questions"],
+    default: "settings",
+  },
 });
 
 // ─── NOTIFICATION SETTINGS SCHEMA ─────────────────────────────────────────────
@@ -386,6 +541,14 @@ const notificationSettingsSchema = new mongoose.Schema(
     notifyGradersSubmissions: { type: Boolean, default: false },
     notifyGradersLateSubmissions: { type: Boolean, default: false },
     notifyStudent: { type: Boolean, default: true },
+    // Which channels each notification goes out on. Declared so they survive
+    // strict mode — undeclared, every save silently dropped the trainer's
+    // Dashboard / Gmail / WhatsApp choices. No defaults on purpose: an
+    // assignment saved before these existed must read as "no channels", not
+    // as a fresh opt-in (see utils/assignmentStudentNotify.js).
+    notifyStudentChannels: { dashboard: Boolean, gmail: Boolean, whatsapp: Boolean },
+    notifyGradersSubmissionsChannels: { dashboard: Boolean, gmail: Boolean, whatsapp: Boolean },
+    notifyGradersLateSubmissionsChannels: { dashboard: Boolean, gmail: Boolean, whatsapp: Boolean },
   },
   { _id: false }
 );
@@ -410,6 +573,22 @@ const gradeSettingsSchema = new mongoose.Schema(
     // Overall mark to pass (optional)
     overallMarkToPassEnabled: { type: Boolean, default: false },
     overallMarkToPass: { type: Number, default: null },
+
+    // Grade bands (performance scale) — labelled percentage ranges of Total Mark.
+    gradeBands: {
+      type: [
+        new mongoose.Schema(
+          {
+            id: { type: String },
+            label: { type: String, default: '' },
+            fromPercent: { type: Number, default: 0 },
+            toPercent: { type: Number, default: 0 },
+          },
+          { _id: false }
+        ),
+      ],
+      default: undefined,
+    },
   },
   { _id: false }
 );
@@ -449,6 +628,8 @@ const programmingQuestionConfigSchema = new mongoose.Schema(
       enum: ["general", "levelBased", "selectionLevel"],
     },
     generalQuestionCount: { type: Number, default: 0, min: 0, max: 100 },
+    // Phase 1 — strict E+M+H===Total pattern target.
+    patternTotal: { type: Number, default: 0, min: 0, max: 100 },
     levelBasedCounts: {
       easy: { type: Number, default: 0, min: 0, max: 100 },
       medium: { type: Number, default: 0, min: 0, max: 100 },
@@ -524,6 +705,8 @@ const othersQuestionConfigSchema = new mongoose.Schema(
     },
     generalQuestionCount: { type: Number, default: 0, min: 0, max: 100 },
     generalMarksPerQuestion: { type: Number, default: 0, min: 0 },
+    // Phase 1 — strict E+M+H===Total pattern target.
+    patternTotal: { type: Number, default: 0, min: 0, max: 100 },
     levelBasedCounts: {
       easy:   { type: Number, default: 0, min: 0, max: 100 },
       medium: { type: Number, default: 0, min: 0, max: 100 },
@@ -552,6 +735,77 @@ const questionConfigurationSchema = new mongoose.Schema(
   { _id: false, strict: false }
 );
 
+// ─── CUSTOM DISTRIBUTION SCHEMA (Phase 5) ────────────────────────────────────
+const customDistributionCellSchema = new mongoose.Schema(
+  {
+    scratch: { type: Number, default: 0, min: 0, max: 100 },
+    ai: { type: Number, default: 0, min: 0, max: 100 },
+    thirdParty: { type: Number, default: 0, min: 0, max: 100 },
+  },
+  { _id: false }
+);
+const customDistributionSchema = new mongoose.Schema(
+  {
+    easy: { type: customDistributionCellSchema, default: () => ({}) },
+    medium: { type: customDistributionCellSchema, default: () => ({}) },
+    hard: { type: customDistributionCellSchema, default: () => ({}) },
+  },
+  { _id: false }
+);
+
+// ─── EVALUATION METHOD SCHEMA ──────────────────────────────────────────────
+// How submissions are evaluated for this exercise. Captured in the exercise
+// settings / create-assessment wizards and STORED ONLY — the grading pipeline
+// reads it later. Exactly one method: "testcase" scores against the question's
+// test cases, "ai" hands the submission to an AI evaluator (what that evaluator
+// should look for is specified in the evaluation prompt at grading time, not
+// stored here). Test-case evaluation is the historical behaviour, so an
+// exercise without this field is treated as test-case based.
+const evaluationMethodSchema = new mongoose.Schema(
+  {
+    method: { type: String, enum: ["manual", "testcase", "ai"], default: "manual" },
+    // AI-mode extras. `criteria` is the checkbox multi-select of what the AI
+    // evaluator should judge submissions on. Stored even when method is
+    // "testcase" (harmless — simply unused).
+    ai: {
+      criteria: {
+        type: [{
+          type: String,
+          enum: [
+            "correctness",
+            "codeQuality",
+            "efficiency",
+            "readability",
+            "edgeCases",
+            "bestPractices",
+          ],
+        }],
+        default: [],
+      },
+      // 'common'      → one testCasesCount applies to every Programming question
+      //                   in the exercise (the field just below)
+      // 'perQuestion' → each Programming question carries its OWN
+      //                   `aiTestCasesCount` in its authoring form; the field
+      //                   below is only a legacy fallback for questions that
+      //                   don't carry one.
+      testCasesCountMode: {
+        type: String,
+        enum: ['common', 'perQuestion'],
+        default: 'common',
+      },
+      // Count of AI-generated test cases to judge against at student Submit
+      // time. Judged IN ADDITION to any test cases the trainer stored on the
+      // question. Cached on the question doc after first Submit so every
+      // student is tested against the same generated set. 0 = skip generation.
+      testCasesCount: { type: Number, default: 20, min: 0, max: 50 },
+    },
+    // Live interactive compiler: the student editor gets a Run button with a
+    // live terminal (program waits for typed input). Run Testcase unchanged.
+    liveInteraction: { type: Boolean, default: false },
+  },
+  { _id: false }
+);
+
 // ─── EXERCISE SCHEMA (UPDATED) ────────────────────────────────────────────────
 const exerciseSchema = new mongoose.Schema(
   {
@@ -562,7 +816,32 @@ const exerciseSchema = new mongoose.Schema(
     programmingSettings: { type: programmingSettingsSchema },
     exerciseInformation: exerciseInformationSchema,
     questionConfiguration: questionConfigurationSchema,
+    // Phase 2 — teacher's chosen question source for this exercise.
+    questionSource: {
+      type: String,
+      enum: ["scratch", "ai", "thirdParty", "custom", null],
+      default: null,
+    },
+    // Phase 5 — custom-mode E/M/H × source distribution.
+    customDistribution: { type: customDistributionSchema, default: null },
+    // Section-based Custom mix: per-section E/M/H × source distribution,
+    // keyed by sectionId. Stored as Mixed so Mongoose doesn't strip the
+    // dynamic section-id keys; client validates the shape before sending.
+    customDistributionBySection: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // Custom-mode sub-source selection: which sources the teacher opted to
+    // combine. Only meaningful when questionSource === "custom".
+    customSources: {
+      type: [{ type: String, enum: ["scratch", "ai", "thirdParty"] }],
+      default: [],
+    },
+    // Phase 6 — save attached questions to Question Bank on save.
+    saveToBank: { type: Boolean, default: false },
+    // Evaluation config — "testcase" or "ai". Stored now; consumed by the
+    // grading pipeline later. null = never configured, which downstream code
+    // should read as test-case based.
+    evaluationMethod: { type: evaluationMethodSchema, default: null },
     availabilityPeriod: availabilityPeriodSchema,
+    approvalWorkflow: { type: approvalWorkflowSchema, default: null },
     notificationSettings: { type: notificationSettingsSchema },
     gradeSettings: { type: gradeSettingsSchema },
     additionalOptions: { type: additionalOptionsSchema },
@@ -690,6 +969,7 @@ const fileMcqQuestionSchema = new mongoose.Schema(
       explanation: { type: String, default: "" },
       trueFalseAnswer: { type: Boolean, default: null },
       shortAnswer: { type: String, default: "" },
+      essayAnswer: { type: String, default: "" },
       numericAnswer: { type: Number, default: null },
       numericTolerance: { type: Number, default: null },
       matchingPairs: [matchingPairSchema],
@@ -825,6 +1105,29 @@ const pedagogySchema = new mongoose.Schema(
   { strict: false }
 );
 
+// ─── BATCH PEDAGOGY SCHEMA ────────────────────────────────────────────────────
+// Resources by Batch. The batch is its OWN level of the hierarchy, holding a
+// complete I_Do / We_Do / You_Do set inside it — exactly the shape the spec
+// describes:
+//
+//   node
+//     ├── pedagogy                ← course-level / shared
+//     │     ├── I_Do   ├── We_Do   └── You_Do
+//     └── batchPedagogy
+//           ├── <batchId>         ← Batch A
+//           │     ├── I_Do   ├── We_Do   └── You_Do
+//           └── <batchId>         ← Batch B
+//                 ├── I_Do   ├── We_Do   └── You_Do
+//
+// Keyed by the batch's `_id` from `Course-Structure.batchAndParticipants`, not
+// its name — renaming a batch must not orphan the material under it.
+//
+// Only elements ticked batch-wise in Course Setup are ever written here; the
+// rest keep living on `pedagogy` above and stay shared across every batch.
+// That is what lets a course with no batches, or one with shared resources,
+// keep working with nothing migrated.
+const batchPedagogySchema = { type: Map, of: pedagogySchema, default: {} };
+
 // Module Structure Schema
 const moduleStructureSchema = new mongoose.Schema(
   {
@@ -838,12 +1141,26 @@ const moduleStructureSchema = new mongoose.Schema(
       ref: "Course-Structure",
       required: true,
     },
+    // Which PHASE of the course this belongs to, by NAME.
+    //
+    // A placement course is set up once and runs in several phases, and each
+    // phase gets its own structure — Phase I's modules are not Phase II's. The
+    // name, not an id: phase ids are re-derived on read for older mappings
+    // (courseConfigurationsFromLegacy mints fresh ObjectIds every request), so
+    // only the name is durable. It is also what Course-Structure.coursePath
+    // uses.
+    //
+    // "" means the record predates phases, or the course has none. A phased
+    // course shows those under its FIRST phase — see coursePhases.ts — so
+    // nothing built before this becomes invisible.
+    phase: { type: String, default: "", trim: true },
     title: { type: String, required: true },
     description: String,
     duration: { type: Number, default: 30 },
     index: Number,
     level: String,
-    pedagogy: pedagogySchema, // ✅ dynamic pedagogy
+    pedagogy: pedagogySchema, // ✅ dynamic pedagogy — course-level / shared
+    batchPedagogy: batchPedagogySchema, // Resources by Batch — see below
   testConfiguration: {
     coreProgram: [{ type: String }],
     frontend: [{ type: String }],
@@ -960,6 +1277,26 @@ moduleStructureSchema.pre('save', function(next) {
     } catch (err) {
       console.warn('Error processing You_Do:', err.message);
     }
+
+    // Resources by Batch — a batch-wise element's material lives under
+    // batchPedagogy.<batchId>, so it needs the same description normalisation
+    // the three shared sections get above. Skipping it would leave batch
+    // uploads in a subtly different shape from shared ones.
+    try {
+      if (this.batchPedagogy) {
+        const buckets = typeof this.batchPedagogy.values === 'function'
+          ? Array.from(this.batchPedagogy.values())
+          : Object.values(this.batchPedagogy);
+        for (const bucket of buckets) {
+          if (!bucket) continue;
+          for (const key of ['I_Do', 'We_Do', 'You_Do']) {
+            if (bucket[key]) processSection(bucket[key]);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Error processing batchPedagogy:', err.message);
+    }
     
     this.updatedAt = new Date();
     next();
@@ -969,5 +1306,17 @@ moduleStructureSchema.pre('save', function(next) {
   }
 });
 
+
+// The approvals queue and per-course overview filter these nodes by
+// institution and by course membership; neither field was indexed, so
+// every listing was a collection scan.
+moduleStructureSchema.index({ institution: 1 });
+moduleStructureSchema.index({ courses: 1 });
+// Every read is "this course, this phase".
+moduleStructureSchema.index({ courses: 1, phase: 1 });
+
+// "Assignment available" student notification — sent from the save itself,
+// so every way a We Do assignment becomes complete triggers it.
+moduleStructureSchema.plugin(assignmentNotifyPlugin, { entityType: 'module' });
 
 module.exports = mongoose.model("Module1", moduleStructureSchema);

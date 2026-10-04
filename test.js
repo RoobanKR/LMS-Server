@@ -5,7 +5,7 @@ const fetch = require('node-fetch');
 async function testOneRequest() {
     console.log("🔍 Testing Gemini API with ONE request...\n");
     
-    const API_KEY = "AIzaSyAr0tVYyyKuAxGJeMKG58y-WaBwCdtSUfc";
+    const API_KEY = process.env.GEMINI_API_KEY;
     const prompt = "Hello! What is 2+2? Answer in one word.";
     
     console.log(`📤 Prompt: "${prompt}"`);

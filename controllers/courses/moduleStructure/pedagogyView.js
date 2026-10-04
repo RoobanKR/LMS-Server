@@ -8,12 +8,22 @@ const CourseStructure = mongoose.model('Course-Structure');
 const LevelView = require('../../../models/Courses/moduleStructure/levelModel');
 const User = require("../../../models/UserModel");
 const Role = require('../../../models/RoleModel');
+// Blank input/expectedOutput on hidden test cases before a student read
+// response leaves this server. Author-like roles still see the real fields.
+// See server/services/testCaseVisibility.js for the walker + role gate.
+const { stripHiddenForStudent, stripHiddenForStudentDeep } = require('../../../services/testCaseVisibility');
+// `user.role` arrives as a populated doc, a raw ObjectId or a legacy name
+// string; roleNamesOf resolves all three. Shared with the POC scoping rather
+// than re-implemented, so a role that resolves one way there resolves the same
+// way here.
+const { roleNamesOf, normalizeRoleName } = require('../../../utils/pocScope');
 
 
-const { createClient } = require("@supabase/supabase-js");
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
+// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
+// resolving { data, error }), so the call sites below are unchanged — see
+// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+const { storage, publicUrlFor, storagePathFromUrl, isLegacySupabaseUrl } = require("../../../utils/storage");
 
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
@@ -25,6 +35,36 @@ const fs = require('fs');
 // Configure ffmpeg paths
 ffmpeg.setFfmpegPath(ffmpegPath);
 ffmpeg.setFfprobePath(ffprobePath);
+
+// Background slide conversion for office docs — result lands in PptCache keyed
+// by the public URL so the first student view is a cache hit.
+const { convertDocumentToSlides, cleanupConvertedSlides } = require('../pptConversionController');
+const { extractLessonTextFromPdf } = require('../../../utils/lessonTextExtract');
+// Resources by Batch — which container a write lands in and which slice of it
+// a reader may see. The pure rules live in utils/batchResources.js; the
+// request→container bridge in utils/pedagogyScope.js is SHARED with
+// exerciseAndQuestion.js (We Do assignments / You Do assessments) so all three
+// pedagogy sections resolve batches identically.
+const {
+  scopeNodePedagogy,
+  scopeCourseTreePedagogy,
+  buildResourceBatchContext,
+  getUserBatchId,
+  resolveViewerBatchId,
+} = require('../../../utils/batchResources');
+const { resolvePedagogyScope } = require('../../../utils/pedagogyScope');
+const { isStudentRequester, isExerciseStudentVisible } = require('../../../utils/approvalWorkflow');
+// Topic-completion aggregator — server is authoritative for the sidebar tick.
+// Called after pedagogy filtering (approval + batch scoping) so its counts
+// match exactly what the client renders.
+const { computeCourseTopicProgress, findStudentAnswers } = require('../../../utils/topicCompletion');
+
+const SLIDE_CONVERTIBLE_MIMES = [
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+];
 exports.createPedagogyView = async (req, res) => {
   try {
     const { institution, courses, pedagogies, createdBy } = req.body;
@@ -56,7 +96,12 @@ exports.createPedagogyView = async (req, res) => {
 
 exports.getAllPedagogyViews = async (req, res) => {
   try {
-    const pedagogies = await PedagogyView.find()
+    // Scoped to the caller's institution (every view carries one) — this used
+    // to hand every institution's pedagogy hours to anyone logged in. `lean()`
+    // skips building a mongoose document per view: the payload is read-only
+    // JSON, and hydration was ~2/3 of this endpoint's time.
+    const institution = req.user?.institution;
+    const pedagogies = await PedagogyView.find(institution ? { institution } : {}).lean();
 
     return res.status(200).json({
       message: [{ key: 'success', value: 'PedagogyViews retrieved successfully' }],
@@ -107,26 +152,39 @@ exports.updatePedagogyView = async (req, res) => {
       });
     }
 
+    // Rows are matched by NODE IDENTITY at the row's MOST SPECIFIC hierarchy
+    // level — not exact whole-shape equality, and not "any shared id".
+    //   • Whole-shape matching meant a caller re-sending the same node with a
+    //     slightly different shape (module ref present vs omitted) appended a
+    //     DUPLICATE row — silently doubling the course's pedagogy hours.
+    //   • "Any shared id" overshot the fix twice over: every topic row under
+    //     a module shares that module's id, so adding hours to a SECOND topic
+    //     merged into the FIRST topic's row instead of creating its own; and
+    //     a MERGED range (topic: [t1..t4]) shares t1 with the single row
+    //     (topic: [t1]), so merged-cell hours were absorbed into the first
+    //     row and the merge collapsed to one plain cell after refetch.
+    // A row is identified by its deepest populated level (subTopic > topic >
+    // subModule > module); two entries are the same row only when their
+    // deepest levels agree AND hold the SAME id set at that level, so a
+    // merged range and its individual rows stay distinct entries.
+    const deepestLevelOf = (p) => {
+      if (p.subTopic && p.subTopic.length) return ['subTopic', p.subTopic.map(String)];
+      if (p.topic && p.topic.length) return ['topic', p.topic.map(String)];
+      if (p.subModule && p.subModule.length) return ['subModule', p.subModule.map(String)];
+      if (p.module && p.module.length) return ['module', p.module.map(String)];
+      return ['none', []];
+    };
+
     for (const incomingPedagogy of pedagogies) {
+      const [incomingLevel, incomingIdsArr] = deepestLevelOf(incomingPedagogy);
       const matchingPedagogy = pedagogyView.pedagogies.find(existingPedagogy => {
-        return (
-          arraysEqual(
-            existingPedagogy.module?.map(id => id.toString()) || [],
-            incomingPedagogy.module?.map(id => id.toString()) || []
-          ) &&
-          arraysEqual(
-            existingPedagogy.subModule?.map(id => id.toString()) || [],
-            incomingPedagogy.subModule?.map(id => id.toString()) || []
-          ) &&
-          arraysEqual(
-            existingPedagogy.topic?.map(id => id.toString()) || [],
-            incomingPedagogy.topic?.map(id => id.toString()) || []
-          ) &&
-          arraysEqual(
-            existingPedagogy.subTopic?.map(id => id.toString()) || [],
-            incomingPedagogy.subTopic?.map(id => id.toString()) || []
-          )
-        );
+        const [existingLevel, existingIds] = deepestLevelOf(existingPedagogy);
+        // Node-less rows (legacy bare hour buckets) only match each other.
+        if (incomingLevel === 'none' || existingLevel === 'none') {
+          return incomingLevel === 'none' && existingLevel === 'none';
+        }
+        if (incomingLevel !== existingLevel) return false;
+        return arraysEqual(existingIds, incomingIdsArr);
       });
 
       if (matchingPedagogy) {
@@ -627,17 +685,60 @@ exports.getAllCoursesData = async (req, res) => {
   try {
     const { courseId } = req.params;
 
+    // ── ?roster=1: enrolled-participants projection ──────────────────────────
+    // Attendance (management grid, report, analytics) needs ONLY
+    // batchAndParticipants — batch name plus each enrolled user's name, email,
+    // enrollment id and role — yet it was calling this endpoint bare and
+    // pulling the whole course: every module/submodule/topic/subtopic with its
+    // pedagogy tree, plus every enrolled user's FULL document (password hash,
+    // permissions[], notes[], ai_history[] included). Measured on the demo
+    // course: 896,864 bytes for ~5 KB of roster.
+    //
+    // Additive and opt-in, exactly like ?summary=1 on /courses-structure/getAll
+    // and the sibling /light route: callers that don't pass the flag get the
+    // unchanged full payload, and a server that predates the flag ignores it
+    // and returns that full payload — a superset — so roster consumers keep
+    // working against both.
+    //
+    // What actually makes the full response huge is (a) the four node
+    // collections with a pedagogy tree on every node and (b) the UNPROJECTED
+    // user populate. This branch drops both and otherwise returns the course
+    // document as-is — deliberately NOT a field allowlist. An allowlist would
+    // mean editing this select every time another consumer needs one more
+    // scalar (it already grew three times: mappingId for the participants
+    // breadcrumb, clientId/clientName for EnrollmentTab, then the feedback
+    // report's studentType/degree/semester), and a missing field fails
+    // silently as an empty string rather than loudly. The course document
+    // minus those two things is a few KB.
+    //
+    // `.lean()` matches the full path below, which is also lean — so the two
+    // serialise the same way.
+    if (req.query.roster === '1' || req.query.roster === 'true') {
+      const rosterCourse = await CourseStructure.findById(courseId)
+        .populate({
+          path: 'batchAndParticipants.users.user',
+          // Exactly the fields the roster consumers read off a user.
+          select: 'firstName lastName email userId employeeId role',
+          populate: { path: 'role', model: 'Role', select: 'renameRole originalRole roleValue name' },
+        })
+        .lean();
+
+      if (!rosterCourse) {
+        return res.status(404).json({
+          success: false,
+          message: "Course not found"
+        });
+      }
+
+      return res.status(200).json({ success: true, data: rosterCourse });
+    }
+
     const course = await CourseStructure.findById(courseId).lean().populate({
-      path: "singleParticipants",
-      populate: [
-        {
-          path: "user", // First populate user from enrollment
-          populate: {
-            path: "role", // Then populate role inside user
-            model: "Role" // Make sure to specify the model name if different
-          }
-        }
-      ]
+      path: "batchAndParticipants.users.user",
+      populate: {
+        path: "role", // Then populate role inside user
+        model: "Role" // Make sure to specify the model name if different
+      }
     });
 
     if (!course) {
@@ -711,6 +812,96 @@ exports.getAllCoursesData = async (req, res) => {
       })
     };
 
+    // ── Gate exercises by approval workflow ────────────────────────────────
+    // Strip any exercise where approvalWorkflow exists, studentVisible is false,
+    // and the caller's role does NOT match the currently-pending step's role.
+    // This hides un-approved exercises from students while keeping them visible
+    // to approvers (so they can find and approve them).
+    const callerRoleId = req.user?.role?._id?.toString() || req.user?.role?.toString() || null;
+
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // Collapse every node down to ONE batch's view. This runs BEFORE the
+    // approval filter below on purpose: scoping moves a batch's We_Do
+    // exercises onto `node.pedagogy`, so filtering afterwards gates them the
+    // same as shared ones. Reversed, batch-wise exercises would skip approval
+    // gating entirely.
+    //
+    // Doing it server-side is the whole point: a Batch A student's response
+    // must not contain Batch B's material at all, or "hidden" would mean
+    // nothing more than "not rendered". `scopeCourseTreePedagogy` also drops
+    // `batchPedagogy` from every node on the way out.
+    //
+    // A course with no batches, or one whose elements are all shared, comes
+    // through untouched.
+    const requestedBatch = req.query.batchId || req.query.batchName;
+    const viewerBatchId = resolveViewerBatchId(course, req.user, requestedBatch);
+    scopeCourseTreePedagogy(structuredCourse, course, viewerBatchId);
+    // Targeted visibility diagnostic (course-level twin of the one in
+    // getNodePedagogy): who asked and which batch their whole-tree view was
+    // scoped to. Per-node before/after key detail lives on the node endpoint.
+    console.log(
+      `[courses-data] user=${req.user?._id || "anon"} batch=${viewerBatchId || "shared"} course=${courseId}`
+    );
+
+    const filterExerciseList = (exercises) => {
+      if (!Array.isArray(exercises)) return exercises;
+      return exercises.filter((ex) => {
+        const wf = ex?.approvalWorkflow;
+        if (!wf || !wf.steps || wf.steps.length === 0) return true;
+        if (wf.studentVisible) return true;
+        if (!callerRoleId) return false;
+        const idx = (wf.currentStep || 1) - 1;
+        const step = wf.steps[idx];
+        return step && step.roleId?.toString() === callerRoleId;
+      });
+    };
+    const filterPedagogy = (pedagogy) => {
+      if (!pedagogy) return pedagogy;
+      const result = {};
+      for (const tab of ['I_Do', 'We_Do', 'You_Do']) {
+        const map = pedagogy[tab];
+        if (!map) { result[tab] = {}; continue; }
+        const entries = map instanceof Map ? Array.from(map.entries()) : Object.entries(map || {});
+        const out = {};
+        for (const [sub, arr] of entries) out[sub] = filterExerciseList(arr);
+        result[tab] = out;
+      }
+      return result;
+    };
+    const applyFilter = (node) => {
+      if (!node || typeof node !== 'object') return node;
+      if (node.pedagogy) node.pedagogy = filterPedagogy(node.pedagogy);
+      if (Array.isArray(node.subModules)) node.subModules.forEach(applyFilter);
+      if (Array.isArray(node.topics)) node.topics.forEach(applyFilter);
+      if (Array.isArray(node.subTopics)) node.subTopics.forEach(applyFilter);
+      return node;
+    };
+    if (Array.isArray(structuredCourse.modules)) {
+      structuredCourse.modules.forEach(applyFilter);
+    }
+
+    structuredCourse.resourceBatchContext =
+      buildResourceBatchContext(course, req.user, requestedBatch);
+
+    // Blank hidden testCases before returning the full course tree.
+    // Author-like roles see the real inputs; students get blanks.
+    stripHiddenForStudentDeep(structuredCourse, req.user);
+
+    // Per-node topic completion for the sidebar's green tick. Runs after
+    // approval + batch scoping so the counts include only what the caller
+    // actually sees. Anonymous callers (userAuthOptional) get an empty map
+    // — the client falls back to `not_started` for every node.
+    const callerUserId = req.user?._id ? String(req.user._id) : null;
+    if (callerUserId) {
+      const answers = findStudentAnswers(structuredCourse, callerUserId);
+      structuredCourse.topicProgress = computeCourseTopicProgress(
+        structuredCourse,
+        answers,
+      );
+    } else {
+      structuredCourse.topicProgress = {};
+    }
+
     res.status(200).json({
       success: true,
       data: structuredCourse
@@ -729,18 +920,239 @@ exports.getAllCoursesData = async (req, res) => {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REVIEW-SUBMISSION endpoint
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Tailored payload for `client/.../reviewSubmission/page.tsx`. The page only
+// needs:
+//   • Course-level meta: _id, courseName, courseCode (breadcrumb).
+//   • The full course hierarchy (modules/subModules/topics/subTopics) WITH
+//     pedagogy — but ONLY the exercise arrays inside pedagogy.We_Do and
+//     pedagogy.You_Do. Pedagogy.I_Do (reading notes) and any non-exercise
+//     resources (files, folders, AI notes) are dropped — those are MBs of
+//     content the grading screen never reads.
+//   • batchAndParticipants users populated with the user + role.renameRole + the
+//     ONE userCourses entry matching this courseId (which carries the
+//     submissions tree). All other enrolment entries on the user are
+//     irrelevant here and add up to a lot of payload for multi-course users.
+//
+// `getAllCoursesData` is intentionally left untouched — other pages still
+// depend on its full shape.
+exports.getCoursesDataForReview = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    // 1. Course + enrolments. Project user.permissions OUT (large + unused),
+    //    keep just the fields the page reads. user.courses is kept as-is
+    //    here because we need to filter to the current course in JS below
+    //    (Mongoose doesn't support post-populate $elemMatch projection on
+    //    nested array subdocs cleanly).
+    const course = await CourseStructure.findById(courseId)
+      .select("_id courseName courseCode batchAndParticipants batchResources batch skillingBatches batches")
+      .lean()
+      .populate({
+        path: "batchAndParticipants.users.user",
+        select: "_id email firstName lastName phone profile department role courses",
+        populate: { path: "role", select: "renameRole" }
+      });
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: "Course not found"
+      });
+    }
+
+    // Filter each user's `courses` array down to only the entry matching
+    // this courseId. The page reads exactly that one entry to extract
+    // `answers.We_Do` / `answers.You_Do` submissions for the participant.
+    if (Array.isArray(course.batchAndParticipants)) {
+      course.batchAndParticipants.forEach(batch => {
+        (batch.users || []).forEach(p => {
+          if (p?.user && Array.isArray(p.user.courses)) {
+            p.user.courses = p.user.courses.filter(uc =>
+              uc?.courseId?.toString() === courseId.toString()
+            );
+          }
+        });
+      });
+    }
+
+    // 2. Strip pedagogy down to only exercise arrays. Mutates `node` in
+    //    place. `pedagogy.I_Do` (reading material), file/folder resources
+    //    inside pedagogy, AI notes, etc. are dropped — only the categories
+    //    the client's `collectExercisesWithMetadata` walks remain.
+    //
+    // There is no allowlist of subcategory names here, and there must not be
+    // one: `pedagogy.We_Do` / `pedagogy.You_Do` are open Maps whose keys are
+    // the course's own subcategory LABELS lowercased with spaces underscored,
+    // and admins author those labels in Dynamic Field Settings ▸ Pedagogy.
+    //
+    // This WAS a seven-name allowlist, and it silently deleted work: it never
+    // contained "assessment" — the correctly-spelled singular that the code
+    // editor, the MCQ runner and the section-based test page all write — so
+    // any exercise stored under it was stripped from the review payload
+    // before the grading console ever saw it. The client then failed its
+    // exerciseId lookup, fell back to the first exercise it could find, and
+    // showed the trainer a different assessment's questions. Every custom
+    // subcategory a course defined had the same fate.
+    //
+    // What actually distinguishes an exercise bucket from the other things
+    // that live in pedagogy (files, folders, AI notes) is its SHAPE: exercise
+    // buckets are arrays. That is the test used below.
+
+    // Approval gating — same rule as getAllCoursesData/getNodePedagogy: an
+    // exercise whose approval chain hasn't finished is visible only to its
+    // creator, the current step's approver role, or everyone once
+    // studentVisible flips. This route is userAuthOptional and the payload
+    // carries questions with answers, so anonymous callers get none of them.
+    const gateRoleId = req.user?.role?._id?.toString() || req.user?.role?.toString() || null;
+    const gateEmail = req.user?.email || null;
+    const exerciseVisibleToCaller = (ex) => {
+      const wf = ex?.approvalWorkflow;
+      if (!wf || !Array.isArray(wf.steps) || wf.steps.length === 0) return true;
+      if (wf.studentVisible) return true;
+      if (gateEmail && ex.createdBy && ex.createdBy === gateEmail) return true;
+      if (!gateRoleId) return false;
+      const step = wf.steps[(wf.currentStep || 1) - 1];
+      return !!(step && step.roleId && step.roleId.toString() === gateRoleId);
+    };
+
+    const reduceCat = (cat) => {
+      if (!cat || typeof cat !== "object") return undefined;
+      const out = {};
+      Object.keys(cat).forEach(k => {
+        const v = cat[k];
+        // Only exercise ARRAYS survive. Everything else under a pedagogy
+        // category — file/folder resources, AI notes — is what this endpoint
+        // exists to strip, and the grading console reads none of it.
+        if (!Array.isArray(v)) return;
+        out[k] = v.filter(exerciseVisibleToCaller);
+      });
+      return out;
+    };
+    // Resources by Batch — flatten to the reviewer's batch BEFORE reducing to
+    // exercise arrays. When We_Do or You_Do is batch-wise, the exercises being
+    // graded live under `batchPedagogy.<batchId>`, so without this the grading
+    // screen would show an empty course. `?batchId=` picks the batch; a
+    // reviewer who names none gets the course's first.
+    const reviewBatchId = resolveViewerBatchId(
+      course,
+      req.user,
+      req.query.batchId || req.query.batchName,
+    );
+
+    const stripPedagogy = (node) => {
+      if (!node?.pedagogy && !node?.batchPedagogy) return;
+      scopeNodePedagogy(node, course, reviewBatchId);
+      const p = node.pedagogy;
+      node.pedagogy = {
+        We_Do: reduceCat(p.We_Do),
+        You_Do: reduceCat(p.You_Do),
+      };
+    };
+
+    // 3. Fetch hierarchy nodes with minimal fields. We need the parent IDs
+    //    for the nesting step below.
+    const modules = await Module1.find({ courses: courseId })
+      .select("_id title pedagogy batchPedagogy courses")
+      .lean();
+    modules.forEach(stripPedagogy);
+
+    const subModules = await SubModule1.find({
+      moduleId: { $in: modules.map(m => m._id) }
+    })
+      .select("_id title moduleId pedagogy batchPedagogy")
+      .lean();
+    subModules.forEach(stripPedagogy);
+
+    const topics = await Topic1.find({
+      $or: [
+        { moduleId: { $in: modules.map(m => m._id) } },
+        { subModuleId: { $in: subModules.map(sm => sm._id) } }
+      ]
+    })
+      .select("_id title moduleId subModuleId pedagogy batchPedagogy")
+      .lean();
+    topics.forEach(stripPedagogy);
+
+    const subTopics = await SubTopic1.find({
+      topicId: { $in: topics.map(t => t._id) }
+    })
+      .select("_id title topicId pedagogy batchPedagogy")
+      .lean();
+    subTopics.forEach(stripPedagogy);
+
+    // 4. Nest the hierarchy with the same shape getAllCoursesData returns,
+    //    so the client's `collectExercisesWithMetadata` walker can run
+    //    against this payload unchanged.
+    const structuredCourse = {
+      ...course,
+      modules: modules.map(module => {
+        const moduleSubModules = subModules.filter(
+          sm => sm.moduleId?.toString() === module._id.toString()
+        );
+
+        const processedSubModules = moduleSubModules.map(subModule => {
+          const subModuleTopics = topics.filter(
+            t => t.subModuleId?.toString() === subModule._id.toString()
+          );
+          const processedTopics = subModuleTopics.map(topic => ({
+            ...topic,
+            subTopics: subTopics.filter(
+              st => st.topicId?.toString() === topic._id.toString()
+            )
+          }));
+          return { ...subModule, topics: processedTopics };
+        });
+
+        const moduleDirectTopics = topics.filter(
+          t =>
+            t.moduleId?.toString() === module._id.toString() &&
+            (!t.subModuleId || !moduleSubModules.some(sm => sm._id.toString() === t.subModuleId?.toString()))
+        );
+        const processedDirectTopics = moduleDirectTopics.map(topic => ({
+          ...topic,
+          subTopics: subTopics.filter(
+            st => st.topicId?.toString() === topic._id.toString()
+          )
+        }));
+
+        return {
+          ...module,
+          subModules: processedSubModules,
+          topics: processedDirectTopics
+        };
+      })
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: structuredCourse
+    });
+  } catch (error) {
+    console.error("Error fetching review course data:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LIGHTWEIGHT "tree skeleton" endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Built for `uploadcourseresources` first-paint. The original `getAllCoursesData`
 // returns the FULL course payload — every student's submission history
-// (`singleParticipants` populated to the user + role + answers level) plus the
+// (`batchAndParticipants` users populated to the user + role + answers level) plus the
 // complete `pedagogy` tree for every module / submodule / topic / subtopic.
 // The Resources page only renders the sidebar tree + course meta on first
 // paint; pedagogy is loaded per-node on demand by `getNodePedagogy` below.
 //
 // This endpoint therefore:
-//   • SKIPS `singleParticipants` entirely (saves the bulk of the payload).
+//   • SKIPS `batchAndParticipants` entirely (saves the bulk of the payload).
 //   • SELECTS only `_id` + `title` per node — no `pedagogy` field comes
 //     back, so the per-document JSON shrinks drastically.
 //   • Returns course-level fields the page actually reads: `_id`,
@@ -766,17 +1178,17 @@ exports.getAllCoursesDataLight = async (req, res) => {
     // field I didn't account for.
     //
     // The bulk of the original payload was:
-    //   (a) `singleParticipants` populated to user + role + answers
+    //   (a) `batchAndParticipants` populated to user + role + answers
     //       → avoided by simply NOT calling `.populate()` here.
     //   (b) `pedagogy` on every node (folders + files + AI notes + …)
-    //       → excluded via `.select("-pedagogy")` on each node query.
+    //       → excluded via `.select("-pedagogy -batchPedagogy")` on each node query.
     //
-    // The `singleParticipants` field on the course doc is just an array of
-    // ObjectIds (refs) when not populated — KBs, not MBs. We can leave it
-    // in or strip it; stripping it (`-singleParticipants`) saves a couple
-    // more KB and makes the contract explicit.
+    // The `batchAndParticipants` field on the course doc holds plain user
+    // refs when not populated — KBs, not MBs. We can leave it in or strip
+    // it; stripping it (`-batchAndParticipants`) saves a couple more KB
+    // and makes the contract explicit.
     const course = await CourseStructure.findById(courseId)
-      .select("-singleParticipants")
+      .select("-batchAndParticipants")
       .lean();
 
     if (!course) {
@@ -786,18 +1198,20 @@ exports.getAllCoursesDataLight = async (req, res) => {
       });
     }
 
-    // For each level: exclude pedagogy (heavy), keep everything else.
+    // For each level: exclude pedagogy AND batchPedagogy (both heavy — the
+    // latter is one full pedagogy tree PER BATCH, so on a three-batch course
+    // it is the larger of the two), keep everything else.
     // This gives us moduleId/subModuleId/topicId/courses/index/title/etc.
     // — all the small metadata fields the client's upload + breadcrumb +
     // form-data builders depend on.
     const modules = await Module1.find({ courses: courseId })
-      .select("-pedagogy")
+      .select("-pedagogy -batchPedagogy")
       .lean();
 
     const subModules = await SubModule1.find({
       moduleId: { $in: modules.map(m => m._id) },
     })
-      .select("-pedagogy")
+      .select("-pedagogy -batchPedagogy")
       .lean();
 
     const topics = await Topic1.find({
@@ -806,13 +1220,13 @@ exports.getAllCoursesDataLight = async (req, res) => {
         { subModuleId: { $in: subModules.map(sm => sm._id) } },
       ],
     })
-      .select("-pedagogy")
+      .select("-pedagogy -batchPedagogy")
       .lean();
 
     const subTopics = await SubTopic1.find({
       topicId: { $in: topics.map(t => t._id) },
     })
-      .select("-pedagogy")
+      .select("-pedagogy -batchPedagogy")
       .lean();
 
     // Same nesting shape as the heavy endpoint so the existing client-side
@@ -863,6 +1277,21 @@ exports.getAllCoursesDataLight = async (req, res) => {
       }),
     };
 
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // No pedagogy rides on this payload, so there is nothing to scope — but
+    // the page needs the CONFIG on its first paint to decide whether to render
+    // the batch strip at all. `batchAndParticipants` was deliberately stripped
+    // above to keep the response light, so re-read just the enrolment field
+    // needed to place a student in their batch.
+    const batchSource = await CourseStructure.findById(courseId)
+      .select("batchResources batchAndParticipants batch skillingBatches batches")
+      .lean();
+    structuredCourse.resourceBatchContext = buildResourceBatchContext(
+      batchSource || course,
+      req.user,
+      req.query.batchId || req.query.batchName,
+    );
+
     return res.status(200).json({
       success: true,
       data: structuredCourse,
@@ -892,6 +1321,34 @@ exports.getAllCoursesDataLight = async (req, res) => {
 //
 // We also surface `testConfiguration` because the client reads that on the
 // selected node for the I-Do tab strip (line 1087 in page.tsx).
+// Compact one-line description of a pedagogy container for the visibility
+// diagnostics: per tab, each subcategory with its file/folder/page/group
+// counts, e.g. `I_Do:{letcure:f4/d1/p3/g1}`. Handles Map and plain-object
+// shapes (lean vs live documents).
+const summarizePedagogyKeys = (pedagogy) => {
+  if (!pedagogy) return "none";
+  const parts = [];
+  for (const tab of ["I_Do", "We_Do", "You_Do"]) {
+    const section = pedagogy[tab];
+    if (!section) continue;
+    const entries =
+      section instanceof Map ? Array.from(section.entries()) : Object.entries(section);
+    if (!entries.length) continue;
+    const subs = entries.map(([k, v]) => {
+      const files = Array.isArray(v?.files) ? v.files.length : 0;
+      const folders = Array.isArray(v?.folders) ? v.folders.length : 0;
+      const pages = Array.isArray(v?.pages) ? v.pages.length : 0;
+      const groupIds = new Set();
+      (Array.isArray(v?.files) ? v.files : []).forEach((f) => f?.groupId && groupIds.add(String(f.groupId)));
+      (Array.isArray(v?.pages) ? v.pages : []).forEach((p) => p?.groupId && groupIds.add(String(p.groupId)));
+      (Array.isArray(v?.folders) ? v.folders : []).forEach((f) => f?.parentGroupId && groupIds.add(String(f.parentGroupId)));
+      return `${k}:f${files}/d${folders}/p${pages}/g${groupIds.size}`;
+    });
+    parts.push(`${tab}:{${subs.join(",")}}`);
+  }
+  return parts.length ? parts.join(" ") : "empty";
+};
+
 exports.getNodePedagogy = async (req, res) => {
   try {
     const { type, id } = req.params;
@@ -915,7 +1372,7 @@ exports.getNodePedagogy = async (req, res) => {
     // We only want pedagogy + a couple of small siblings; everything else on
     // the document (timestamps, large legacy arrays, etc.) is unnecessary.
     const node = await Model.findById(id)
-      .select("_id title pedagogy testConfiguration")
+      .select("_id title pedagogy batchPedagogy testConfiguration courses")
       .lean();
 
     if (!node) {
@@ -925,12 +1382,130 @@ exports.getNodePedagogy = async (req, res) => {
       });
     }
 
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // This is the endpoint the Resources page hits every time the user picks a
+    // node, so it is where a staff member's batch selection actually takes
+    // effect — `?batchId=` swaps which slice comes back. Students get their
+    // enrolled batch regardless of what they ask for.
+    //
+    // `scopeNodePedagogy` also DELETES `batchPedagogy` from the response, so
+    // no other batch's material reaches the client at all.
+    const course = await CourseStructure.findById(node.courses)
+      .select("batchResources batchAndParticipants batch skillingBatches batches")
+      .lean();
+
+    if (course) {
+      const requestedBatch = req.query.batchId || req.query.batchName;
+      const viewerBatchId = resolveViewerBatchId(course, req.user, requestedBatch);
+      const keysBefore = summarizePedagogyKeys(node.pedagogy);
+      scopeNodePedagogy(node, course, viewerBatchId);
+      // Targeted visibility diagnostic — one line per read: who asked, which
+      // batch they resolved to, what the node held before/after scoping.
+      console.log(
+        `[node-pedagogy] user=${req.user?._id || "anon"} batch=${viewerBatchId || "shared"} node=${id}` +
+        ` before=${keysBefore} after=${summarizePedagogyKeys(node.pedagogy)}`
+      );
+      node.resourceBatchContext = buildResourceBatchContext(course, req.user, requestedBatch);
+    } else {
+      delete node.batchPedagogy;
+    }
+
+    // ── Approval gating ────────────────────────────────────────────────────
+    // Same rule as getAllCoursesData/getYouDoExercises: an exercise whose
+    // approval chain hasn't finished is visible only to its creator, the
+    // current step's approver role, or everyone once studentVisible flips.
+    // Anonymous callers (this route is userAuthOptional) see none of them —
+    // without this, a student could fetch pending exercises (with correct
+    // answers and hidden test cases) straight off this endpoint by node id.
+    const gateRoleId = req.user?.role?._id?.toString() || req.user?.role?.toString() || null;
+    const gateEmail = req.user?.email || null;
+    const exerciseVisibleToCaller = (ex) => {
+      const wf = ex?.approvalWorkflow;
+      if (!wf || !Array.isArray(wf.steps) || wf.steps.length === 0) return true;
+      if (wf.studentVisible) return true;
+      if (gateEmail && ex.createdBy && ex.createdBy === gateEmail) return true;
+      if (!gateRoleId) return false;
+      const step = wf.steps[(wf.currentStep || 1) - 1];
+      return !!(step && step.roleId && step.roleId.toString() === gateRoleId);
+    };
+    const gateSection = (section) => {
+      if (!section || typeof section !== "object") return;
+      for (const key of Object.keys(section)) {
+        const v = section[key];
+        if (Array.isArray(v)) {
+          section[key] = v.filter(exerciseVisibleToCaller);
+        } else if (v && typeof v === "object" && v._id && v.approvalWorkflow && !exerciseVisibleToCaller(v)) {
+          delete section[key];
+        }
+      }
+    };
+    if (node.pedagogy) {
+      gateSection(node.pedagogy.I_Do);
+      gateSection(node.pedagogy.We_Do);
+      gateSection(node.pedagogy.You_Do);
+    }
+
+    // Blank hidden test cases before shipping to the browser. Author-like
+    // roles keep them; students / unauth get input+expectedOutput cleared
+    // while the row (index + isHidden flag) stays so the UI can still say
+    // "Hidden test #3 failed" without leaking what the input was.
+    stripHiddenForStudent(node, req.user);
+
     return res.status(200).json({
       success: true,
       data: node,
     });
   } catch (error) {
     console.error("Error fetching node pedagogy:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RESOURCES-BY-BATCH CONTEXT endpoint
+// GET /resource-batches/:courseId
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The one answer to "how should this course's resources be presented?", so no
+// page has to re-derive it from a course payload:
+//
+//   mode "no-batches" → the course has no batches. The Resources-by-batch
+//                       section must not be shown; everything is course-level.
+//   mode "shared"     → batches exist but resources are the same for all of
+//                       them. Still no batch picker — staff upload once.
+//   mode "batch-wise" → `batchwiseElements` split per batch. Staff get the
+//                       batch strip over `batches`; a student gets exactly one
+//                       batch (`activeBatch`) and no choice.
+exports.getResourceBatchContext = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(courseId)) {
+      return res.status(400).json({ success: false, message: "Invalid courseId" });
+    }
+
+    const course = await CourseStructure.findById(courseId)
+      .select("courseName batchResources batchAndParticipants batch skillingBatches batches")
+      .lean();
+
+    if (!course) {
+      return res.status(404).json({ success: false, message: "Course not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        courseId,
+        courseName: course.courseName || "",
+        ...buildResourceBatchContext(course, req.user, req.query.batchId || req.query.batchName),
+      },
+    });
+  } catch (error) {
+    console.error("Error building resource batch context:", error);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -953,7 +1528,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
     // Find the course with participants and complete user data
     const course = await CourseStructure.findById(courseId)
       .populate({
-        path: 'singleParticipants.user',
+        path: 'batchAndParticipants.users.user',
         select: '-notes -ai_history -password -tokens -__v -notifications',
         populate: [
           {
@@ -975,9 +1550,17 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
       });
     }
 
-    // Process participants data
-    const singleParticipants = await Promise.all(
-      course.singleParticipants.map(async (participant) => {
+    // Flatten users across all batches, then process participants data
+    const allBatchUsers = (course.batchAndParticipants || []).flatMap(batch =>
+      (batch.users || []).map(batchUser => ({
+        ...batchUser,
+        batchId: batch._id,
+        batchName: batch.batchName,
+      }))
+    );
+
+    const participants = await Promise.all(
+      allBatchUsers.map(async (participant) => {
         if (!participant.user) {
           return {
             ...participant,
@@ -1049,10 +1632,9 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
         return {
           _id: participant._id,
           status: participant.status,
-          enableEnrolmentDates: participant.enableEnrolmentDates,
-          enrolmentStartsDate: participant.enrolmentStartsDate,
-          enrolmentEndsDate: participant.enrolmentEndsDate,
-          createdAt: participant.createdAt,
+          batchId: participant.batchId,
+          batchName: participant.batchName,
+          joinedAt: participant.joinedAt,
           updatedAt: participant.updatedAt,
           user_Data: cleanUserData,
           hasExerciseProgress,
@@ -1062,7 +1644,7 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
     );
 
     // Count participants with exercise progress
-    const participantsWithProgress = singleParticipants.filter(p => p.hasExerciseProgress).length;
+    const participantsWithProgress = participants.filter(p => p.hasExerciseProgress).length;
 
     // Find topics that contain the exercise
     const topics = await Topic1.find({ courses: courseId })
@@ -1254,10 +1836,13 @@ exports.getAllCoursesDataWithoutAINotes = async (req, res) => {
       courseCode: course.courseCode,
       description: course.description,
       exercise: cleanExerciseResponse,
-      singleParticipants: singleParticipants,
+      participants: participants,
       modules: modulesData,
 
     };
+
+    // Blank hidden test cases before the response leaves the server.
+    stripHiddenForStudentDeep(responseData, req.user);
 
     res.status(200).json({
       success: true,
@@ -1279,8 +1864,44 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
   try {
     const { institution } = req.user;
 
+    // ?light=1 → same response minus each course's embedded `modules[]` tree
+    // and `participants[]` array (the multi-MB part). Metadata, stats,
+    // analytics and summary are computed identically. Used by the admin
+    // dashboard, which only renders totals and per-course stats.
+    const light = req.query.light === '1' || req.query.light === 'true';
+
+    // ?mine=1 → only the courses the CALLER is enrolled in.
+    //
+    // The student dashboard asks for this endpoint and then throws away every
+    // course it is not a participant of, so it was pulling all ~68 of the
+    // institution's courses — each with its full module/topic/subtopic
+    // pedagogy AND its complete participant list — to render two or three.
+    // Measured on this institution: 1,075,764 bytes.
+    //
+    // Scoping here rather than in the client also stops a student receiving
+    // other courses' rosters, and the saving is not just bandwidth: every
+    // query below is driven off `courseIds`, so the module/topic/subtopic
+    // reads shrink with it.
+    //
+    // Additive and opt-in — callers that omit the flag get the unchanged
+    // institution-wide response. Enrollment STATUS is deliberately not
+    // filtered here: the response still carries `participants`, and the
+    // client's own `status === 'active'` check is what decides, exactly as
+    // before.
+    const mine = req.query.mine === '1' || req.query.mine === 'true';
+    const courseMatch = { institution };
+    if (mine) {
+      const enrolled = await CourseStructure.find({
+        institution,
+        'batchAndParticipants.users.user': req.user._id,
+      })
+        .select('_id')
+        .lean();
+      courseMatch._id = { $in: enrolled.map((c) => c._id) };
+    }
+
     // Get all courses with ALL basic info
-    const courses = await CourseStructure.find({ institution })
+    const courses = await CourseStructure.find(courseMatch)
       .select('courseName courseCode description courseDuration courseLevel serviceType courseImage clientName createdAt updatedAt')
       .lean();
 
@@ -1291,6 +1912,25 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
         message: "No courses found"
       });
     }
+
+    // The participants projection depends only on `institution`, not on the
+    // module tree — start it now and await it alongside the topics query.
+    // `.exec()` is REQUIRED here: a bare Mongoose Query is a thenable that
+    // re-executes per await/then, so the `.catch` guard below plus the later
+    // `Promise.all` await would trigger "Query was already executed".
+    // Same scope as the course query above — otherwise ?mine=1 would still
+    // populate every course's roster here, which is the heaviest part.
+    const participantsPromise = CourseStructure.find(courseMatch)
+      .populate({
+        path: 'batchAndParticipants.users.user',
+        select: 'firstName lastName email phone department role status'
+      })
+      .select('batchAndParticipants')
+      .lean()
+      .exec();
+    // If a query below throws first, this pending promise must not surface
+    // as an unhandled rejection; the real error still propagates at `await`.
+    participantsPromise.catch(() => { });
 
     // Get all course IDs as strings
     const courseIds = courses.map(course => course._id.toString());
@@ -1303,39 +1943,81 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     // Extract module IDs
     const moduleIds = allModules.map(module => module._id.toString());
 
-    // Batch fetch all related data in parallel with ALL fields
-    const [
-      allSubModules,
-      allTopics,
-      allSubTopics,
-      allParticipants
-    ] = await Promise.all([
-      // Get all submodules for these modules with ALL fields
-      SubModule1.find({ moduleId: { $in: moduleIds } })
-        .select('-__v -createdAt -updatedAt')
-        .lean(),
-      // Get all topics for these modules and submodules with ALL fields
+    // Get all submodules for these modules with ALL fields
+    const allSubModules = await SubModule1.find({ moduleId: { $in: moduleIds } })
+      .select('-__v -createdAt -updatedAt')
+      .lean();
+
+    // Get all topics for these modules and submodules with ALL fields
+    const [allTopics, allParticipants] = await Promise.all([
       Topic1.find({
         $or: [
           { moduleId: { $in: moduleIds } },
-          { subModuleId: { $in: await SubModule1.find({ moduleId: { $in: moduleIds } }).distinct('_id') } }
+          { subModuleId: { $in: allSubModules.map(sm => sm._id) } }
         ]
       })
         .select('-__v -createdAt -updatedAt')
         .lean(),
-      // Get all subtopics with ALL fields
-      SubTopic1.find()
-        .select('-__v -createdAt -updatedAt')
-        .lean(),
-      // Get all participants with user data for all courses
-      CourseStructure.find({ institution })
-        .populate({
-          path: 'singleParticipants.user',
-          select: 'firstName lastName email phone department role status'
-        })
-        .select('singleParticipants')
-        .lean()
+      participantsPromise
     ]);
+
+    // Subtopics scoped to the topics just fetched — the same `topicId` match
+    // the per-course assembly below applies. (This used to be an unfiltered
+    // SubTopic1.find() that pulled every subtopic in the database, across
+    // institutions, only to discard the foreign ones in memory.)
+    const allSubTopics = await SubTopic1.find({ topicId: { $in: allTopics.map(t => t._id) } })
+      .select('-__v -createdAt -updatedAt')
+      .lean();
+
+    // ── Approval gating (server-side) ──────────────────────────────────────
+    // Students must not receive exercises that are still in the approval
+    // chain — the raw docs carry questions, correct answers and test cases.
+    // Staff keep the full view (L&D / trainer dashboards read this endpoint
+    // too); the client-side filter in studentdashboard/_lib/metrics.ts stays
+    // as a display rule but is no longer the only line of defense.
+    // Skipped in light mode: the scrub only filters exercises INSIDE each
+    // node's pedagogy/batchPedagogy (never whole nodes, so no stat changes),
+    // and light responses don't ship pedagogy at all.
+    if (!light && await isStudentRequester(req.user)) {
+      const scrubSection = (section) => {
+        if (!section || typeof section !== 'object') return;
+        for (const key of Object.keys(section)) {
+          const v = section[key];
+          if (Array.isArray(v)) {
+            section[key] = v.filter(isExerciseStudentVisible);
+          } else if (v && typeof v === 'object' && v._id && v.approvalWorkflow && !isExerciseStudentVisible(v)) {
+            // You_Do is Map-of-Mixed — a legacy subcategory can hold a single
+            // exercise object instead of an array.
+            delete section[key];
+          }
+        }
+      };
+      const scrubNode = (node) => {
+        if (!node) return;
+        // I_Do included: exercises are addressable under any tab (the by-id
+        // and resubmit paths handle I_Do), and I_Do resource elements carry
+        // no approvalWorkflow so they pass through untouched.
+        if (node.pedagogy) {
+          scrubSection(node.pedagogy.I_Do);
+          scrubSection(node.pedagogy.We_Do);
+          scrubSection(node.pedagogy.You_Do);
+        }
+        if (node.batchPedagogy && typeof node.batchPedagogy === 'object') {
+          for (const bid of Object.keys(node.batchPedagogy)) {
+            const bucket = node.batchPedagogy[bid];
+            if (bucket) {
+              scrubSection(bucket.I_Do);
+              scrubSection(bucket.We_Do);
+              scrubSection(bucket.You_Do);
+            }
+          }
+        }
+      };
+      allModules.forEach(scrubNode);
+      allSubModules.forEach(scrubNode);
+      allTopics.forEach(scrubNode);
+      allSubTopics.forEach(scrubNode);
+    }
 
     // Organize data by course for faster access
     const modulesByCourse = {};
@@ -1359,40 +2041,62 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
       });
     });
 
-    // Organize participants by course
+    // Organize participants by course (flattened across all batches)
     allParticipants.forEach(course => {
-      participantsByCourse[course._id.toString()] = course.singleParticipants || [];
+      participantsByCourse[course._id.toString()] = (course.batchAndParticipants || [])
+        .flatMap(batch => batch.users || []);
     });
 
-    // Process each course
+    // Process each course. Membership tests use Sets — with the old
+    // Array.includes scans this loop was O(courses × nodes²) on string
+    // comparisons for what can be thousands of nodes.
     const coursesWithData = courses.map(course => {
       const courseIdStr = course._id.toString();
       const courseModules = modulesByCourse[courseIdStr] || [];
-      const courseModuleIds = courseModules.map(m => m._id.toString());
+      const courseModuleIds = new Set(courseModules.map(m => m._id.toString()));
 
       // Filter submodules for this course
       const courseSubModules = allSubModules.filter(
-        sm => sm.moduleId && courseModuleIds.includes(sm.moduleId.toString())
+        sm => sm.moduleId && courseModuleIds.has(sm.moduleId.toString())
       );
 
-      const courseSubModuleIds = courseSubModules.map(sm => sm._id.toString());
+      const courseSubModuleIds = new Set(courseSubModules.map(sm => sm._id.toString()));
 
       // Filter topics for this course
       const courseTopics = allTopics.filter(
-        t => (t.moduleId && courseModuleIds.includes(t.moduleId.toString())) ||
-          (t.subModuleId && courseSubModuleIds.includes(t.subModuleId.toString()))
+        t => (t.moduleId && courseModuleIds.has(t.moduleId.toString())) ||
+          (t.subModuleId && courseSubModuleIds.has(t.subModuleId.toString()))
       );
 
-      const courseTopicIds = courseTopics.map(t => t._id.toString());
+      const courseTopicIds = new Set(courseTopics.map(t => t._id.toString()));
 
       // Filter subtopics for this course
       const courseSubTopics = allSubTopics.filter(
-        st => st.topicId && courseTopicIds.includes(st.topicId.toString())
+        st => st.topicId && courseTopicIds.has(st.topicId.toString())
       );
 
       // Count participants for this course
       const courseParticipants = participantsByCourse[courseIdStr] || [];
       const activeParticipants = courseParticipants.filter(p => p.status === 'active').length;
+
+      const stats = {
+        participants: courseParticipants.length,
+        activeParticipants,
+        modules: courseModules.length,
+        subModules: courseSubModules.length,
+        topics: courseTopics.length,
+        subTopics: courseSubTopics.length
+      };
+
+      // Light mode: metadata + stats only — skip building the module tree
+      // entirely and ship neither `modules` nor `participants`.
+      if (light) {
+        return {
+          ...course,
+          _id: courseIdStr, // Ensure _id is string
+          stats
+        };
+      }
 
       // Structure modules with their nested data
       const structuredModules = courseModules.map(module => {
@@ -1400,11 +2104,11 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
           sm => sm.moduleId && sm.moduleId.toString() === module._id.toString()
         );
 
-        const subModuleIds = moduleSubModules.map(sm => sm._id.toString());
+        const subModuleIds = new Set(moduleSubModules.map(sm => sm._id.toString()));
 
         const moduleTopics = courseTopics.filter(
           t => (t.moduleId && t.moduleId.toString() === module._id.toString()) ||
-            (t.subModuleId && subModuleIds.includes(t.subModuleId.toString()))
+            (t.subModuleId && subModuleIds.has(t.subModuleId.toString()))
         );
 
         const processedSubModules = moduleSubModules.map(subModule => {
@@ -1429,7 +2133,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
           ...module,
           subModules: processedSubModules,
           topics: moduleTopics.filter(
-            t => !t.subModuleId || !subModuleIds.includes(t.subModuleId.toString())
+            t => !t.subModuleId || !subModuleIds.has(t.subModuleId.toString())
           ).map(topic => ({
             ...topic,
             subTopics: courseSubTopics.filter(
@@ -1442,14 +2146,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
       return {
         ...course,
         _id: courseIdStr, // Ensure _id is string
-        stats: {
-          participants: courseParticipants.length,
-          activeParticipants,
-          modules: courseModules.length,
-          subModules: courseSubModules.length,
-          topics: courseTopics.length,
-          subTopics: courseSubTopics.length
-        },
+        stats,
         modules: structuredModules,
         participants: courseParticipants
       };
@@ -1477,6 +2174,10 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
       coursesByLevel[level] = (coursesByLevel[level] || 0) + 1;
       coursesByService[service] = (coursesByService[service] || 0) + 1;
     });
+
+    // Blank hidden test cases + Solution Code before the response leaves the
+    // server (light mode ships no `modules`, so this is a no-op there).
+    stripHiddenForStudentDeep(coursesWithData, req.user);
 
     res.status(200).json({
       success: true,
@@ -1511,9 +2212,13 @@ exports.staffStudentAnalytics = async (req, res) => {
 
     // Get all courses with participants
     const courses = await CourseStructure.find({ institution })
-      .select('courseName courseCode courseLevel serviceType courseImage')
+      // batchResources + the batch-name fields feed Resources by Batch, which
+      // decides each student's progress denominator (their batch's exercises
+      // versus the shared set). Without them every course reads as "no
+      // batches" and batch-wise students get the wrong fraction.
+      .select('courseName courseCode courseLevel serviceType courseImage batchAndParticipants batchResources batch skillingBatches batches')
       .populate({
-        path: 'singleParticipants.user',
+        path: 'batchAndParticipants.users.user',
         select: 'firstName lastName email department role',
         populate: {
           path: 'role',
@@ -1531,42 +2236,93 @@ exports.staffStudentAnalytics = async (req, res) => {
       });
     }
 
-    // Filter courses to only those with students
+    // Filter courses to only those with students in at least one batch
     const coursesWithStudents = courses.filter(course =>
-      course.singleParticipants &&
-      course.singleParticipants.length > 0
+      (course.batchAndParticipants || []).some(batch => batch.users && batch.users.length > 0)
     );
 
     const allCourseIds = coursesWithStudents.map(course => course._id.toString());
 
-    // Get all modules and topics for these courses
-    const [allModules, allTopics] = await Promise.all([
+    // Get all modules and topics for these courses.
+    // SubModules + SubTopics are loaded too (with pedagogy) because file MCQ
+    // documents (I_Do) commonly live on subtopics — needed to count the TOTAL
+    // number of MCQ documents per course for an accurate I Do percentage.
+    // The enrolled-users read is issued in the SAME round as the four entity
+    // reads. It only ever needed `allCourseIds`, which is already in hand, so
+    // awaiting it separately afterwards cost a full extra round-trip to the
+    // (remote) cluster — ~240 ms of the endpoint's wall time — for no reason.
+    const [allModules, allSubModules, allTopics, allSubTopics, allUsers] = await Promise.all([
       Module1.find({ courses: { $in: allCourseIds } })
-        .select('title courses')
+        .select('title courses pedagogy batchPedagogy')
+        .lean(),
+      SubModule1.find({ courses: { $in: allCourseIds } })
+        .select('title courses pedagogy batchPedagogy')
         .lean(),
       Topic1.find({ courses: { $in: allCourseIds } })
-        .select('pedagogy courses')
+        .select('pedagogy courses batchPedagogy')
+        .lean(),
+      SubTopic1.find({ courses: { $in: allCourseIds } })
+        .select('title courses pedagogy batchPedagogy')
+        .lean(),
+      // Get all users enrolled in these courses
+      User.find({
+        institution,
+        'courses.courseId': { $in: allCourseIds }
+      })
+        .select('firstName lastName email department courses role')
+        .populate({
+          path: 'role',
+          select: 'renameRole originalRole roleValue',
+          model: 'Role'
+        })
         .lean()
     ]);
 
-    // Get all users enrolled in these courses
-    const allUsers = await User.find({
-      institution,
-      'courses.courseId': { $in: allCourseIds }
-    })
-      .select('firstName lastName email department courses role')
-      .populate({
-        path: 'role',
-        select: 'renameRole originalRole roleValue',
-        model: 'Role'
-      })
-      .lean();
+    // Count I_Do documents that carry MCQs, per course (across ALL entity types).
+    const collectFilesForCount = (container, bag) => {
+      if (!container || typeof container !== 'object') return;
+      (container.files || []).forEach(f => bag.push(f));
+      (container.folders || []).forEach(folder => collectFilesForCount(folder, bag));
+      if (Array.isArray(container.subfolders)) {
+        container.subfolders.forEach(sf => collectFilesForCount(sf, bag));
+      }
+    };
+    const hasActiveMcq = (file) =>
+      (file.mcqQuestions || []).filter(q => q && q.isActive !== false).length > 0;
+
+    const iDoDocCountByCourse = {};
+    [...allModules, ...allSubModules, ...allTopics, ...allSubTopics].forEach(entity => {
+      const iDo = entity?.pedagogy?.I_Do;
+      if (!iDo || typeof iDo !== 'object') return;
+      let docCount = 0;
+      Object.keys(iDo).forEach(subcat => {
+        const files = [];
+        collectFilesForCount(iDo[subcat], files);
+        files.forEach(f => { if (hasActiveMcq(f)) docCount++; });
+      });
+      if (docCount === 0) return;
+      const entityCourses = Array.isArray(entity.courses) ? entity.courses : [entity.courses];
+      entityCourses.forEach(cid => {
+        const k = cid?.toString();
+        if (!k) return;
+        iDoDocCountByCourse[k] = (iDoDocCountByCourse[k] || 0) + docCount;
+      });
+    });
 
     // Filter only students based on role value
     const studentUsers = allUsers.filter(user => {
       const roleValue = user.role?.roleValue || user.role?.renameRole || '';
       return roleValue.toLowerCase() === 'student';
     });
+
+    // Index them by id once. The per-student loop below used to locate each
+    // learner with `studentUsers.find(u => u._id.toString() === ...)`, i.e. a
+    // linear scan of every student in the institution, re-run for every
+    // (course, participant) pair — O(courses x participants x students).
+    // Same lookup, same result, O(1).
+    const studentUserById = new Map(
+      studentUsers.map(u => [u._id.toString(), u])
+    );
 
     // Organize modules by course
     const modulesByCourse = {};
@@ -1591,6 +2347,26 @@ exports.staffStudentAnalytics = async (req, res) => {
           topicsByCourse[courseIdStr] = [];
         }
         topicsByCourse[courseIdStr].push(topic);
+      });
+    });
+
+    // Organize ALL pedagogy-carrying entities (modules, submodules, topics,
+    // subtopics) by course. We use this — not just topics — when counting the
+    // total configured exercises per pedagogy category. The detail page
+    // (`getStudentActivityDetail`) already walks all four entity types when
+    // computing its avgPercentage; the overview was only walking topics, so
+    // the denominator was smaller and the percentage came out inflated
+    // (e.g. one 80% submission ÷ 8 topic-exercises = 10%, but ÷ 19 actual
+    // configured exercises = 4%). Both sides must use the same denominator
+    // or the overview "10%" will never match the detail's "4%".
+    const entitiesByCourse = {};
+    [...allModules, ...allSubModules, ...allTopics, ...allSubTopics].forEach(entity => {
+      const entityCourses = Array.isArray(entity.courses) ? entity.courses : [entity.courses];
+      entityCourses.forEach(courseId => {
+        if (!courseId) return;
+        const courseIdStr = courseId.toString();
+        if (!entitiesByCourse[courseIdStr]) entitiesByCourse[courseIdStr] = [];
+        entitiesByCourse[courseIdStr].push(entity);
       });
     });
 
@@ -1624,42 +2400,84 @@ exports.staffStudentAnalytics = async (req, res) => {
       return result;
     };
 
-    // Helper function to calculate completion dynamically
-    const calculateCompletion = (exercises) => {
-      if (!exercises || !Array.isArray(exercises) || exercises.length === 0) {
+    // Score-based completion for a We_Do / You_Do category.
+    const calculateCompletion = (exercises, totalInCategory) => {
+      const submittedCount = Array.isArray(exercises) ? exercises.length : 0;
+      const denominator = (totalInCategory != null && totalInCategory > 0)
+        ? totalInCategory
+        : submittedCount;
+
+      if (denominator === 0) {
         return { completed: 0, total: 0, percentage: 0, questionProgress: 0 };
       }
 
-      let completed = 0;
+      let scorePercentageSum = 0;
+      let attemptedExercises = 0;
       let totalQuestions = 0;
       let attemptedQuestions = 0;
 
-      exercises.forEach(exercise => {
-        if (exercise.questions && exercise.questions.length > 0) {
-          totalQuestions += exercise.questions.length;
-          const attempted = exercise.questions.filter(q =>
-            q.status === 'attempted' || q.status === 'evaluated' || q.submittedAt
-          ).length;
-          attemptedQuestions += attempted;
+      (exercises || []).forEach(exercise => {
+        const questions = exercise.questions || [];
+        if (questions.length === 0) return;
 
-          if (attempted > 0) {
-            completed++;
-          }
+        totalQuestions += questions.length;
+
+        const attemptedCount = questions.filter(q =>
+          q.status === 'attempted' || q.status === 'evaluated' || q.status === 'submitted' ||
+          q.status === 'solved' || q.submittedAt
+        ).length;
+        attemptedQuestions += attemptedCount;
+
+        if (attemptedCount === 0) return;
+
+        attemptedExercises++;
+
+        const obtainedScore = questions.reduce((s, q) => s + (Number(q.score) || 0), 0);
+        const maxScore      = questions.reduce((s, q) => s + (Number(q.totalScore) || 0), 0);
+
+        if (maxScore > 0) {
+          scorePercentageSum += Math.min(100, (obtainedScore / maxScore) * 100);
+        } else if (obtainedScore > 0) {
+          scorePercentageSum += Math.min(100, obtainedScore);
         }
       });
 
+      const percentage = Math.round(scorePercentageSum / denominator);
+
       return {
-        completed,
-        total: exercises.length,
-        percentage: exercises.length > 0 ? Math.round((completed / exercises.length) * 100) : 0,
-        questionProgress: totalQuestions > 0 ? Math.round((attemptedQuestions / totalQuestions) * 100) : 0
+        completed: attemptedExercises,
+        total: denominator,
+        percentage,
+        questionProgress: totalQuestions > 0 ? Math.round((attemptedQuestions / totalQuestions) * 100) : 0,
       };
+    };
+
+    const calcIDoPercentage = (iDoAnswers, totalDocs) => {
+      const empty = { percentage: 0, attempted: 0 };
+      if (!iDoAnswers || typeof iDoAnswers !== 'object') return empty;
+      const values = Object.values(iDoAnswers);
+      const fileMcqEntries = values.filter(
+        v => v && typeof v === 'object' && !Array.isArray(v) && 'completionPercentage' in v
+      );
+      const attempted = fileMcqEntries.length;
+      const sum = fileMcqEntries.reduce((s, e) => s + (Number(e.completionPercentage) || 0), 0);
+      const denom = (totalDocs && totalDocs > 0) ? totalDocs : attempted;
+      const percentage = denom > 0 ? Math.round(sum / denom) : 0;
+      return { percentage, attempted };
     };
 
     // Process analytics for each course
     const coursesAnalytics = coursesWithStudents.map(course => {
       const courseIdStr = course._id.toString();
-      const courseStudents = course.singleParticipants || [];
+      // Flatten users across batches; a user in several batches counts once.
+      const flatCourseStudents = (course.batchAndParticipants || []).flatMap(batch => batch.users || []);
+      const courseStudents = Array.from(
+        new Map(
+          flatCourseStudents
+            .filter(p => p.user && p.user._id)
+            .map(p => [p.user._id.toString(), p])
+        ).values()
+      );
 
       // Filter only students (roleValue = 'Student')
       const studentParticipants = courseStudents.filter(participant => {
@@ -1670,41 +2488,92 @@ exports.staffStudentAnalytics = async (req, res) => {
         return roleValue.toLowerCase() === 'student';
       });
 
-      // Get course topics and extract pedagogy structure
-      const courseTopics = topicsByCourse[courseIdStr] || [];
-      const pedagogyStructure = extractPedagogyStructure(courseTopics);
+      // Walk ALL pedagogy-carrying entities for this course (modules,
+      // submodules, topics, subtopics) — not just topics — so the pedagogy
+      // structure + per-category counts include every configured exercise.
+      // Previously these were derived from topics alone, which made the
+      // denominator smaller than `getStudentActivityDetail` uses, producing
+      // an inflated overview percentage. Both code paths must walk the same
+      // set of entities or the overview number won't match the detail.
+      const courseEntities = entitiesByCourse[courseIdStr] || (topicsByCourse[courseIdStr] || []);
 
-      // Count total exercises in course
-      const totalExercisesInCourse = courseTopics.reduce((total, topic) => {
-        if (topic.pedagogy && typeof topic.pedagogy === 'object') {
-          Object.keys(topic.pedagogy).forEach(pedagogyType => {
-            const pedagogySection = topic.pedagogy[pedagogyType];
-            if (pedagogySection && typeof pedagogySection === 'object') {
-              Object.keys(pedagogySection).forEach(category => {
-                const exercises = pedagogySection[category];
-                if (Array.isArray(exercises)) {
-                  total += exercises.length;
-                }
-              });
-            }
+      // ── Resources by Batch ───────────────────────────────────────────────
+      // These denominators used to be computed ONCE per course and applied to
+      // every student. That is wrong for a batch-wise course: two students in
+      // different batches are assigned different exercises, so they need
+      // different denominators. Computing them per batch (memoised — there are
+      // only a handful of batches, versus potentially hundreds of students)
+      // keeps each student's percentage a fraction of their OWN work.
+      //
+      // For a course without batches, or one with shared resources, every
+      // batch resolves to the identical scoped set and this collapses back to
+      // the single course-wide denominator it always was.
+      const denominatorsByBatch = new Map();
+      const denominatorsFor = (batchId) => {
+        const key = batchId || "";
+        if (denominatorsByBatch.has(key)) return denominatorsByBatch.get(key);
+
+        // Scope a COPY — the raw entities are shared across every student and
+        // every batch in this request, so mutating them would make whichever
+        // batch was computed first win for all the others.
+        const scoped = courseEntities.map((entity) =>
+          scopeNodePedagogy({ ...entity }, course, batchId),
+        );
+
+        const pedagogyStructure = extractPedagogyStructure(scoped);
+
+        // Total exercises per (pedagogyType, category) across ALL entities.
+        // Keyed identically to studentAnswers[type][category] so the
+        // per-category lookup in calculateCompletion finds the right total.
+        const exerciseCountByCategory = {};
+        let totalExercisesInCourse = 0;
+        scoped.forEach(entity => {
+          if (!entity.pedagogy || typeof entity.pedagogy !== 'object') return;
+          Object.keys(entity.pedagogy).forEach(pedagogyType => {
+            const section = entity.pedagogy[pedagogyType];
+            if (!section || typeof section !== 'object') return;
+            if (!exerciseCountByCategory[pedagogyType]) exerciseCountByCategory[pedagogyType] = {};
+            Object.keys(section).forEach(category => {
+              const exs = section[category];
+              if (Array.isArray(exs)) {
+                exerciseCountByCategory[pedagogyType][category] =
+                  (exerciseCountByCategory[pedagogyType][category] || 0) + exs.length;
+                totalExercisesInCourse += exs.length;
+              }
+            });
           });
-        }
-        return total;
-      }, 0);
+        });
+
+        const result = { pedagogyStructure, exerciseCountByCategory, totalExercisesInCourse };
+        denominatorsByBatch.set(key, result);
+        return result;
+      };
+
+      // The course-wide shape, used for the course-level stats block below and
+      // as the fallback for anyone with no batch.
+      const { pedagogyStructure: coursePedagogyStructure } = denominatorsFor("");
 
       // Process each student's progress
       const studentsAnalytics = studentParticipants.map(participant => {
         const student = participant.user;
         if (!student) return null;
 
+        // This student's own denominators — their batch's on a batch-wise
+        // course, the shared ones everywhere else.
+        const { pedagogyStructure, exerciseCountByCategory, totalExercisesInCourse } =
+          denominatorsFor(getUserBatchId(course, student._id));
+
         // Find user from studentUsers
-        const userData = studentUsers.find(u => u._id.toString() === student._id.toString());
+        const userData = studentUserById.get(student._id.toString());
         if (!userData) return null;
 
-        // Get student's course data
+        // Get student's course data. If the user's own `courses[]` array does not
+        // contain this course, they were added to a batch by staff but
+        // are not actually enrolled — skip so they don't pollute every course at 0%.
         const studentCourse = userData.courses?.find(c =>
           c.courseId && c.courseId.toString() === courseIdStr
         );
+        if (!studentCourse) return null;
 
         const studentAnswers = studentCourse?.answers || {};
 
@@ -1713,20 +2582,41 @@ exports.staffStudentAnalytics = async (req, res) => {
         let totalAttempts = 0;
         let totalPossibleAttempts = 0;
 
-        // Initialize progress structure
+        // Build progress per pedagogy type and category
         Object.keys(pedagogyStructure).forEach(pedagogyType => {
           progress[pedagogyType] = {};
-          pedagogyStructure[pedagogyType].forEach(category => {
-            // Get student's answers for this category
-            const categoryAnswers = studentAnswers[pedagogyType]?.[category] || [];
-            const categoryProgress = calculateCompletion(categoryAnswers);
 
-            progress[pedagogyType][category] = categoryProgress;
+          if (pedagogyType === 'I_Do') {
+            // I_Do stores file MCQ data keyed by fileId (not subcategory).
+            const iDoAnswers = studentAnswers['I_Do'] || {};
+            const totalMcqDocs = iDoDocCountByCourse[courseIdStr] || 0;
+            const { percentage: iDoPct, attempted: iDoAttempted } =
+              calcIDoPercentage(iDoAnswers, totalMcqDocs);
+            const denom = totalMcqDocs > 0 ? totalMcqDocs : iDoAttempted;
 
-            // Count total attempts
-            totalAttempts += categoryProgress.completed;
-            totalPossibleAttempts += categoryProgress.total;
-          });
+            pedagogyStructure['I_Do'].forEach(category => {
+              progress['I_Do'][category] = {
+                percentage: iDoPct,
+                completed: iDoAttempted,
+                total: denom,
+                questionProgress: iDoPct,
+              };
+            });
+            totalAttempts += iDoAttempted;
+            totalPossibleAttempts += denom;
+
+          } else {
+            // We_Do / You_Do: exercise arrays keyed by subcategory name
+            pedagogyStructure[pedagogyType].forEach(category => {
+              const categoryAnswers = studentAnswers[pedagogyType]?.[category] || [];
+              const totalInCategory = exerciseCountByCategory[pedagogyType]?.[category] || 0;
+              const categoryProgress = calculateCompletion(categoryAnswers, totalInCategory);
+
+              progress[pedagogyType][category] = categoryProgress;
+              totalAttempts += categoryProgress.completed;
+              totalPossibleAttempts += categoryProgress.total;
+            });
+          }
         });
 
         // Calculate overall progress
@@ -1778,8 +2668,8 @@ exports.staffStudentAnalytics = async (req, res) => {
 
       // Calculate average completion for each pedagogy category
       if (studentsAnalytics.length > 0) {
-        Object.keys(pedagogyStructure).forEach(pedagogyType => {
-          pedagogyStructure[pedagogyType].forEach(category => {
+        Object.keys(coursePedagogyStructure).forEach(pedagogyType => {
+          coursePedagogyStructure[pedagogyType].forEach(category => {
             const categoryKey = `${pedagogyType}_${category}`;
             courseStats.categoryStats[categoryKey] = {
               averageCompletion: Math.round(studentsAnalytics.reduce((sum, s) =>
@@ -1799,9 +2689,12 @@ exports.staffStudentAnalytics = async (req, res) => {
           serviceType: course.serviceType,
           courseImage: course.courseImage,
           totalModules: modulesByCourse[courseIdStr]?.length || 0,
-          totalParticipants: course.singleParticipants?.length || 0,
+          totalParticipants: courseStudents.length,
           totalStudents: studentParticipants.length,
-          pedagogyStructure // Include pedagogy structure in course info
+          // Course-wide category list (the shared/base scope). A batch-wise
+          // student's own list rides on their `progress` object instead — this
+          // one describes the course, not any one learner.
+          pedagogyStructure: coursePedagogyStructure,
         },
         stats: courseStats,
         students: studentsAnalytics
@@ -1914,8 +2807,22 @@ exports.getStudentCourseProgress = async (req, res) => {
     const topics = await Topic1.find({
       courses: courseId
     })
-      .select('title pedagogy')
+      .select('title pedagogy batchPedagogy')
       .lean();
+
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // Progress is a fraction, and BOTH halves have to describe the same set of
+    // work. On a batch-wise course this student's exercises live under their
+    // batch, so counting only the shared `pedagogy` would divide their attempts
+    // by a denominator that excludes almost everything they were assigned.
+    // Scope each topic to THIS student's batch before counting.
+    const batchCourse = await CourseStructure.findById(courseId)
+      .select('batchResources batchAndParticipants batch skillingBatches batches')
+      .lean();
+    if (batchCourse) {
+      const studentBatchId = getUserBatchId(batchCourse, studentId);
+      topics.forEach((topic) => scopeNodePedagogy(topic, batchCourse, studentBatchId));
+    }
 
     const answers = studentCourse?.courses?.[0]?.answers || {};
 
@@ -2123,6 +3030,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
         index: nextModuleIndex,
         level: mod.level,
         pedagogy: mod.pedagogy, // ✅ carry pedagogy too
+        // Resources by Batch — the per-batch sets are part of the node's
+        // content too. Copying pedagogy without them would silently drop
+        // every batch-wise resource from the duplicated hierarchy.
+        batchPedagogy: mod.batchPedagogy,
         createdBy: createdBy || mod.createdBy,
         updatedBy: createdBy || mod.updatedBy,
       });
@@ -2148,6 +3059,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
             index: nextSubIndex,
             level: sub.level,
             pedagogy: sub.pedagogy,
+            // Resources by Batch — the per-batch sets are part of the node's
+            // content too. Copying pedagogy without them would silently drop
+            // every batch-wise resource from the duplicated hierarchy.
+            batchPedagogy: sub.batchPedagogy,
             createdBy: createdBy || sub.createdBy,
             updatedBy: createdBy || sub.updatedBy,
           });
@@ -2173,6 +3088,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
                 index: nextTopicIndex,
                 level: topic.level,
                 pedagogy: topic.pedagogy,
+                // Resources by Batch — the per-batch sets are part of the node's
+                // content too. Copying pedagogy without them would silently drop
+                // every batch-wise resource from the duplicated hierarchy.
+                batchPedagogy: topic.batchPedagogy,
                 createdBy: createdBy || topic.createdBy,
                 updatedBy: createdBy || topic.updatedBy,
               });
@@ -2197,6 +3116,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
                     index: nextSubTopicIndex,
                     level: st.level,
                     pedagogy: st.pedagogy,
+                    // Resources by Batch — the per-batch sets are part of the node's
+                    // content too. Copying pedagogy without them would silently drop
+                    // every batch-wise resource from the duplicated hierarchy.
+                    batchPedagogy: st.batchPedagogy,
                     createdBy: createdBy || st.createdBy,
                     updatedBy: createdBy || st.updatedBy,
                   });
@@ -2228,6 +3151,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
             index: nextTopicIndex,
             level: topic.level,
             pedagogy: topic.pedagogy,
+            // Resources by Batch — the per-batch sets are part of the node's
+            // content too. Copying pedagogy without them would silently drop
+            // every batch-wise resource from the duplicated hierarchy.
+            batchPedagogy: topic.batchPedagogy,
             createdBy: createdBy || topic.createdBy,
             updatedBy: createdBy || topic.updatedBy,
           });
@@ -2252,6 +3179,10 @@ exports.duplicateCourseHierarchy = async (req, res) => {
                 index: nextSubTopicIndex,
                 level: st.level,
                 pedagogy: st.pedagogy,
+                // Resources by Batch — the per-batch sets are part of the node's
+                // content too. Copying pedagogy without them would silently drop
+                // every batch-wise resource from the duplicated hierarchy.
+                batchPedagogy: st.batchPedagogy,
                 createdBy: createdBy || st.createdBy,
                 updatedBy: createdBy || st.updatedBy,
               });
@@ -2686,20 +3617,22 @@ const findFileById = (pedagogyElement, fileId) => {
 };
 
 // Upload Original Video (Fallback)
-const uploadOriginalVideo = async (file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement, supabase) => {
+// The trailing `supabase` parameter is gone with the client it named: this
+// now writes through the shared `storage` module in scope above.
+const uploadOriginalVideo = async (file, type, section, name, pathParts, targetFolder, isUpdate, updateFileId, pedagogyElement) => {
   const uniqueFileName = `${Date.now()}_${file.name}`;
   const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
 
   // Store in resolutions/base folder
   const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/resolutions/base/${uniqueFileName}`;
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await storage
     .from("smartlms")
     .upload(storagePath, file.data, { contentType: file.mimetype });
 
   if (uploadError) throw uploadError;
 
-  const fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${storagePath}`;
+  const fileUrl = publicUrlFor(storagePath);
   const fileUrlMap = new Map();
   fileUrlMap.set('base', fileUrl);
 
@@ -2735,7 +3668,7 @@ const uploadToResolutionFolder = async (fileBuffer, fileName, resolution, type, 
   // Store in resolutions/{resolution} folder
   const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/resolutions/${resolution}/${fileName}`;
 
-  const { error: uploadError } = await supabase.storage
+  const { error: uploadError } = await storage
     .from("smartlms")
     .upload(storagePath, fileBuffer, {
       contentType: 'video/mp4',
@@ -2746,17 +3679,26 @@ const uploadToResolutionFolder = async (fileBuffer, fileName, resolution, type, 
     throw new Error(`Failed to upload ${resolution} version: ${uploadError.message}`);
   }
 
-  return `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${storagePath}`;
+  return publicUrlFor(storagePath);
 };
 
 // Delete from Resolution Folder
 const deleteFromResolutionFolder = async (fileUrl, type, section, name, pathParts) => {
   try {
-    // Extract the path after "smartlms/" to get the storage path
-    const storagePath = fileUrl.split('/storage/v1/object/public/smartlms/')[1];
+    // Stored URLs are a mix: Cloudinary for anything uploaded since the move
+    // off Supabase, and Supabase for everything before it. storagePathFromUrl
+    // reads both, so an older file is still recognised rather than silently
+    // skipped here.
+    const storagePath = storagePathFromUrl(fileUrl);
+    if (isLegacySupabaseUrl(fileUrl)) {
+      // Deleting it would mean calling the service this deployment moved off.
+      // Say so and leave the object where it is — the Mongo record still goes.
+      console.warn(`Skipping storage delete for a pre-Cloudinary file: ${fileUrl}`);
+      return;
+    }
 
     if (storagePath) {
-      const { error: deleteError } = await supabase.storage
+      const { error: deleteError } = await storage
         .from("smartlms")
         .remove([storagePath]);
 
@@ -2859,10 +3801,27 @@ exports.updateEntity = async (req, res) => {
     const section = tabType;
     const name = subcategory;
 
-    if (!entity.pedagogy[section]) entity.pedagogy[section] = new Map();
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // `pedagogyRoot` is the I_Do/We_Do/You_Do container this upload belongs
+    // to: the shared `pedagogy` for an element every batch sees ("staff
+    // uploads once"), or this batch's own `batchPedagogy.<batchId>` when the
+    // element was ticked batch-wise in Course Setup. Resolving it once here
+    // means the folder walk, the file writes, the Supabase storage paths and
+    // every markModified below are batch-correct without needing to know
+    // batches exist. `pedagogyPath` is that container's mongoose path.
+    const { container: pedagogyRoot, basePath: pedagogyPath, batchId: scopeBatchId } =
+      await resolvePedagogyScope(entity, section, req);
 
-    if (!entity.pedagogy[section].get(name)) {
-      entity.pedagogy[section].set(name, {
+    // Supabase object paths get the same scope, so two batches uploading a
+    // file of the same name under the same subcategory cannot overwrite each
+    // other in the bucket. Shared uploads keep their existing paths, which is
+    // what stops every already-uploaded file from 404ing.
+    const storageSection = scopeBatchId ? `batches/${scopeBatchId}/${section}` : section;
+
+    if (!pedagogyRoot[section]) pedagogyRoot[section] = new Map();
+
+    if (!pedagogyRoot[section].get(name)) {
+      pedagogyRoot[section].set(name, {
         description: "",
         files: [],
         folders: [],
@@ -2870,7 +3829,7 @@ exports.updateEntity = async (req, res) => {
       });
     }
 
-    const pedagogyElement = entity.pedagogy[section].get(name);
+    const pedagogyElement = pedagogyRoot[section].get(name);
 
     // Ensure arrays exist
     if (!Array.isArray(pedagogyElement.files)) {
@@ -2970,9 +3929,9 @@ if (isUpdate === 'true' && updateFileId) {
     filesArray[fileIndex] = updatedFile;
 
     if (location === 'folder') {
-      entity.markModified(`pedagogy.${section}.${name}.folders`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
     } else {
-      entity.markModified(`pedagogy.${section}.${name}.files`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}.files`);
     }
 
     entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -3011,7 +3970,7 @@ if (isUpdate === 'true' && updateFileId) {
         if (file.fileUrl instanceof Map) {
           for (const [resolution, oldFileUrl] of file.fileUrl) {
             try {
-              await deleteFromResolutionFolder(oldFileUrl, type, section, name, fileFolderPath);
+              await deleteFromResolutionFolder(oldFileUrl, type, storageSection, name, fileFolderPath);
             } catch (delError) {
               console.warn(`⚠️ Could not delete old ${resolution}:`, delError.message);
             }
@@ -3030,7 +3989,7 @@ if (isUpdate === 'true' && updateFileId) {
                 processedFile.fileName,
                 resolution,
                 type,
-                section,
+                storageSection,
                 name,
                 uploadPath
               );
@@ -3096,9 +4055,9 @@ if (isUpdate === 'true' && updateFileId) {
 
         const uniqueFileName = `${Date.now()}_${cleanUpdName}`;
         const storageFolderPath = parsedFolderPath.length > 0 ? parsedFolderPath.join('/') : (fileFolderPath.length > 0 ? fileFolderPath.join('/') : "root");
-        const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
+        const storagePath = `courses/${type}s/${storageSection}/${name}/${storageFolderPath}/${uniqueFileName}`;
 
-        const { error: uploadError } = await supabase.storage
+        const { error: uploadError } = await storage
           .from("smartlms")
           .upload(storagePath, fileToUpdate.data, { contentType: fileToUpdate.mimetype });
 
@@ -3106,16 +4065,44 @@ if (isUpdate === 'true' && updateFileId) {
           throw new Error(`Upload failed: ${uploadError.message}`);
         }
 
-        const fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${storagePath}`;
+        const fileUrl = publicUrlFor(storagePath);
         const fileUrlMap = new Map();
         fileUrlMap.set('base', fileUrl);
 
+        // Fire-and-forget: pre-convert the replacement file to slide images in
+        // the background. Never delays or fails the update response.
+        if (SLIDE_CONVERTIBLE_MIMES.includes(fileToUpdate.mimetype)) {
+          convertDocumentToSlides({
+            buffer: fileToUpdate.data,
+            ext: correctUpdExt.replace(/^\./, ''),
+            cacheKey: fileUrl,
+          }).catch(err => console.warn('Background slide conversion failed:', err.message));
+        }
+
+        // Fire-and-forget: word map for replaced PDFs, keyed to the NEW URL.
+        if (fileToUpdate.mimetype === 'application/pdf') {
+          extractLessonTextFromPdf(fileToUpdate.data, fileUrl)
+            .catch(err => console.warn('Background lesson text extraction failed:', err.message));
+        }
+
+        // Fire-and-forget: drop the OLD file's cached slides (PptCache doc +
+        // Cloudinary images) so orphaned conversions don't pile up.
         if (file.fileUrl instanceof Map) {
-          for (const [resolution, oldFileUrl] of file.fileUrl) {
-            await deleteFromResolutionFolder(oldFileUrl, type, section, name, fileFolderPath);
+          for (const oldFileUrl of file.fileUrl.values()) {
+            cleanupConvertedSlides(oldFileUrl)
+              .catch(err => console.warn('Slide cache cleanup failed:', err.message));
           }
         } else if (file.fileUrl) {
-          await deleteFromResolutionFolder(file.fileUrl, type, section, name, fileFolderPath);
+          cleanupConvertedSlides(file.fileUrl)
+            .catch(err => console.warn('Slide cache cleanup failed:', err.message));
+        }
+
+        if (file.fileUrl instanceof Map) {
+          for (const [resolution, oldFileUrl] of file.fileUrl) {
+            await deleteFromResolutionFolder(oldFileUrl, type, storageSection, name, fileFolderPath);
+          }
+        } else if (file.fileUrl) {
+          await deleteFromResolutionFolder(file.fileUrl, type, storageSection, name, fileFolderPath);
         }
 
         const updatedFile = {
@@ -3141,9 +4128,9 @@ if (isUpdate === 'true' && updateFileId) {
       }
 
       if (location === 'folder') {
-        entity.markModified(`pedagogy.${section}.${name}.folders`);
+        entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
       } else {
-        entity.markModified(`pedagogy.${section}.${name}.files`);
+        entity.markModified(`${pedagogyPath}.${section}.${name}.files`);
       }
 
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -3247,7 +4234,7 @@ if (isUpdate === 'true' && updateFileId) {
 
       targetFolders.push(newFolder);
 
-      entity.markModified(`pedagogy.${section}.${name}.folders`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = new Date();
 
@@ -3351,7 +4338,7 @@ if (action === 'updateFolder' && folderName) {
     folderToUpdate.tags = [];
   }
 
-  entity.markModified(`pedagogy.${section}.${name}.folders`);
+  entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
   entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
   entity.updatedAt = new Date();
 
@@ -3385,10 +4372,10 @@ if (action === 'updateFolder' && folderName) {
           try {
             if (file.fileUrl instanceof Map) {
               for (const [resolution, fileUrl] of file.fileUrl) {
-                await deleteFromResolutionFolder(fileUrl, type, section, name, currentPath);
+                await deleteFromResolutionFolder(fileUrl, type, storageSection, name, currentPath);
               }
             } else if (file.fileUrl) {
-              await deleteFromResolutionFolder(file.fileUrl, type, section, name, currentPath);
+              await deleteFromResolutionFolder(file.fileUrl, type, storageSection, name, currentPath);
             }
           } catch (storageError) {
             console.warn("Storage deletion error:", storageError);
@@ -3407,7 +4394,7 @@ if (action === 'updateFolder' && folderName) {
         result.parent.splice(result.index, 1);
       }
 
-      entity.markModified(`pedagogy.${section}.${name}.folders`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = Date.now();
 
@@ -3434,10 +4421,10 @@ if (action === 'updateFolder' && folderName) {
 
         if (fileUrlMap instanceof Map) {
           for (const [resolution, fileUrl] of fileUrlMap) {
-            await deleteFromResolutionFolder(fileUrl, type, section, name, parsedFolderPath);
+            await deleteFromResolutionFolder(fileUrl, type, storageSection, name, parsedFolderPath);
           }
         } else if (fileResult.file.fileUrl) {
-          await deleteFromResolutionFolder(fileResult.file.fileUrl, type, section, name, parsedFolderPath);
+          await deleteFromResolutionFolder(fileResult.file.fileUrl, type, storageSection, name, parsedFolderPath);
         }
       } catch (storageError) {
         console.warn("Storage deletion error:", storageError);
@@ -3447,7 +4434,7 @@ if (action === 'updateFolder' && folderName) {
         fileResult.parent.splice(fileResult.index, 1);
       }
 
-      entity.markModified(`pedagogy.${section}.${name}`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = Date.now();
 
@@ -3559,7 +4546,7 @@ if (action === 'updateFolder' && folderName) {
                     processedFile.fileName,
                     resolution,
                     type,
-                    section,
+                    storageSection,
                     name,
                     pathParts
                   );
@@ -3579,20 +4566,19 @@ if (action === 'updateFolder' && folderName) {
                 await uploadOriginalVideo(
                   file,
                   type,
-                  section,
+                  storageSection,
                   name,
                   pathParts,
                   targetFolder,
                   false,
                   null,
-                  pedagogyElement,
-                  supabase
+                  pedagogyElement
                 );
                 console.log('✅ Fallback original video uploaded');
                 continue; // uploadOriginalVideo already pushed to targetFolder.files
               } catch (fallbackErr) {
                 console.error('❌ Fallback upload also failed:', fallbackErr.message);
-                continue;
+                throw fallbackErr;
               }
             }
 
@@ -3628,7 +4614,7 @@ if (action === 'updateFolder' && folderName) {
 
           } catch (videoErr) {
             console.error('❌ Video processing failed entirely:', videoErr.message);
-            continue;
+            throw videoErr;
           }
 
         } else {
@@ -3664,20 +4650,38 @@ if (action === 'updateFolder' && folderName) {
           const cleanName = cleanStem + correctExt;
           const uniqueFileName = `${Date.now()}_${cleanName}`;
           const storageFolderPath = pathParts.length > 0 ? pathParts.join('/') : "root";
-          const storagePath = `courses/${type}s/${section}/${name}/${storageFolderPath}/${uniqueFileName}`;
+          const storagePath = `courses/${type}s/${storageSection}/${name}/${storageFolderPath}/${uniqueFileName}`;
 
-          const { error: uploadError } = await supabase.storage
+          const { error: uploadError } = await storage
             .from("smartlms")
             .upload(storagePath, file.data, { contentType: file.mimetype });
 
           if (uploadError) {
             console.error("File upload error:", uploadError);
-            continue;
+            throw uploadError;
           }
 
-          const fileUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${storagePath}`;
+          const fileUrl = publicUrlFor(storagePath);
           const fileUrlMap = new Map();
           fileUrlMap.set('base', fileUrl);
+
+          // Fire-and-forget: pre-convert office docs to slide images in the
+          // background so the first student view is a cache hit. Never delays
+          // or fails the upload response.
+          if (SLIDE_CONVERTIBLE_MIMES.includes(file.mimetype)) {
+            convertDocumentToSlides({
+              buffer: file.data,
+              ext: correctExt.replace(/^\./, ''),
+              cacheKey: fileUrl,
+            }).catch(err => console.warn('Background slide conversion failed:', err.message));
+          }
+
+          // Fire-and-forget: build the glossary word map for PDFs (office
+          // files get theirs from the slide pipeline's intermediate PDF).
+          if (file.mimetype === 'application/pdf') {
+            extractLessonTextFromPdf(file.data, fileUrl)
+              .catch(err => console.warn('Background lesson text extraction failed:', err.message));
+          }
 
           const newFile = {
             _id: new mongoose.Types.ObjectId(),
@@ -3707,9 +4711,9 @@ if (action === 'updateFolder' && folderName) {
 
       // CRITICAL: Mark the correct path as modified
       if (pathParts.length > 0) {
-        entity.markModified(`pedagogy.${section}.${name}.folders`);
+        entity.markModified(`${pedagogyPath}.${section}.${name}.folders`);
       } else {
-        entity.markModified(`pedagogy.${section}.${name}.files`);
+        entity.markModified(`${pedagogyPath}.${section}.${name}.files`);
       }
 
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -3717,10 +4721,16 @@ if (action === 'updateFolder' && folderName) {
 
       const savedEntity = await entity.save();
 
+      // Read back through the SAME container the write went to. Reaching for
+      // `savedEntity.pedagogy` unconditionally would throw on a batch-wise
+      // upload, because that element's material is under batchPedagogy and the
+      // shared map has no such key.
       console.log('💾 Saved entity, checking tags in saved file:');
-      const savedFiles = pathParts.length > 0
-        ? savedEntity.pedagogy[section].get(name).folders
-        : savedEntity.pedagogy[section].get(name).files;
+      const savedRoot = pedagogyPath === "pedagogy"
+        ? savedEntity.pedagogy
+        : savedEntity.batchPedagogy?.get?.(scopeBatchId);
+      const savedElement = savedRoot?.[section]?.get?.(name);
+      const savedFiles = pathParts.length > 0 ? savedElement?.folders : savedElement?.files;
       console.log('Saved files with tags:', JSON.stringify(savedFiles, null, 2));
 
       return res.status(200).json({
@@ -3808,7 +4818,7 @@ if (action === 'updateFolder' && folderName) {
 
       targetFolder.files.push(newFile);
 
-      entity.markModified(`pedagogy.${section}.${name}`);
+      entity.markModified(`${pedagogyPath}.${section}.${name}`);
       entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
       entity.updatedAt = new Date();
 
@@ -3918,17 +4928,23 @@ exports.updateFileSettings = async (req, res) => {
     const section = tabType;
     const name = subcategory;
 
-    if (!entity.pedagogy[section]) entity.pedagogy[section] = new Map();
+    // Batch-scoped container — same rule as updateEntity. Without it, toggling
+    // "show to students" on a batch-wise file would look for that file in the
+    // shared container and silently find nothing.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, section, req);
 
-    if (!entity.pedagogy[section].get(name)) {
-      entity.pedagogy[section].set(name, {
+    if (!pedagogyRoot[section]) pedagogyRoot[section] = new Map();
+
+    if (!pedagogyRoot[section].get(name)) {
+      pedagogyRoot[section].set(name, {
         description: "",
         files: [],
         folders: []
       });
     }
 
-    const pedagogyElement = entity.pedagogy[section].get(name);
+    const pedagogyElement = pedagogyRoot[section].get(name);
 
     // Find the file
     const pathParts = folderPath ? folderPath.split("/").filter(p => p) : [];
@@ -3990,7 +5006,7 @@ exports.updateFileSettings = async (req, res) => {
       };
     }
 
-    entity.markModified(`pedagogy.${section}.${name}`);
+    entity.markModified(`${pedagogyPath}.${section}.${name}`);
     entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
     entity.updatedAt = new Date();
 
@@ -4091,27 +5107,35 @@ exports.createPage = async (req, res) => {
       entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
     }
 
-    if (!entity.pedagogy[tabType]) {
-      entity.pedagogy[tabType] = new Map();
+    // ── 5b. Resources by Batch ────────────────────────────────────────────────
+    // A page authored for a batch-wise element belongs to ONE batch, exactly
+    // like an uploaded file does. Resolving the container here points every
+    // lookup and markModified path below at that batch's I_Do/We_Do/You_Do
+    // set, or at the shared one when the element is shared.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
+    if (!pedagogyRoot[tabType]) {
+      pedagogyRoot[tabType] = new Map();
     }
 
     // ── 6. Ensure subcategory element exists ──────────────────────────────────
-    const getter = entity.pedagogy[tabType].get
-      ? entity.pedagogy[tabType].get(subcategory)
-      : entity.pedagogy[tabType][subcategory];
+    const getter = pedagogyRoot[tabType].get
+      ? pedagogyRoot[tabType].get(subcategory)
+      : pedagogyRoot[tabType][subcategory];
 
     if (!getter) {
       const emptyElement = { description: "", files: [], folders: [], pages: [] };
-      if (entity.pedagogy[tabType].set) {
-        entity.pedagogy[tabType].set(subcategory, emptyElement);
+      if (pedagogyRoot[tabType].set) {
+        pedagogyRoot[tabType].set(subcategory, emptyElement);
       } else {
-        entity.pedagogy[tabType][subcategory] = emptyElement;
+        pedagogyRoot[tabType][subcategory] = emptyElement;
       }
     }
 
-    const pedagogyElement = entity.pedagogy[tabType].get
-      ? entity.pedagogy[tabType].get(subcategory)
-      : entity.pedagogy[tabType][subcategory];
+    const pedagogyElement = pedagogyRoot[tabType].get
+      ? pedagogyRoot[tabType].get(subcategory)
+      : pedagogyRoot[tabType][subcategory];
 
     // ── 7. Ensure arrays exist on the pedagogy element ────────────────────────
     if (!Array.isArray(pedagogyElement.files)) pedagogyElement.files = [];
@@ -4201,9 +5225,9 @@ exports.createPage = async (req, res) => {
 
     // ── 14. Mark modified so Mongoose persists nested change ──────────────────
     if (addedInsideFolder) {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
     } else {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.pages`);
     }
 
     entity.updatedBy = req.user?.email || "system";
@@ -4472,16 +5496,21 @@ exports.deletePage = async (req, res) => {
       });
     }
 
-    if (!entity.pedagogy?.[tabType]) {
+    // Batch-scoped container — deleting a batch-wise page must target that
+    // batch's set, not the shared one.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
+    if (!pedagogyRoot?.[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: "Pedagogy section not found" }],
       });
     }
 
     // Support both Map and plain Object
-    const pedagogyElement = entity.pedagogy[tabType].get
-      ? entity.pedagogy[tabType].get(subcategory)
-      : entity.pedagogy[tabType][subcategory];
+    const pedagogyElement = pedagogyRoot[tabType].get
+      ? pedagogyRoot[tabType].get(subcategory)
+      : pedagogyRoot[tabType][subcategory];
 
     if (!pedagogyElement) {
       return res.status(404).json({
@@ -4545,9 +5574,9 @@ exports.deletePage = async (req, res) => {
 
     // Mark modified so Mongoose persists the nested array change
     if (deletedFromFolder) {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
     } else {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.pages`);
     }
 
     entity.updatedBy = req.user?.email || "system";
@@ -4620,15 +5649,19 @@ exports.updatePage = async (req, res) => {
       });
     }
 
-    if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+    // Batch-scoped container — see createPage step 5b.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
+    if (!pedagogyRoot || !pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: "Pedagogy section not found" }],
       });
     }
 
-    const pedagogyElement = entity.pedagogy[tabType].get
-      ? entity.pedagogy[tabType].get(subcategory)
-      : entity.pedagogy[tabType][subcategory];
+    const pedagogyElement = pedagogyRoot[tabType].get
+      ? pedagogyRoot[tabType].get(subcategory)
+      : pedagogyRoot[tabType][subcategory];
 
     if (!pedagogyElement) {
       return res.status(404).json({
@@ -4723,9 +5756,9 @@ exports.updatePage = async (req, res) => {
     };
 
     if (updatedInFolder) {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
     } else {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.pages`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.pages`);
     }
 
     entity.updatedBy = req.user?.email || "system";
@@ -4784,13 +5817,21 @@ const findEntityByTypeAndId = async (type, id) => {
   return entity;
 };
 
-// Helper function to find file in pedagogy structure
-const findFileInPedagogy = (entity, tabType, subcategory, folderPath, fileId) => {
-  if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+// Helper function to find file in pedagogy structure.
+//
+// Takes the CONTAINER (the object holding I_Do/We_Do/You_Do) rather than the
+// entity, because with Resources by Batch that container is either the shared
+// `entity.pedagogy` or this batch's `entity.batchPedagogy.<batchId>`. Callers
+// get it from `resolvePedagogyScope`; passing the entity here would quietly
+// search the shared set for a file that only exists inside a batch.
+const findFileInPedagogy = (pedagogyRoot, tabType, subcategory, folderPath, fileId) => {
+  if (!pedagogyRoot || !pedagogyRoot[tabType]) {
     return { error: "Pedagogy section not found" };
   }
 
-  const pedagogyElement = entity.pedagogy[tabType].get(subcategory);
+  const pedagogyElement = pedagogyRoot[tabType].get
+    ? pedagogyRoot[tabType].get(subcategory)
+    : pedagogyRoot[tabType][subcategory];
   if (!pedagogyElement) {
     return { error: "Subcategory not found" };
   }
@@ -4868,7 +5909,7 @@ async function uploadImageToSupabase(file, folderPath) {
     const filePath = `question/${folderPath}/${fileName}`;
 
     // Upload to Supabase
-    const { data, error } = await supabase.storage
+    const { data, error } = await storage
       .from("smartlms")
       .upload(filePath, file.data, {
         contentType: file.mimetype,
@@ -4881,7 +5922,7 @@ async function uploadImageToSupabase(file, folderPath) {
     }
 
     // Generate public URL
-    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const imageUrl = publicUrlFor(filePath);
 
     return imageUrl;
 
@@ -4954,19 +5995,20 @@ exports.addMCQQuestionToFile = async (req, res) => {
     // Find the entity (module/submodule/topic/subtopic)
     const entity = await findEntityByTypeAndId(type, id);
 
-    // Initialize pedagogy if not exists
-    if (!entity.pedagogy) {
-      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
-    }
+    // An in-file MCQ is attached to a specific upload, so it has to be looked
+    // up in the same container that upload was written to — the shared one, or
+    // this batch's own.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
 
     // Ensure pedagogy section exists
-    if (!entity.pedagogy[tabType]) {
-      entity.pedagogy[tabType] = new Map();
+    if (!pedagogyRoot[tabType]) {
+      pedagogyRoot[tabType] = new Map();
     }
 
     // Ensure subcategory exists
-    if (!entity.pedagogy[tabType].get(subcategory)) {
-      entity.pedagogy[tabType].set(subcategory, {
+    if (!pedagogyRoot[tabType].get(subcategory)) {
+      pedagogyRoot[tabType].set(subcategory, {
         description: "",
         files: [],
         folders: [],
@@ -4975,7 +6017,7 @@ exports.addMCQQuestionToFile = async (req, res) => {
     }
 
     // Find the file
-    const result = findFileInPedagogy(entity, tabType, subcategory, folderPath, fileId);
+    const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
 
     if (result.error) {
       return res.status(404).json({
@@ -5082,8 +6124,9 @@ exports.addMCQQuestionToFile = async (req, res) => {
         _id: new mongoose.Types.ObjectId(),
         isActive: questionData.isActive !== undefined ? questionData.isActive : true,
         sequence: questionData.sequence || file.mcqQuestions.length + 1,
-        timestamp: questionData.videoTimestamp || questionData.timestamp || 0,
-        videoTimestamp: questionData.videoTimestamp || questionData.timestamp || 0,
+        timestamp: questionData.videoTimestamp || questionData.timestamp || questionData.pageNumber || 0,
+        videoTimestamp: questionData.videoTimestamp || questionData.timestamp || questionData.pageNumber || 0,
+        pageNumber: questionData.pageNumber || questionData.videoTimestamp || questionData.timestamp || 0,
         mcqQuestion: {
           questionTitle: questionData.mcqQuestionTitle,
           explanation: questionData.mcqQuestionDescription || '',
@@ -5119,9 +6162,9 @@ exports.addMCQQuestionToFile = async (req, res) => {
 
     // Mark the path as modified for Mongoose
     if (parsedFolderPath.length > 0) {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.folders`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
     } else {
-      entity.markModified(`pedagogy.${tabType}.${subcategory}.files`);
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.files`);
     }
 
     entity.updatedBy = req.user?.email || 'system';
@@ -5255,6 +6298,1062 @@ exports.getExerciseSubmissionStatus = async (req, res) => {
       success: false,
       message: 'Internal server error',
       error: error.message,
+    });
+  }
+};
+
+// ─── GET FILE MCQ QUESTIONS (grouped by page) ────────────────────────────────
+exports.getFileMCQQuestions = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    let { tabType, subcategory, folderPath, fileId } = req.query;
+
+    if (typeof folderPath === 'string') {
+      try { folderPath = JSON.parse(folderPath); } catch { folderPath = []; }
+    }
+    if (!Array.isArray(folderPath)) folderPath = [];
+
+    if (!tabType || !subcategory || !fileId) {
+      return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Missing tabType, subcategory, or fileId' }] });
+    }
+
+    const entity = await findEntityByTypeAndId(type, id);
+    // Batch-scoped map key — the batch comes from the query here because this
+    // is a GET. Students never pass one; their batch is applied by the read
+    // scoping that produced the fileId they are asking about.
+    // Batch-scoped container — see resolvePedagogyScope.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+    const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
+
+    if (result.error) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: result.error }] });
+    }
+
+    const questions = (result.file.mcqQuestions || []).filter(q => q.isActive !== false);
+    return res.status(200).json({ success: true, data: { questions, totalQuestions: questions.length } });
+  } catch (err) {
+    console.error('Error fetching file MCQ questions:', err);
+    return res.status(500).json({ success: false, message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+// ─── UPDATE FILE MCQ QUESTION ─────────────────────────────────────────────────
+exports.updateFileMCQQuestion = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    let { tabType, subcategory, folderPath, fileId, questionId, questionData } = req.body;
+
+    if (typeof folderPath === 'string') {
+      try { folderPath = JSON.parse(folderPath); } catch { folderPath = []; }
+    }
+    if (!Array.isArray(folderPath)) folderPath = [];
+
+    if (typeof questionData === 'string') {
+      try { questionData = JSON.parse(questionData); } catch {
+        return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Invalid questionData format' }] });
+      }
+    }
+
+    if (!tabType || !subcategory || !fileId || !questionId || !questionData) {
+      return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Missing required fields' }] });
+    }
+
+    const entity = await findEntityByTypeAndId(type, id);
+    // Batch-scoped container — see resolvePedagogyScope.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+    const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
+
+    if (result.error) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: result.error }] });
+    }
+
+    const { file } = result;
+    const qIdx = (file.mcqQuestions || []).findIndex(q => q._id.toString() === questionId);
+    if (qIdx === -1) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: 'Question not found' }] });
+    }
+
+    const existing = file.mcqQuestions[qIdx];
+    const updatedOptions = (questionData.mcqQuestionOptions || []).map(opt => ({
+      text: opt.text || '',
+      isCorrect: opt.isCorrect || false,
+      imageUrl: opt.imageUrl || null,
+      imageAlignment: opt.imageAlignment || 'left',
+      imageSizePercent: opt.imageSizePercent || 100,
+    }));
+
+    file.mcqQuestions[qIdx] = {
+      ...existing.toObject ? existing.toObject() : existing,
+      mcqQuestion: {
+        ...((existing.mcqQuestion && existing.mcqQuestion.toObject) ? existing.mcqQuestion.toObject() : existing.mcqQuestion || {}),
+        questionTitle: questionData.mcqQuestionTitle || existing.mcqQuestion.questionTitle,
+        explanation: questionData.mcqQuestionDescription || existing.mcqQuestion.explanation || '',
+        options: updatedOptions,
+        correctAnswers: questionData.mcqQuestionCorrectAnswers || existing.mcqQuestion.correctAnswers,
+        mcqQuestionType: questionData.mcqQuestionType || existing.mcqQuestion.mcqQuestionType,
+        mcqQuestionOptionsPerRow: questionData.mcqQuestionOptionsPerRow || existing.mcqQuestion.mcqQuestionOptionsPerRow || 2,
+        mcqQuestionRequired: questionData.mcqQuestionRequired !== undefined ? questionData.mcqQuestionRequired : existing.mcqQuestion.mcqQuestionRequired,
+      },
+      updatedAt: new Date(),
+      updatedBy: req.user?.email || 'system',
+    };
+
+    updateFileLastModified(file);
+
+    if (folderPath.length > 0) {
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.files`);
+    }
+
+    await entity.save();
+
+    return res.status(200).json({ success: true, message: [{ key: 'success', value: 'Question updated' }], data: file.mcqQuestions[qIdx] });
+  } catch (err) {
+    console.error('Error updating file MCQ question:', err);
+    return res.status(500).json({ success: false, message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+// ─── DELETE FILE MCQ QUESTION ─────────────────────────────────────────────────
+exports.deleteFileMCQQuestion = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    let { tabType, subcategory, folderPath, fileId, questionId } = req.body;
+
+    if (typeof folderPath === 'string') {
+      try { folderPath = JSON.parse(folderPath); } catch { folderPath = []; }
+    }
+    if (!Array.isArray(folderPath)) folderPath = [];
+
+    if (!tabType || !subcategory || !fileId || !questionId) {
+      return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Missing required fields' }] });
+    }
+
+    const entity = await findEntityByTypeAndId(type, id);
+    // Batch-scoped container — see resolvePedagogyScope.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+    const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
+
+    if (result.error) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: result.error }] });
+    }
+
+    const { file } = result;
+    const before = (file.mcqQuestions || []).length;
+    file.mcqQuestions = (file.mcqQuestions || []).filter(q => q._id.toString() !== questionId);
+
+    if (file.mcqQuestions.length === before) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: 'Question not found' }] });
+    }
+
+    updateFileLastModified(file);
+
+    if (folderPath.length > 0) {
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
+    } else {
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.files`);
+    }
+
+    await entity.save();
+    return res.status(200).json({ success: true, message: [{ key: 'success', value: 'Question deleted' }] });
+  } catch (err) {
+    console.error('Error deleting file MCQ question:', err);
+    return res.status(500).json({ success: false, message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+// ─── UPSERT STUDENT FILE PROGRESS ────────────────────────────────────────────
+exports.upsertStudentFileProgress = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    let { tabType, subcategory, folderPath, fileId, fileName, highestPageReached, totalPages, attendedPageNumber, courseId, answers } = req.body;
+    const studentId = req.user?._id?.toString() || req.user?.id?.toString() || req.body.studentId;
+
+    if (typeof folderPath === 'string') {
+      try { folderPath = JSON.parse(folderPath); } catch { folderPath = []; }
+    }
+    if (!Array.isArray(folderPath)) folderPath = [];
+
+    if (!tabType || !subcategory || !fileId || !studentId) {
+      return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Missing required fields' }] });
+    }
+
+    const pg = (attendedPageNumber !== undefined && attendedPageNumber !== null) ? Number(attendedPageNumber) : null;
+    const answerRecords = (Array.isArray(answers) && answers.length > 0 && pg !== null && !isNaN(pg))
+      ? answers.map(a => ({
+          pageNumber:     pg,
+          questionId:     a.questionId ? new mongoose.Types.ObjectId(a.questionId) : undefined,
+          questionTitle:  a.questionTitle || '',
+          selectedChoice: a.selectedChoice || '',
+          correctChoice:  a.correctChoice || '',
+          isCorrect:      !!a.isCorrect,
+          fileName:       fileName || '',
+          submittedAt:    new Date(),
+        }))
+      : [];
+
+    let progressData = {
+      fileName:             fileName || '',
+      highestPageReached:   highestPageReached || 0,
+      totalPages:           totalPages || 0,
+      attemptedPages:       [],
+      markerAnswers:        [],
+      totalMcqPages:        0,
+      allMcqPages:          [],
+      completionPercentage: 0,
+    };
+
+    // Computed from SubTopic — used in lms-users write below
+    let computedPercentage = 0;
+    let computedAttendedPages = [];
+
+    // ── 1. Update SubTopic studentFileProgress (non-fatal)
+    try {
+      const entity = await findEntityByTypeAndId(type, id);
+      // Batch-scoped map key. This one matters for STUDENTS specifically: the
+      // page they are reporting progress on came back flattened to the plain
+      // subcategory, so the write has to be pushed back into their own batch's
+      // bucket rather than the shared one.
+      // Batch-scoped container — see resolvePedagogyScope.
+      const { container: pedagogyRoot, basePath: pedagogyPath } =
+        await resolvePedagogyScope(entity, tabType, req);
+      const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
+
+      if (result.error) {
+        console.warn('[FileMCQ] pedagogy lookup failed (non-fatal):', result.error, { type, id, tabType, subcategory, fileId });
+      } else {
+        const { file } = result;
+
+        if (!file.studentFileProgress) file.studentFileProgress = [];
+        let progress = file.studentFileProgress.find(p => p.studentId === studentId);
+        if (!progress) {
+          file.studentFileProgress.push({
+            studentId,
+            fileName: fileName || file.fileName || '',
+            highestPageReached: 0,
+            totalPages: totalPages || 0,
+            attemptedPages: [],
+            markerAnswers: [],
+            completionPercentage: 0,
+          });
+          progress = file.studentFileProgress[file.studentFileProgress.length - 1];
+        }
+
+        if (fileName) progress.fileName = fileName;
+        if (highestPageReached !== undefined && highestPageReached > (progress.highestPageReached || 0)) {
+          progress.highestPageReached = highestPageReached;
+        }
+        if (totalPages !== undefined) progress.totalPages = totalPages;
+
+        if (pg !== null && !isNaN(pg) && pg > 0) {
+          if (!progress.attemptedPages) progress.attemptedPages = [];
+          if (!progress.attemptedPages.includes(pg)) progress.attemptedPages.push(pg);
+          if (!progress.markerAnswers) progress.markerAnswers = [];
+          const existingMarker = progress.markerAnswers.find(m => m.pageNumber === pg);
+          if (existingMarker) { existingMarker.submittedAt = new Date(); }
+          else { progress.markerAnswers.push({ pageNumber: pg, submittedAt: new Date() }); }
+        }
+
+        // Progress = attended MCQ pages / total MCQ pages × 100
+        const allMcqPages = [...new Set(
+          (file.mcqQuestions || [])
+            .filter(q => q.isActive !== false)
+            .map(q => {
+              const raw = q.pageNumber || q.videoTimestamp || q.timestamp || 0;
+              return typeof raw === 'number' ? Math.round(raw) : parseInt(String(raw)) || 0;
+            })
+        )].filter(p => p > 0);
+
+        const totalMcqPages = allMcqPages.length;
+        if (totalMcqPages > 0) {
+          const attendedMcqPages = (progress.attemptedPages || []).filter(p => allMcqPages.includes(p)).length;
+          progress.completionPercentage = Math.round((attendedMcqPages / totalMcqPages) * 100);
+        } else {
+          const pages = progress.totalPages || 1;
+          progress.completionPercentage = Math.min(100, Math.round(((progress.highestPageReached || 0) / pages) * 100));
+        }
+        progress.updatedAt = new Date();
+
+        if (folderPath.length > 0) {
+          entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.folders`);
+        } else {
+          entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.files`);
+        }
+        await entity.save();
+
+        computedPercentage    = progress.completionPercentage;
+        computedAttendedPages = [...(progress.attemptedPages || [])];
+
+        progressData = {
+          fileName:             progress.fileName,
+          highestPageReached:   progress.highestPageReached,
+          totalPages:           progress.totalPages,
+          attemptedPages:       progress.attemptedPages,
+          markerAnswers:        progress.markerAnswers,
+          totalMcqPages,
+          allMcqPages,
+          completionPercentage: progress.completionPercentage,
+        };
+      }
+    } catch (subTopicErr) {
+      console.warn('[FileMCQ] SubTopic progress update failed (non-fatal):', subTopicErr.message);
+    }
+
+    // ── 2. Store in lms-users: { completionPercentage, attendedPages, answers[] }
+    //    Structure: courses[].answers.I_Do.fileId = { completionPercentage, attendedPages, answers }
+    if (courseId && studentId && (answerRecords.length > 0 || pg !== null)) {
+      try {
+        const basePath = `courses.$.answers.${tabType}.${fileId}`;
+        const updateOps = {
+          $set: {
+            [`${basePath}.completionPercentage`]: computedPercentage,
+            [`${basePath}.attendedPages`]:        computedAttendedPages,
+          },
+        };
+        if (answerRecords.length > 0) {
+          updateOps.$push = {
+            [`${basePath}.answers`]: { $each: answerRecords },
+          };
+        }
+        await User.updateOne(
+          { _id: new mongoose.Types.ObjectId(studentId), 'courses.courseId': new mongoose.Types.ObjectId(courseId) },
+          updateOps
+        );
+        console.log('[FileMCQ] lms-users updated:', { studentId, courseId, tabType, fileId, completionPercentage: computedPercentage, attendedPages: computedAttendedPages });
+      } catch (lmsErr) {
+        console.warn('[FileMCQ] lms-users write failed (non-fatal):', lmsErr.message);
+      }
+    }
+
+    return res.status(200).json({ success: true, data: progressData });
+  } catch (err) {
+    console.error('Error upserting student file progress:', err);
+    return res.status(500).json({ success: false, message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+
+// ─── GET STUDENT FILE PROGRESS ────────────────────────────────────────────────
+exports.getStudentActivityDetail = async (req, res) => {
+  try {
+    const { courseId, studentId } = req.params;
+    const { institution } = req.user;
+
+    const course = await CourseStructure.findOne({ _id: courseId, institution })
+      .select('courseName courseCode').lean();
+    if (!course) {
+      return res.status(404).json({ success: false, message: 'Course not found' });
+    }
+
+    const student = await User.findOne({ _id: studentId })
+      .select('firstName lastName email department').lean();
+    if (!student) {
+      return res.status(404).json({ success: false, message: 'Student not found' });
+    }
+
+    const studentCourse = await User.findOne(
+      { _id: studentId, 'courses.courseId': courseId },
+      { 'courses.$': 1 }
+    ).lean();
+    const answers = studentCourse?.courses?.[0]?.answers || {};
+
+    const [modules, subModules, topics, subTopics, batchCourse] = await Promise.all([
+      Module1.find({ courses: courseId }).select('title pedagogy batchPedagogy').lean(),
+      SubModule1.find({ courses: courseId }).select('title pedagogy batchPedagogy').lean(),
+      Topic1.find({ courses: courseId }).select('title pedagogy batchPedagogy').lean(),
+      SubTopic1.find({ courses: courseId }).select('title pedagogy batchPedagogy').lean(),
+      CourseStructure.findById(courseId)
+        .select('batchResources batchAndParticipants batch skillingBatches batches')
+        .lean(),
+    ]);
+    const entities = [...modules, ...subModules, ...topics, ...subTopics];
+
+    // ── Resources by Batch ─────────────────────────────────────────────────
+    // This report lists what ONE student was given and what they did with it.
+    // On a batch-wise course the material they were given is their batch's, so
+    // scope every node to that batch first — otherwise the report enumerates
+    // the shared set the student may never have seen.
+    if (batchCourse) {
+      const studentBatchId = getUserBatchId(batchCourse, studentId);
+      entities.forEach((entity) => scopeNodePedagogy(entity, batchCourse, studentBatchId));
+    }
+
+    const collectFiles = (container, bag) => {
+      if (!container || typeof container !== 'object') return;
+      (container.files || []).forEach(f => bag.push(f));
+      (container.folders || []).forEach(folder => collectFiles(folder, bag));
+      if (Array.isArray(container.subfolders)) {
+        container.subfolders.forEach(sf => collectFiles(sf, bag));
+      }
+    };
+
+    const countActiveMcq = (file) =>
+      (file.mcqQuestions || []).filter(q => q && q.isActive !== false).length;
+
+    const documents = [];
+    entities.forEach(entity => {
+      const iDo = entity?.pedagogy?.I_Do;
+      if (!iDo || typeof iDo !== 'object') return;
+      Object.keys(iDo).forEach(subcategory => {
+        const files = [];
+        collectFiles(iDo[subcategory], files);
+        files.forEach(file => {
+          const totalMcq = countActiveMcq(file);
+          if (totalMcq === 0) return;
+          const fileId = file._id?.toString();
+          const ans = answers.I_Do?.[fileId];
+
+          let correctMcq = 0;
+          let attemptedMcq = 0;
+          if (ans && Array.isArray(ans.answers)) {
+            const latestByQ = {};
+            ans.answers.forEach(r => {
+              const qid = r.questionId ? r.questionId.toString() : `${r.pageNumber}-${r.questionTitle}`;
+              const prev = latestByQ[qid];
+              if (!prev || new Date(r.submittedAt) >= new Date(prev.submittedAt)) latestByQ[qid] = r;
+            });
+            const records = Object.values(latestByQ);
+            attemptedMcq = records.length;
+            correctMcq = records.filter(r => r.isCorrect).length;
+          }
+
+          documents.push({
+            fileId,
+            fileName: file.fileName || ans?.fileName || 'Untitled Document',
+            location: entity.title || '',
+            subcategory,
+            totalMcq,
+            attemptedMcq,
+            correctMcq,
+            completionPercentage: ans ? (Number(ans.completionPercentage) || 0) : 0,
+          });
+        });
+      });
+    });
+
+    const buildExercises = (pedagogyType) => {
+      const list = [];
+
+      // Pool ALL submissions for this pedagogy type, regardless of the
+      // subcategory key they were stored under. This defends against legacy
+      // spelling drift in category keys (e.g. 'assessments' / 'assesments' /
+      // 'assesment') so a submission is never lost just because its Map key
+      // differs from the configured subcategory key.
+      const submissionPool = [];
+      const sectionAnswers = answers[pedagogyType] || {};
+      Object.keys(sectionAnswers).forEach(subcat => {
+        const arr = sectionAnswers[subcat];
+        if (Array.isArray(arr)) arr.forEach(s => { if (s) submissionPool.push(s); });
+      });
+
+      // Index submissions by every id we can match against, plus by name as a
+      // last-resort fallback. The stored submission.exerciseId is an ObjectId
+      // that equals the configured exercise's _id — NOT the string
+      // exerciseInformation.exerciseId — so we must try _id first.
+      const byId = new Map();
+      const byName = new Map();
+      submissionPool.forEach(s => {
+        if (s.exerciseId) byId.set(s.exerciseId.toString(), s);
+        const nm = (s.exerciseName || '').trim().toLowerCase();
+        if (nm && !byName.has(nm)) byName.set(nm, s);
+      });
+
+      entities.forEach(entity => {
+        const section = entity?.pedagogy?.[pedagogyType];
+        if (!section || typeof section !== 'object') return;
+        Object.keys(section).forEach(subcategory => {
+          const exercises = section[subcategory];
+          if (!Array.isArray(exercises)) return;
+          exercises.forEach((exercise, idx) => {
+            if (!exercise) return;
+            const info = exercise.exerciseInformation || {};
+            const exId = (exercise.exerciseId || info.exerciseId || '').toString();
+            const configuredTotal = Number(info.totalMarks) ||
+              ((Number(info.totalMarksMCQ) || 0) + (Number(info.totalMarksProgramming) || 0));
+
+            // Match the submission against any candidate id of the configured
+            // exercise (_id is the one that actually lines up); fall back to a
+            // case-insensitive exercise-name match when no id lines up.
+            const candidateIds = [exercise._id, exercise.exerciseId, info.exerciseId]
+              .filter(Boolean)
+              .map(x => x.toString());
+            let studentEntry = null;
+            for (const id of candidateIds) {
+              if (byId.has(id)) { studentEntry = byId.get(id); break; }
+            }
+            if (!studentEntry) {
+              const nm = (info.exerciseName || exercise.exerciseName || '').trim().toLowerCase();
+              if (nm && byName.has(nm)) studentEntry = byName.get(nm);
+            }
+            const questions = studentEntry?.questions || [];
+            const scoredMarks = questions.reduce((s, q) => s + (Number(q.score) || 0), 0);
+            const submittedMax = questions.reduce((s, q) => s + (Number(q.totalScore) || 0), 0);
+            const totalMarks = submittedMax > 0 ? submittedMax : configuredTotal;
+            const attempted = questions.length > 0;
+            const percentage = attempted && totalMarks > 0
+              ? Math.min(100, Math.round((scoredMarks / totalMarks) * 100))
+              : 0;
+
+            list.push({
+              exerciseId: exId,
+              exerciseName: info.exerciseName || `${subcategory} ${idx + 1}`,
+              location: entity.title || '',
+              subcategory,
+              scoredMarks: attempted ? scoredMarks : 0,
+              totalMarks,
+              percentage,
+              attempted,
+              status: studentEntry?.status || (attempted ? 'submitted' : 'not_started'),
+              submittedAt: studentEntry?.lastTestSubmittedAt || null,
+            });
+          });
+        });
+      });
+      return list;
+    };
+
+    const assignments = buildExercises('We_Do');
+    const assessments = buildExercises('You_Do');
+
+    const avg = (arr, key) =>
+      arr.length === 0 ? 0 : Math.round(arr.reduce((s, x) => s + (x[key] || 0), 0) / arr.length);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        student: {
+          _id: student._id,
+          name: `${student.firstName || ''} ${student.lastName || ''}`.trim(),
+          email: student.email,
+        },
+        course: { _id: course._id, courseName: course.courseName },
+        I_Do: {
+          documents,
+          summary: {
+            total: documents.length,
+            attempted: documents.filter(d => d.completionPercentage > 0).length,
+            avgCompletion: avg(documents, 'completionPercentage'),
+          },
+        },
+        We_Do: {
+          assignments,
+          summary: {
+            total: assignments.length,
+            attempted: assignments.filter(a => a.attempted).length,
+            avgPercentage: avg(assignments, 'percentage'),
+          },
+        },
+        You_Do: {
+          assessments,
+          summary: {
+            total: assessments.length,
+            attempted: assessments.filter(a => a.attempted).length,
+            avgPercentage: avg(assessments, 'percentage'),
+          },
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching student activity detail:', error);
+    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
+exports.getStudentFileProgress = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    let { tabType, subcategory, folderPath, fileId } = req.query;
+    const studentId = req.user?._id?.toString() || req.user?.id?.toString() || req.query.studentId;
+
+    if (typeof folderPath === 'string') {
+      try { folderPath = JSON.parse(folderPath); } catch { folderPath = []; }
+    }
+    if (!Array.isArray(folderPath)) folderPath = [];
+
+    if (!tabType || !subcategory || !fileId || !studentId) {
+      return res.status(400).json({ success: false, message: [{ key: 'error', value: 'Missing required fields' }] });
+    }
+
+    const entity = await findEntityByTypeAndId(type, id);
+    // Batch-scoped container — see resolvePedagogyScope.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+    const result = findFileInPedagogy(pedagogyRoot, tabType, subcategory, folderPath, fileId);
+
+    if (result.error) {
+      return res.status(404).json({ success: false, message: [{ key: 'error', value: result.error }] });
+    }
+
+    const { file } = result;
+    const progress = (file.studentFileProgress || []).find(p => p.studentId === studentId);
+
+    // All unique page/slide numbers that have MCQs on this file
+    const allMcqPages = [...new Set(
+      (file.mcqQuestions || [])
+        .filter(q => q.isActive !== false)
+        .map(q => {
+          const raw = q.pageNumber || q.videoTimestamp || q.timestamp || 0;
+          return typeof raw === 'number' ? Math.round(raw) : parseInt(String(raw)) || 0;
+        })
+    )].filter(p => p > 0);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        fileName: progress?.fileName || file.fileName || '',
+        highestPageReached: progress?.highestPageReached || 0,
+        totalPages: progress?.totalPages || 0,
+        attemptedPages: progress?.attemptedPages || [],
+        markerAnswers: progress?.markerAnswers || [],   // [{ pageNumber, submittedAt }]
+        totalMcqPages: allMcqPages.length,
+        allMcqPages,
+        completionPercentage: progress?.completionPercentage || 0,
+      },
+    });
+  } catch (err) {
+    console.error('Error getting student file progress:', err);
+    return res.status(500).json({ success: false, message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+
+// Get all students enrolled in a course with their progress based on pedagogy structure
+exports.getCourseStudents = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { institution } = req.user;
+
+    // ── 1. Get course details ──────────────────────────────────────────────────
+    const course = await CourseStructure.findOne({
+      _id: courseId,
+      institution
+    }).select('courseName courseCode courseLevel serviceType').lean();
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        message: 'Course not found'
+      });
+    }
+
+    // ── 2. Get all participants with user data ──────────────────────────────
+    const courseWithParticipants = await CourseStructure.findById(courseId)
+      .populate({
+        path: 'batchAndParticipants.users.user',
+        select: 'firstName lastName email department role',
+        populate: {
+          path: 'role',
+          select: 'renameRole originalRole roleValue'
+        }
+      })
+      .lean();
+
+    // ── 2a. A TRAINER sees only the batches they teach ──────────────────────
+    // A course's roster is every batch's students, and a trainer is enrolled
+    // into the batches they actually take — so "my students" is the students
+    // of the batches this trainer appears in, and nobody else's.
+    //
+    // Done HERE and not in the browser on purpose: filtering after the fact
+    // would still have sent every student's name, email and progress over the
+    // wire to a trainer with no business seeing them.
+    //
+    // Only trainers are narrowed. Every other role keeps the whole course,
+    // which is what an admin, an L&D head or a POC opens this page for.
+    const viewerRoles = (await roleNamesOf(req.user)).map(normalizeRoleName);
+    const isTrainerViewer = viewerRoles.some(name => name.includes('trainer'));
+    const viewerId = String(req.user?._id || '');
+
+    const allBatches = courseWithParticipants?.batchAndParticipants || [];
+    const visibleBatches = (isTrainerViewer && viewerId)
+      ? allBatches.filter(batch =>
+          (batch.users || []).some(entry => {
+            // The populate above only resolves users it could find; an entry
+            // pointing at a deleted account stays a bare ObjectId, so read
+            // both shapes rather than assuming the populated one.
+            const u = entry?.user;
+            return String(u?._id || u || '') === viewerId;
+          })
+        )
+      : allBatches;
+
+    // A trainer assigned to no batch of this course sees no students — the
+    // honest answer, and the same one the empty-state below already renders.
+
+    // The cohorts this viewer's list is actually drawn from, for the page
+    // header: a trainer's own batches, or every batch for anyone else. Sent
+    // rather than derived in the browser because the roster the browser holds
+    // is already narrowed — it could not name a batch it was never given. The
+    // phase is "" for a course that runs in none.
+    const visibleCohorts = visibleBatches
+      .filter(batch => String(batch?.batchName || '').trim())
+      .map(batch => ({
+        batchName: String(batch.batchName).trim(),
+        phase: String(batch?.phase || '').trim(),
+      }));
+
+    // Flatten users across batches; a user in several batches counts once.
+    const flatParticipants = visibleBatches
+      .flatMap(batch => batch.users || []);
+    const uniqueParticipants = Array.from(
+      new Map(
+        flatParticipants
+          .filter(p => p.user && p.user._id)
+          .map(p => [p.user._id.toString(), p])
+      ).values()
+    );
+
+    // Filter only students
+    const students = uniqueParticipants.filter(p => {
+      const user = p.user;
+      if (!user || !user.role) return false;
+      const roleValue = user.role.roleValue || user.role.renameRole || '';
+      return roleValue.toLowerCase() === 'student';
+    });
+
+    if (students.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          course: {
+            _id: course._id,
+            courseName: course.courseName,
+            courseCode: course.courseCode,
+            courseLevel: course.courseLevel,
+            serviceType: course.serviceType
+          },
+          stats: {
+            totalStudents: 0,
+            averageProgress: 0,
+            completedStudents: 0,
+            inProgressStudents: 0,
+            notStartedStudents: 0
+          },
+          cohorts: visibleCohorts,
+          students: []
+        }
+      });
+    }
+
+    // ── 3. Get ALL pedagogy content for this course ──────────────────────────
+    const modules = await Module1.find({ courses: courseId })
+      .select('_id title pedagogy')
+      .lean();
+
+    const moduleIds = modules.map(m => m._id);
+
+    const subModules = await SubModule1.find({ moduleId: { $in: moduleIds } })
+      .select('_id title moduleId pedagogy')
+      .lean();
+
+    const subModuleIds = subModules.map(sm => sm._id);
+
+    const topics = await Topic1.find({
+      $or: [
+        { moduleId: { $in: moduleIds } },
+        { subModuleId: { $in: subModuleIds } }
+      ]
+    })
+      .select('_id title moduleId subModuleId pedagogy')
+      .lean();
+
+    const topicIds = topics.map(t => t._id);
+
+    const subTopics = await SubTopic1.find({
+      topicId: { $in: topicIds }
+    })
+      .select('_id title topicId pedagogy')
+      .lean();
+
+    // ── 4. Get all users with course progress ────────────────────────────────
+    const userIds = students.map(s => s.user._id);
+    const usersWithProgress = await User.find({
+      _id: { $in: userIds },
+      'courses.courseId': courseId
+    })
+      .select('courses answers')
+      .lean();
+
+    // ── 5. Build student progress data ────────────────────────────────────────
+    const studentProgress = students.map(student => {
+      const user = student.user;
+      const userProgress = usersWithProgress.find(u => u._id.toString() === user._id.toString());
+      const courseProgress = userProgress?.courses?.find(c => c.courseId?.toString() === courseId);
+
+      // Get student's answers
+      const answers = courseProgress?.answers || {};
+
+      // ── Calculate progress for I_Do, We_Do, You_Do ────────────────────────
+      const progress = {
+        overall: 0,
+        I_Do: { total: 0, completed: 0, percentage: 0, details: {} },
+        We_Do: { total: 0, completed: 0, percentage: 0, details: {} },
+        You_Do: { total: 0, completed: 0, percentage: 0, details: {} }
+      };
+
+      // ── Helper: Get all pedagogy items for a specific type ─────────────────
+      const getPedagogyItems = (type) => {
+        const items = [];
+        const allNodes = [...modules, ...subModules, ...topics, ...subTopics];
+        
+        allNodes.forEach(node => {
+          if (!node.pedagogy) return;
+          
+          const section = node.pedagogy[type];
+          if (!section) return;
+
+          const entries = section.entries ? Array.from(section.entries()) : Object.entries(section);
+          
+          entries.forEach(([category, value]) => {
+            if (!value || typeof value !== 'object') return;
+
+            // For I_Do: count files and pages
+            if (type === 'I_Do') {
+              // Count files
+              if (value.files && Array.isArray(value.files)) {
+                value.files.forEach(file => {
+                  items.push({
+                    id: file._id?.toString() || file.id,
+                    category,
+                    type: 'file',
+                    name: file.fileName || 'file',
+                    nodeId: node._id,
+                    nodeTitle: node.title
+                  });
+                });
+              }
+              // Count files in folders
+              if (value.folders && Array.isArray(value.folders)) {
+                const processFolder = (folder) => {
+                  if (folder.files && Array.isArray(folder.files)) {
+                    folder.files.forEach(file => {
+                      items.push({
+                        id: file._id?.toString() || file.id,
+                        category,
+                        type: 'file',
+                        name: file.fileName || 'file',
+                        nodeId: node._id,
+                        nodeTitle: node.title,
+                        folderPath: folder.name
+                      });
+                    });
+                  }
+                  if (folder.subfolders && Array.isArray(folder.subfolders)) {
+                    folder.subfolders.forEach(processFolder);
+                  }
+                };
+                value.folders.forEach(processFolder);
+              }
+              // Count pages
+              if (value.pages && Array.isArray(value.pages)) {
+                value.pages.forEach(page => {
+                  items.push({
+                    id: page._id?.toString() || page.id,
+                    category,
+                    type: 'page',
+                    name: page.title || 'page',
+                    nodeId: node._id,
+                    nodeTitle: node.title
+                  });
+                });
+              }
+            } else {
+              // For We_Do and You_Do: count exercises
+              if (Array.isArray(value)) {
+                value.forEach(exercise => {
+                  if (exercise._id || exercise.id) {
+                    items.push({
+                      id: exercise._id?.toString() || exercise.id,
+                      category,
+                      type: 'exercise',
+                      name: exercise.exerciseInformation?.exerciseName || 'exercise',
+                      nodeId: node._id,
+                      nodeTitle: node.title,
+                      exerciseId: exercise.exerciseInformation?.exerciseId
+                    });
+                  }
+                });
+              }
+            }
+          });
+        });
+        
+        return items;
+      };
+
+      // ── Get all items for each pedagogy type ──────────────────────────────
+      const iDoItems = getPedagogyItems('I_Do');
+      const weDoItems = getPedagogyItems('We_Do');
+      const youDoItems = getPedagogyItems('You_Do');
+
+      // ── Count completed items based on student answers ────────────────────
+      const countCompleted = (items, type) => {
+        let completed = 0;
+        const details = {};
+
+        items.forEach(item => {
+          const category = item.category || 'uncategorized';
+          if (!details[category]) {
+            details[category] = { total: 0, completed: 0 };
+          }
+          details[category].total++;
+
+          // Check if student has completed this item
+          let isCompleted = false;
+
+          if (type === 'I_Do') {
+            // ── FIX: Check I_Do answers directly by file ID ──────────────────
+            // For I_Do, answers are stored with the file ID as the key
+            const iDoAnswers = answers.I_Do || {};
+            
+            // Check if the file ID exists in the answers (direct key)
+            if (iDoAnswers[item.id]) {
+              const fileProgress = iDoAnswers[item.id];
+              // Consider completed if there's any progress (answers array has items)
+              if (fileProgress && Array.isArray(fileProgress.answers) && fileProgress.answers.length > 0) {
+                isCompleted = true;
+              }
+              // Also check for completionPercentage
+              if (fileProgress && fileProgress.completionPercentage > 0) {
+                isCompleted = true;
+              }
+            }
+            
+            // Check for page completion
+            if (!isCompleted && item.type === 'page') {
+              // Pages might be stored differently - check if any page progress exists
+              if (iDoAnswers.pages && iDoAnswers.pages[item.id]) {
+                isCompleted = true;
+              }
+            }
+          } else {
+            // For We_Do and You_Do: check if exercise is completed
+            const exerciseAnswers = answers[type]?.[item.category] || [];
+            const exerciseAnswer = exerciseAnswers.find(a => 
+              a.exerciseId?.toString() === item.id || a.exerciseId === item.id
+            );
+            if (exerciseAnswer && (exerciseAnswer.status === 'completed' || 
+                exerciseAnswer.status === 'solved' || 
+                exerciseAnswer.status === 'evaluated')) {
+              isCompleted = true;
+            }
+          }
+
+          if (isCompleted) {
+            completed++;
+            details[category].completed++;
+          }
+        });
+
+        return { completed, details, total: items.length };
+      };
+
+      // ── Calculate progress for each type ────────────────────────────────────
+      const iDoResult = countCompleted(iDoItems, 'I_Do');
+      const weDoResult = countCompleted(weDoItems, 'We_Do');
+      const youDoResult = countCompleted(youDoItems, 'You_Do');
+
+      progress.I_Do = {
+        total: iDoResult.total,
+        completed: iDoResult.completed,
+        percentage: iDoResult.total > 0 ? Math.round((iDoResult.completed / iDoResult.total) * 100) : 0,
+        details: iDoResult.details
+      };
+
+      progress.We_Do = {
+        total: weDoResult.total,
+        completed: weDoResult.completed,
+        percentage: weDoResult.total > 0 ? Math.round((weDoResult.completed / weDoResult.total) * 100) : 0,
+        details: weDoResult.details
+      };
+
+      progress.You_Do = {
+        total: youDoResult.total,
+        completed: youDoResult.completed,
+        percentage: youDoResult.total > 0 ? Math.round((youDoResult.completed / youDoResult.total) * 100) : 0,
+        details: youDoResult.details
+      };
+
+      // ── Calculate overall progress ──────────────────────────────────────────
+      const totalAll = progress.I_Do.total + progress.We_Do.total + progress.You_Do.total;
+      const completedAll = progress.I_Do.completed + progress.We_Do.completed + progress.You_Do.completed;
+      progress.overall = totalAll > 0 ? Math.round((completedAll / totalAll) * 100) : 0;
+
+      return {
+        student: {
+          _id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          department: user.department,
+          role: user.role
+        },
+        progress: progress,
+        lastActivity: courseProgress?.lastAccessed || student.createdAt
+      };
+    });
+
+    // ── 6. Calculate stats ────────────────────────────────────────────────────
+    const stats = {
+      totalStudents: studentProgress.length,
+      averageProgress: studentProgress.length > 0 
+        ? Math.round(studentProgress.reduce((sum, s) => sum + s.progress.overall, 0) / studentProgress.length)
+        : 0,
+      completedStudents: studentProgress.filter(s => s.progress.overall >= 80).length,
+      inProgressStudents: studentProgress.filter(s => s.progress.overall > 0 && s.progress.overall < 80).length,
+      notStartedStudents: studentProgress.filter(s => s.progress.overall === 0).length
+    };
+
+    // ── 7. Build pedagogy summary ─────────────────────────────────────────────
+    let pedagogySummary = {
+      I_Do: { totalItems: 0, categories: [] },
+      We_Do: { totalItems: 0, categories: [] },
+      You_Do: { totalItems: 0, categories: [] }
+    };
+
+    if (studentProgress.length > 0) {
+      pedagogySummary = {
+        I_Do: {
+          totalItems: studentProgress[0].progress.I_Do.total || 0,
+          categories: studentProgress[0].progress.I_Do.details ? Object.keys(studentProgress[0].progress.I_Do.details) : []
+        },
+        We_Do: {
+          totalItems: studentProgress[0].progress.We_Do.total || 0,
+          categories: studentProgress[0].progress.We_Do.details ? Object.keys(studentProgress[0].progress.We_Do.details) : []
+        },
+        You_Do: {
+          totalItems: studentProgress[0].progress.You_Do.total || 0,
+          categories: studentProgress[0].progress.You_Do.details ? Object.keys(studentProgress[0].progress.You_Do.details) : []
+        }
+      };
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        course: {
+          _id: course._id,
+          courseName: course.courseName,
+          courseCode: course.courseCode,
+          courseLevel: course.courseLevel,
+          serviceType: course.serviceType
+        },
+        stats,
+        cohorts: visibleCohorts,
+        students: studentProgress,
+        pedagogySummary
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching course students:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Internal server error',
+      error: error.message
     });
   }
 };

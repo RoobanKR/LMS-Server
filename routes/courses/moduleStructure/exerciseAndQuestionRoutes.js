@@ -28,6 +28,16 @@ const {
   updateYouDoExercise,
   getYouDoExercises,
   saveAssessmentRecording,
+  listPendingApprovals,
+  approveExerciseStep,
+  rejectExerciseStep,
+  resubmitExerciseForApproval,
+  getCourseApprovalsOverview,
+  approveQuestion,
+  approveAllQuestions,
+  rejectQuestion,
+  raiseQuestionQuery,
+  resolveQuestionQuery,
 } = require("../../../controllers/courses/moduleStructure/exerciseAndQuestion");
 const {
   parseBulkDocument,
@@ -149,5 +159,17 @@ router.put("/you-do/exercise/add/:type/:id", userAuth, addYouDoExercise);
 router.put("/you-do/exercise/update/:type/:id/:exerciseId", userAuth, updateYouDoExercise);
 
 router.get("/you-do/exercise/getAll/:type/:id", userAuth, getYouDoExercises);
+
+// Approval workflow
+router.get("/approvals/pending", userAuth, listPendingApprovals);
+router.get("/courses/:courseId/approvals/overview", userAuth, getCourseApprovalsOverview);
+router.post("/exercise/approve", userAuth, approveExerciseStep);
+router.post("/exercise/reject", userAuth, rejectExerciseStep);
+router.post("/exercise/resubmit", userAuth, resubmitExerciseForApproval);
+router.post("/exercise/question/approve", userAuth, approveQuestion);
+router.post("/exercise/question/approve-all", userAuth, approveAllQuestions);
+router.post("/exercise/question/reject", userAuth, rejectQuestion);
+router.post("/exercise/question/query", userAuth, raiseQuestionQuery);
+router.post("/exercise/question/resolve-query", userAuth, resolveQuestionQuery);
 
 module.exports = router;

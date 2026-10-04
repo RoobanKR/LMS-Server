@@ -8,18 +8,26 @@ const generateNoteId = () => new mongoose.Types.ObjectId();
 // Create a new note for user
 exports.createNote = async (req, res) => {
   try {
-    const { title, content, tags, isPinned, color } = req.body;
-    
+    const { title, content, tags, isPinned, color, resourceId, resourceType, anchor } = req.body;
+
     const newNote = {
       _id: generateNoteId(),
       title: title || "Untitled Note",
       content: content || "",
       tags: tags || [],
-     
+
       isPinned: isPinned || false,
       color: color || "#ffffff",
       lastEdited: new Date()
     };
+
+    if (resourceId) newNote.resourceId = resourceId;
+    if (resourceType && ['pdf', 'ppt', 'video'].includes(resourceType)) newNote.resourceType = resourceType;
+    if (anchor && (anchor.page != null || anchor.timestamp != null)) {
+      newNote.anchor = {};
+      if (anchor.page != null) newNote.anchor.page = Number(anchor.page);
+      if (anchor.timestamp != null) newNote.anchor.timestamp = Number(anchor.timestamp);
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
@@ -162,14 +170,24 @@ exports.getNoteById = async (req, res) => {
 // Update note
 exports.updateNote = async (req, res) => {
   try {
-    const { title, content, tags, isPinned, color } = req.body;
-    
+    const { title, content, tags, isPinned, color, resourceId, resourceType, anchor } = req.body;
+
     const updateFields = {};
     if (title !== undefined) updateFields["notes.$.title"] = title;
     if (content !== undefined) updateFields["notes.$.content"] = content;
     if (tags !== undefined) updateFields["notes.$.tags"] = tags;
     if (isPinned !== undefined) updateFields["notes.$.isPinned"] = isPinned;
     if (color !== undefined) updateFields["notes.$.color"] = color;
+    if (resourceId !== undefined) updateFields["notes.$.resourceId"] = resourceId;
+    if (resourceType !== undefined && ['pdf', 'ppt', 'video'].includes(resourceType)) {
+      updateFields["notes.$.resourceType"] = resourceType;
+    }
+    if (anchor !== undefined) {
+      const cleaned = {};
+      if (anchor && anchor.page != null) cleaned.page = Number(anchor.page);
+      if (anchor && anchor.timestamp != null) cleaned.timestamp = Number(anchor.timestamp);
+      updateFields["notes.$.anchor"] = cleaned;
+    }
     updateFields["notes.$.lastEdited"] = new Date();
 
     const user = await User.findOneAndUpdate(
@@ -262,6 +280,39 @@ exports.deleteNote = async (req, res) => {
   }
 };
 
+
+// Get notes for a specific resource (PDF / PPT / Video) for the current user
+exports.getNotesByResource = async (req, res) => {
+  try {
+    const { resourceId } = req.params;
+    const { type } = req.query;
+
+    if (!resourceId) {
+      return res.status(400).json({ success: false, message: "resourceId is required" });
+    }
+
+    const user = await User.findById(req.user._id).select('notes');
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    let notes = user.notes.filter(n => n.resourceId === resourceId);
+    if (type && ['pdf', 'ppt', 'video'].includes(type)) {
+      notes = notes.filter(n => n.resourceType === type);
+    }
+
+    notes.sort((a, b) => {
+      const av = (a.anchor && (a.anchor.page ?? a.anchor.timestamp)) ?? 0;
+      const bv = (b.anchor && (b.anchor.page ?? b.anchor.timestamp)) ?? 0;
+      return av - bv;
+    });
+
+    res.status(200).json({ success: true, data: notes });
+  } catch (error) {
+    console.error("Get notes by resource error:", error);
+    res.status(500).json({ success: false, message: "Error fetching resource notes", error: error.message });
+  }
+};
 
 exports.togglePinNote = async (req, res) => {
   try {

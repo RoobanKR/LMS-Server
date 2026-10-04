@@ -15,6 +15,10 @@ const User = require("../../../models/UserModel");
 const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
 const ScreenViolation = require("../../../models/Courses/moduleStructure/ScreenViolationModel");
 
+// Resources by Batch — an assessment may live in the shared You_Do or in a
+// batch's own container; this merges both for _id-keyed lookups.
+const { mergeSectionAcrossBatches } = require("../../../utils/pedagogyScope");
+
 const MODEL_BY_TYPE = {
   module: Module1, modules: Module1,
   submodule: SubModule1, submodules: SubModule1,
@@ -34,9 +38,15 @@ function sectionEntries(section) {
 async function resolveAssessmentName(assessmentId, nodeType, nodeId) {
   try {
     if (nodeType && nodeId && MODEL_BY_TYPE[nodeType]) {
-      const doc = await MODEL_BY_TYPE[nodeType].findById(nodeId).select("pedagogy.You_Do").lean();
-      const youdo = doc?.pedagogy?.You_Do;
-      for (const [, exercises] of sectionEntries(youdo)) {
+      const doc = await MODEL_BY_TYPE[nodeType]
+        .findById(nodeId)
+        .select("pedagogy.You_Do batchPedagogy")
+        .lean();
+      // Resources by Batch — look in the shared You_Do and every batch's own.
+      // Lookup is by `_id`, so the owning batch is irrelevant to the answer;
+      // without this a batch-wise assessment just falls back to the generic
+      // "Assessment" label.
+      for (const [, exercises] of mergeSectionAcrossBatches(doc, "You_Do")) {
         const arr = Array.isArray(exercises) ? exercises : exercises && exercises._id ? [exercises] : [];
         const ex = arr.find((e) => e && e._id && e._id.toString() === assessmentId.toString());
         if (ex) return ex?.exerciseInformation?.exerciseName || "Assessment";
@@ -74,13 +84,18 @@ exports.getLiveScreens = async (req, res) => {
 
     // Enrolled students = the course's participants.
     const course = await CourseStructure.findById(courseId)
-      .select("singleParticipants")
-      .populate({ path: "singleParticipants", populate: { path: "user", select: "_id email firstName lastName" } })
+      .select("batchAndParticipants")
+      .populate({ path: "batchAndParticipants.users.user", select: "_id email firstName lastName" })
       .lean();
 
-    const participants = (course?.singleParticipants || [])
+    const flatUsers = (course?.batchAndParticipants || [])
+      .flatMap((batch) => batch.users || [])
       .map((p) => p.user)
       .filter((u) => u && u._id);
+    // A user may sit in several batches — list them once only.
+    const participants = Array.from(
+      new Map(flatUsers.map((u) => [u._id.toString(), u])).values()
+    );
 
     const sessions = await ExamSession.find({ assessmentId }).lean();
     const sessionByStudent = new Map(sessions.map((s) => [s.studentId.toString(), s]));

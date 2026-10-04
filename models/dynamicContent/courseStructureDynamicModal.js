@@ -18,7 +18,52 @@ const contactPersonSchema = new mongoose.Schema({
     default: false,
   },
 });
- 
+
+// Department + sections sub-document (nested inside a degree batch entry)
+// department and sections are optional
+const departmentSectionSchema = new mongoose.Schema({
+  department: {
+    type: String,
+  },
+  sections: [
+    {
+      type: String,
+    },
+  ],
+});
+
+// Per-semester month range (start / end month), auto-generated from the degree's semester count
+const semesterDetailSchema = new mongoose.Schema({
+  semesterNumber: {
+    type: Number,
+  },
+  startMonth: {
+    type: String,
+  },
+  endMonth: {
+    type: String,
+  },
+});
+
+// Degree batch sub-document schema (used when client type includes "degree program")
+// Each entry: batch + degree + semester, with multiple departments, each having multiple sections
+const degreeBatchSchema = new mongoose.Schema({
+  batch: {
+    type: String,
+    required: true,
+  },
+  degree: {
+    type: String,
+    required: true,
+  },
+  semester: {
+    type: String,
+    required: true,
+  },
+  departments: [departmentSectionSchema],
+  // Semester schedule (start/end month per semester)
+  semesterDetails: [semesterDetailSchema],
+});
 
 // Define the client schema (embedded)
 const clientSchema = new mongoose.Schema({
@@ -41,8 +86,19 @@ const clientSchema = new mongoose.Schema({
     enum: ["active", "inactive"],
     default: "active",
   },
-
- 
+  type: {
+    type: [String],
+    enum: ["skilling", "degree program"],
+    default: [],
+  },
+  // Used when type includes "skilling" — a client can run multiple batches
+  skillingBatches: [
+    {
+      type: String,
+    },
+  ],
+  // Used when type includes "degree program" — multiple degree/department/semester/section/batch combos
+  degreeBatches: [degreeBatchSchema],
   createdAt: {
     type: Date,
     default: Date.now,
@@ -151,6 +207,10 @@ const courseStructureDynamicSchema = new mongoose.Schema({
   },
  
   // Embedded arrays of different schemas
+  // DEPRECATED — the Dynamic Field Settings "Client Modal" tab and its
+  // /clients/* CRUD routes were removed. Clients now live in the standalone
+  // Client Management module (LMS-ClientManagement). The field is kept only so
+  // existing documents are not silently orphaned; nothing reads or writes it.
   client: [clientSchema],
   category: [categorySchema],
   service: [serviceSchema],
@@ -178,13 +238,13 @@ courseStructureDynamicSchema.pre('save', function(next) {
   this.updatedAt = new Date();
   next();
 });
+
+// Every read/write in courseStructureDynamic.js queries by institution
+// (findOne({institution})) — this had no index at all, making every one of
+// those 15 handlers a full collection scan.
+courseStructureDynamicSchema.index({ institution: 1 });
  
 // Methods for managing embedded documents
-courseStructureDynamicSchema.methods.addClient = function(clientData) {
-  this.client.push(clientData);
-  return this.save();
-};
- 
 courseStructureDynamicSchema.methods.addCategory = function(categoryData) {
   this.category.push(categoryData);
   return this.save();

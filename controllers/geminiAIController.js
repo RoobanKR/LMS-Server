@@ -2,11 +2,14 @@ const { GoogleGenAI } = require("@google/genai");
 
 // Initialize Gemini AI using GoogleGenAI (as in gemini.js)
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY || "AIzaSyBLw5A5gU-Ae539r-F7_6rnlB24GECuwKs"
+  apiKey: process.env.GEMINI_API_KEY
 });
 
 // Configure the model
-const modelName = "gemini-2.5-flash-lite"; // Using gemini-2.5-flash as in your gemini.js
+// gemini-2.5-flash-lite was retired ("no longer available to new users" 404),
+// so this is its current Lite successor. GEMINI_MODEL overrides it without a
+// code change the next time Google retires a model.
+const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
 // Chat history storage in memory (you can use Redis for production)
 const chatHistories = new Map();

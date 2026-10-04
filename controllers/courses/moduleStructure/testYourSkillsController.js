@@ -4,6 +4,12 @@ const SubModule1 = mongoose.model('SubModule1');
 const Topic1 = mongoose.model('Topic1');
 const SubTopic1 = mongoose.model('SubTopic1');
 
+// Resources by Batch — Test Your Skills stores its tests inside pedagogy.You_Do,
+// so it resolves its container exactly like the rest of You Do. Shared with
+// pedagogyView.js and exerciseAndQuestion.js so all three pedagogy sections
+// agree on which batch a request belongs to.
+const { resolvePedagogyScope } = require("../../../utils/pedagogyScope");
+
 const modelMap = {
   modules: { model: Module1, path: "modules" },
   submodules: { model: SubModule1, path: "submodules" },
@@ -66,12 +72,12 @@ async function processOptionImages(options, entityId, itemKey, questionId) {
 }
 
 // Helper function to get or create You_Do item
-async function getOrCreateYouDoItem(entity, itemKey, itemTitle) {
-  if (!entity.pedagogy.You_Do) {
-    entity.pedagogy.You_Do = new Map();
+async function getOrCreateYouDoItem(pedagogyRoot, itemKey, itemTitle) {
+  if (!pedagogyRoot.You_Do) {
+    pedagogyRoot.You_Do = new Map();
   }
   
-  let youDoItem = entity.pedagogy.You_Do.get(itemKey);
+  let youDoItem = pedagogyRoot.You_Do.get(itemKey);
   
   if (!youDoItem) {
     // Create new direct questions item
@@ -93,7 +99,7 @@ async function getOrCreateYouDoItem(entity, itemKey, itemTitle) {
         updatedAt: new Date()
       }
     };
-    entity.pedagogy.You_Do.set(itemKey, youDoItem);
+    pedagogyRoot.You_Do.set(itemKey, youDoItem);
   }
   
   return youDoItem;
@@ -212,14 +218,25 @@ exports.addMcqToYouDo = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
 
     // Initialize You_Do if not exists
-    if (!entity.pedagogy.You_Do) {
-      entity.pedagogy.You_Do = new Map();
+    if (!pedagogyRoot.You_Do) {
+      pedagogyRoot.You_Do = new Map();
     }
 
     // Get existing test or create new structure
-    let existingTest = entity.pedagogy.You_Do.get(itemKey);
+    let existingTest = pedagogyRoot.You_Do.get(itemKey);
     
     if (!existingTest) {
       // Create new test structure
@@ -483,9 +500,13 @@ exports.addMcqToYouDo = async (req, res) => {
           (correctAnswers?.[0] === "true" || correctAnswers?.[0] === true) : null,
         
         // For short_answer
-        shortAnswer: backendType === "short_answer" ? 
+        shortAnswer: backendType === "short_answer" ?
           (correctAnswers?.[0] || "") : "",
-        
+
+        // For essay — sample/model answer used for auto-correction
+        essayAnswer: backendType === "essay" ?
+          (questionData.essayAnswer || correctAnswers?.[0] || "") : "",
+
         // For numeric
         numericAnswer: backendType === "numeric" ? 
           (parseFloat(correctAnswers?.[0]) || null) : null,
@@ -542,8 +563,8 @@ exports.addMcqToYouDo = async (req, res) => {
     existingTest.updatedAt = new Date();
     
     // Save back to entity
-    entity.pedagogy.You_Do.set(itemKey, existingTest);
-    entity.markModified('pedagogy.You_Do');
+    pedagogyRoot.You_Do.set(itemKey, existingTest);
+    entity.markModified(`${pedagogyPath}.You_Do`);
     entity.updatedAt = new Date();
     if (req.user?.email) {
       entity.updatedBy = req.user.email;
@@ -610,11 +631,22 @@ exports.getYouDoItems = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
     
     const allQuestions = [];
     
-    if (entity.pedagogy.You_Do) {
-      for (const [testItemKey, testData] of entity.pedagogy.You_Do.entries()) {
+    if (pedagogyRoot.You_Do) {
+      for (const [testItemKey, testData] of pedagogyRoot.You_Do.entries()) {
         const test = testData;
         
         if (test.questions && Array.isArray(test.questions)) {
@@ -640,6 +672,7 @@ exports.getYouDoItems = async (req, res) => {
               sequence: question.sequence,
               trueFalseAnswer: question.trueFalseAnswer,
               shortAnswer: question.shortAnswer,
+              essayAnswer: question.essayAnswer,
               numericAnswer: question.numericAnswer,
               numericTolerance: question.numericTolerance,
               matchingPairs: question.matchingPairs,
@@ -699,14 +732,25 @@ exports.getYouDoItem = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
     
-    if (!entity.pedagogy.You_Do || !entity.pedagogy.You_Do.has(itemKey)) {
+    if (!pedagogyRoot.You_Do || !pedagogyRoot.You_Do.has(itemKey)) {
       return res.status(404).json({
         message: [{ key: "error", value: `You_Do item "${itemKey}" not found` }]
       });
     }
     
-    const youDoItem = entity.pedagogy.You_Do.get(itemKey);
+    const youDoItem = pedagogyRoot.You_Do.get(itemKey);
     
     res.status(200).json({
       success: true,
@@ -742,15 +786,26 @@ exports.deleteYouDoItem = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
     
-    if (!entity.pedagogy.You_Do || !entity.pedagogy.You_Do.has(itemKey)) {
+    if (!pedagogyRoot.You_Do || !pedagogyRoot.You_Do.has(itemKey)) {
       return res.status(404).json({
         message: [{ key: "error", value: `You_Do item "${itemKey}" not found` }]
       });
     }
     
-    entity.pedagogy.You_Do.delete(itemKey);
-    entity.markModified('pedagogy.You_Do');
+    pedagogyRoot.You_Do.delete(itemKey);
+    entity.markModified(`${pedagogyPath}.You_Do`);
     await entity.save();
     
     res.status(200).json({
@@ -784,14 +839,25 @@ exports.deleteQuestionFromYouDo = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
     
-    if (!entity.pedagogy.You_Do || !entity.pedagogy.You_Do.has(itemKey)) {
+    if (!pedagogyRoot.You_Do || !pedagogyRoot.You_Do.has(itemKey)) {
       return res.status(404).json({
         message: [{ key: "error", value: `You_Do item "${itemKey}" not found` }]
       });
     }
     
-    const youDoItem = entity.pedagogy.You_Do.get(itemKey);
+    const youDoItem = pedagogyRoot.You_Do.get(itemKey);
     
     // Find the question index
     const questionIndex = youDoItem.questions.findIndex(
@@ -820,8 +886,8 @@ exports.deleteQuestionFromYouDo = async (req, res) => {
     
     youDoItem.updatedAt = new Date();
     
-    entity.pedagogy.You_Do.set(itemKey, youDoItem);
-    entity.markModified('pedagogy.You_Do');
+    pedagogyRoot.You_Do.set(itemKey, youDoItem);
+    entity.markModified(`${pedagogyPath}.You_Do`);
     await entity.save();
     
     res.status(200).json({
@@ -861,14 +927,25 @@ exports.updateQuestionInYouDo = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Test Your Skills is a You Do feature, so it obeys the same rule as the
+    // rest of You Do: a shared course keeps its material on the course-level
+    // `pedagogy`, a batch-wise one on this batch's `batchPedagogy.<batchId>`.
+    // This also removes a latent crash — the code below read
+    // `entity.pedagogy.You_Do` with no guard on `entity.pedagogy` itself, and
+    // a node that has never had anything uploaded has no `pedagogy` subdoc at
+    // all. resolvePedagogyScope always returns a container.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, "You_Do", req);
+
     
-    if (!entity.pedagogy.You_Do || !entity.pedagogy.You_Do.has(itemKey)) {
+    if (!pedagogyRoot.You_Do || !pedagogyRoot.You_Do.has(itemKey)) {
       return res.status(404).json({
         message: [{ key: "error", value: `You_Do item "${itemKey}" not found` }]
       });
     }
     
-    const youDoItem = entity.pedagogy.You_Do.get(itemKey);
+    const youDoItem = pedagogyRoot.You_Do.get(itemKey);
     
     // Find the question index
     const questionIndex = youDoItem.questions.findIndex(
@@ -946,6 +1023,7 @@ exports.updateQuestionInYouDo = async (req, res) => {
       isActive: updateData.isActive !== undefined ? updateData.isActive : existingQuestion.isActive,
       trueFalseAnswer: updateData.trueFalseAnswer !== undefined ? updateData.trueFalseAnswer : existingQuestion.trueFalseAnswer,
       shortAnswer: updateData.shortAnswer || existingQuestion.shortAnswer,
+      essayAnswer: updateData.essayAnswer || existingQuestion.essayAnswer,
       numericAnswer: updateData.numericAnswer !== undefined ? updateData.numericAnswer : existingQuestion.numericAnswer,
       numericTolerance: updateData.numericTolerance !== undefined ? updateData.numericTolerance : existingQuestion.numericTolerance,
       matchingPairs: updateData.matchingPairs || existingQuestion.matchingPairs,
@@ -968,8 +1046,8 @@ exports.updateQuestionInYouDo = async (req, res) => {
     
     youDoItem.updatedAt = new Date();
     
-    entity.pedagogy.You_Do.set(itemKey, youDoItem);
-    entity.markModified('pedagogy.You_Do');
+    pedagogyRoot.You_Do.set(itemKey, youDoItem);
+    entity.markModified(`${pedagogyPath}.You_Do`);
     await entity.save();
     
     res.status(200).json({

@@ -5,6 +5,383 @@ const Topic1 = mongoose.model('Topic1');
 const SubTopic1 = mongoose.model('SubTopic1');
 const User = require("../../../models/UserModel");
 const CourseStructure = require("../../../models/Courses/courseStructureModal");
+// ExamSession — one row per (assessment, student) once the student joins the
+// test. Never deleted (submittedAt just flips), so the presence of any row
+// for an assessmentId is the "someone has ever started this test" signal.
+// Read here to stamp `hasParticipants` onto each row of the You_Do exercise
+// list, so the client can hide the "Live Dashboard" menu entry until the
+// first student joins and keep it visible forever afterwards.
+const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
+// Phase 6 — Question Bank model used when `saveToBank` is true on save.
+const QuestionBank = require("../../../models/Courses/QuestionbankModal");
+const {
+  resolveCourseId,
+  buildInitialApprovalWorkflow,
+  canUserActOnStep,
+  isStudentRequester,
+  isExerciseStudentVisible,
+  notifyApproversForStep,
+  notifyStudentsExerciseAvailable,
+  notifySingleUser,
+} = require("../../../utils/approvalWorkflow");
+// Resources by Batch. We Do assignments and You Do assessments live in the
+// same pedagogy maps as I Do resources, so they obey the same rule: a shared
+// element sits on the course-level `pedagogy`, a batch-wise one on that
+// batch's `batchPedagogy.<batchId>`. Shared with pedagogyView.js on purpose —
+// when only that file knew about batches, I Do scoped correctly while We Do
+// and You Do silently kept serving the course-level set.
+const {
+  resolvePedagogyScope,
+  resolveSearchScopes,
+  loadCourseForNode,
+  readRequestedBatch,
+  mergeSectionAcrossBatches,
+  locateExerciseContainer,
+  COURSE_BATCH_FIELDS,
+} = require("../../../utils/pedagogyScope");
+const { scopeNodePedagogy, resolveViewerBatchId } = require("../../../utils/batchResources");
+const { stripHiddenOnQuestion } = require("../../../services/testCaseVisibility");
+
+// Code Setup (Starter/Solution) — Programming and Database questions store a
+// single code string; Frontend stores { html, css, javascript }. Accept
+// either shape from the client, sanitize sub-fields to strings, and return
+// undefined for anything else so the "remove undefined fields" pass below
+// drops it rather than persisting garbage.
+function normalizeCodeSetupValue(v) {
+  if (typeof v === 'string') return v;
+  if (v && typeof v === 'object') {
+    return {
+      html: typeof v.html === 'string' ? v.html : '',
+      css: typeof v.css === 'string' ? v.css : '',
+      javascript: typeof v.javascript === 'string' ? v.javascript : '',
+    };
+  }
+  return undefined;
+}
+
+// ─── Approval-workflow gate helpers ─────────────────────────────────────────
+// Two-part rule (mirrors the client's `isAssessmentComplete`):
+//  - If availabilityPeriod.approvalScope === "settings" (default) → approval
+//    notification fires as soon as the workflow is attached.
+//  - If approvalScope === "settings_and_questions" → notification is deferred
+//    until the exercise is fully configured (all planned questions added).
+// A per-step `notifiedAt` timestamp keeps the fire idempotent, so we can
+// safely re-check on question-add paths without spamming approvers.
+
+/**
+ * Phase 6 — Fire-and-forget helper: clone an exercise's attached questions into
+ * the institution's QuestionBank collection. Idempotent per-question via a
+ * simple `_clonedFromExercise:<exerciseId>+_id:<questionId>` marker so calling
+ * on every save doesn't duplicate. Preserves the per-question `source` tag.
+ * Errors are swallowed and logged — the exercise save must never be blocked by
+ * a bank-clone failure.
+ */
+async function cloneQuestionsToBank({ institutionId, exerciseId, questions, actorEmail }) {
+  try {
+    if (!institutionId || !Array.isArray(questions) || questions.length === 0) return;
+    // Find-or-create the institution's bank doc.
+    let bank = await QuestionBank.findOne({ institution: institutionId });
+    if (!bank) {
+      bank = new QuestionBank({ institution: institutionId, questions: [] });
+    }
+    const existingMarkers = new Set(
+      (bank.questions || [])
+        .map(q => q && q._clonedFromExercise && q._clonedFromExerciseQuestionId
+          ? `${q._clonedFromExercise}:${q._clonedFromExerciseQuestionId}`
+          : null)
+        .filter(Boolean)
+    );
+    let addedCount = 0;
+    for (const q of questions) {
+      if (!q) continue;
+      const qId = (q._id && q._id.toString) ? q._id.toString() : String(q._id || '');
+      const marker = `${exerciseId}:${qId}`;
+      if (qId && existingMarkers.has(marker)) continue; // already cloned
+      // Shallow clone; preserve source; drop the exercise-scoped _id so the
+      // bank assigns its own.
+      const clone = { ...q, _id: undefined, source: q.source || null,
+        _clonedFromExercise: exerciseId,
+        _clonedFromExerciseQuestionId: qId || undefined,
+        createdBy: q.createdBy || undefined,
+        createdByEmail: q.createdByEmail || actorEmail || '',
+      };
+      bank.questions.push(clone);
+      addedCount += 1;
+    }
+    if (addedCount > 0) {
+      await bank.save();
+    }
+  } catch (err) {
+    console.error('[cloneQuestionsToBank] failed:', err && err.message);
+  }
+}
+
+// Moved to utils/exerciseReadiness.js so the node models' save hook
+// (utils/assignmentStudentNotify.js) applies the very same rule.
+const { isExerciseFullyConfigured } = require("../../../utils/exerciseReadiness");
+
+// ─── Hints & constraints as they arrive from the question forms ──────────────
+// Only entries with actual text are kept: an "Additional Hint" or constraint
+// row the author added but never filled in is not a hint/constraint. This used
+// to be `hintText: hint.hintText || hint`, so an EMPTY hint fell back to the
+// whole hint object as its text and the save died on "Cast to string failed".
+// Hints carry no points deduction any more; the schema field stays for old
+// rows but is always written as 0.
+const hintTextOf = (h) =>
+  (typeof h === 'string' ? h : typeof h?.hintText === 'string' ? h.hintText : '').trim();
+
+// Notification delivery channels ({ dashboard, gmail, whatsapp }). Each key
+// takes the incoming value when sent, else the stored one, else off.
+const pickChannels = (incoming, existing) => ({
+  dashboard: incoming?.dashboard ?? existing?.dashboard ?? false,
+  gmail: incoming?.gmail ?? existing?.gmail ?? false,
+  whatsapp: incoming?.whatsapp ?? existing?.whatsapp ?? false,
+});
+
+const normalizeHints = (hints, { keepIds = false } = {}) =>
+  (Array.isArray(hints) ? hints : [])
+    .map((h) => ({ h, text: hintTextOf(h) }))
+    .filter(({ text }) => text)
+    .map(({ h, text }, index) => ({
+      _id: (keepIds && h && typeof h === 'object' && h._id) || new mongoose.Types.ObjectId(),
+      hintText: text,
+      pointsDeduction: 0,
+      isPublic: h && typeof h === 'object' && h.isPublic !== undefined ? h.isPublic !== false : true,
+      sequence: index,
+    }));
+
+const normalizeConstraints = (constraints) =>
+  (Array.isArray(constraints) ? constraints : [])
+    .filter((c) => typeof c === 'string' && c.trim());
+
+// ─── Question quota enforcement ───────────────────────────────────────────────
+// The exercise configuration is the single source of truth for how many
+// questions may be added, and to which section / difficulty / source slice.
+// The UI disables its controls at the limit, but a disabled button is not a
+// rule — this is. Running it before anything is pushed means an over-quota
+// request is rejected no matter where it came from: a stale browser tab, a
+// bypassed control, or a hand-rolled batch of 50 against a quota of 2.
+//
+// A limit is enforced only where one is configured (> 0). "No count set" means
+// "no cap", not zero — otherwise every exercise created before its config was
+// filled in would be frozen and unable to accept its first question.
+
+// Anything that isn't explicitly easy/hard is billed to the neutral 'medium'
+// bucket — the same normalisation the client quota math uses.
+const quotaDifficultyOf = (q) => {
+  const d = (q?.difficulty || '').toString().toLowerCase();
+  return d === 'easy' || d === 'hard' ? d : 'medium';
+};
+
+// Shared Manual bucket — parity with client `quotaModel.srcToBucket`
+// (client/src/app/lms/component/questionsource/quotaModel.ts).
+//
+// Every entry method that isn't AI or Other Platform is billed against the
+// same Manual pool:
+//   • scratch-manual   → user typed the question
+//   • scratch-bank     → imported from Question Bank
+//   • scratch-upload   → imported from Document Upload
+//   • (untagged legacy) → predates source tagging, treated as scratch
+//
+// The on-disk `customDistribution.<difficulty>.scratch` column carries this
+// pool's per-difficulty quota. Client and server MUST agree on this mapping
+// so the client's "Manual: 3/5 — 2 remaining" and the server's rejection
+// message describe the exact same bucket.
+const quotaSourceOf = (q) => {
+  const s = (q?.source || '').toString();
+  if (s.startsWith('thirdParty')) return 'thirdParty';
+  if (s === 'ai') return 'ai';
+  return 'scratch';
+};
+
+// programming / database / frontend all draw on the same programming config.
+const quotaFamilyOf = (qType) => {
+  const t = (qType || '').toString().toLowerCase();
+  if (t === 'mcq') return 'mcq';
+  if (t === 'others') return 'others';
+  return 'prog';
+};
+
+const asPlainObject = (v) => (v instanceof Map ? Object.fromEntries(v) : (v || {}));
+
+// Section-based exercises carry their counts on the section, not on the
+// exercise — sectionConfigs[key] = { id, exerciseType, mcqConfig, programmingConfig }.
+const quotaConfigFor = (ex, sectionId, family) => {
+  if (ex.isSectionBased) {
+    const sectionConfigs = asPlainObject(ex.sectionConfigs);
+    let cfg = null;
+    for (const key of Object.keys(sectionConfigs)) {
+      const c = sectionConfigs[key] || {};
+      if (String(c.id || key) === String(sectionId)) { cfg = c; break; }
+    }
+    if (!cfg) return null;
+    return family === 'mcq' ? (cfg.mcqConfig || null) : (cfg.programmingConfig || null);
+  }
+  const qc = ex.questionConfiguration || {};
+  if (family === 'mcq') return qc.mcqQuestionConfiguration || null;
+  if (family === 'others') return qc.othersQuestionConfiguration || null;
+  return qc.programmingQuestionConfiguration || null;
+};
+
+const quotaLevelCounts = (cfg) => {
+  const t = cfg?.questionConfigType || 'general';
+  if (t === 'general') return null;
+  return (t === 'selectionLevel' ? cfg?.selectionLevelCounts : cfg?.levelBasedCounts) || {};
+};
+
+// Total cap for a family. MCQ stores it as totalMcqQuestions at exercise level
+// and generalQuestionCount on a section config.
+const quotaTotalLimit = (cfg, family) => {
+  if (!cfg) return 0;
+  if (family === 'mcq') return Number(cfg.totalMcqQuestions || cfg.generalQuestionCount || 0) || 0;
+  const counts = quotaLevelCounts(cfg);
+  if (!counts) return Number(cfg.generalQuestionCount || 0) || 0;
+  return (Number(counts.easy || 0) + Number(counts.medium || 0) + Number(counts.hard || 0)) || 0;
+};
+
+// Per-difficulty cap — only levelBased / selectionLevel programming configs
+// have one. A full difficulty must block even when the overall total has room.
+const quotaDiffLimit = (cfg, family, diff) => {
+  if (!cfg || family === 'mcq') return 0;
+  const counts = quotaLevelCounts(cfg);
+  if (!counts) return 0;
+  return Number(counts[diff] || 0) || 0;
+};
+
+// Per-source slice. Section-based reads its own entry so one section's Manual
+// allocation can never be spent by another.
+const quotaDistFor = (ex, sectionId) => {
+  if (ex.questionSource !== 'custom') return null;
+  if (ex.isSectionBased) {
+    const by = asPlainObject(ex.customDistributionBySection);
+    return by[sectionId] || by[String(sectionId)] || null;
+  }
+  return ex.customDistribution || null;
+};
+
+const quotaDistTotal = (dist) => {
+  if (!dist) return 0;
+  return ['easy', 'medium', 'hard'].reduce((s, r) => s
+    + Number(dist[r]?.scratch || 0)
+    + Number(dist[r]?.ai || 0)
+    + Number(dist[r]?.thirdParty || 0), 0);
+};
+
+/**
+ * Validate a batch of incoming questions against the exercise configuration.
+ * Returns null when the batch is allowed, or a human-readable reason string.
+ * The whole batch is rejected if any single question would breach a cap — a
+ * partial insert would leave the trainer guessing which ones landed.
+ */
+const validateQuestionQuota = (ex, questionsToAdd) => {
+  const existing = (ex.questions || []).filter((q) => q.isActive !== false);
+
+  // Running tally so a batch can't slip N questions through a cap of 1 by
+  // having every one of them measured against the same starting count.
+  const pending = [];
+  const countMatching = (predicate) =>
+    existing.filter(predicate).length + pending.filter(predicate).length;
+
+  for (let i = 0; i < questionsToAdd.length; i++) {
+    const incoming = questionsToAdd[i];
+    const qType = incoming.questionType;
+    const family = quotaFamilyOf(qType);
+    const sectionId = incoming.sectionId || null;
+    const diff = quotaDifficultyOf(incoming);
+    const srcKey = quotaSourceOf(incoming);
+    const label = `Question ${i + 1}`;
+
+    const sameScope = (q) => {
+      if (ex.isSectionBased && String(q.sectionId || '') !== String(sectionId || '')) return false;
+      return quotaFamilyOf(q.questionType) === family;
+    };
+
+    const cfg = quotaConfigFor(ex, sectionId, family);
+    const where = ex.isSectionBased ? ' for this section' : '';
+
+    // 0. Duplicate Question Bank import — the same bank doc may only appear
+    // once per exercise, whether it landed in an earlier save or earlier in
+    // this very batch.
+    const bankId = incoming.bankQuestionId ? String(incoming.bankQuestionId) : null;
+    if (bankId) {
+      const sameBank = (q) => q.bankQuestionId && String(q.bankQuestionId) === bankId;
+      if (existing.some(sameBank) || pending.some(sameBank)) {
+        return `${label}: this Question Bank question is already in the exercise — duplicates are not allowed.`;
+      }
+    }
+
+    // 1. Total cap for the family (within the section, when section-based).
+    const totalLimit = quotaTotalLimit(cfg, family);
+    if (totalLimit > 0) {
+      const used = countMatching(sameScope);
+      if (used >= totalLimit) {
+        return `${label}: all ${totalLimit} question slots${where} are already filled (${used}/${totalLimit}). Delete a question before adding another.`;
+      }
+    }
+
+    // 2. Per-difficulty cap.
+    const diffLimit = quotaDiffLimit(cfg, family, diff);
+    if (diffLimit > 0) {
+      const usedDiff = countMatching((q) => sameScope(q) && quotaDifficultyOf(q) === diff);
+      if (usedDiff >= diffLimit) {
+        return `${label}: the ${diff} quota${where} is full (${usedDiff}/${diffLimit}). Choose another difficulty or delete a ${diff} question.`;
+      }
+    }
+
+    // 3. Per-source slice (Manual / AI / Other Platform) under a Custom mix.
+    const dist = quotaDistFor(ex, sectionId);
+    if (dist && quotaDistTotal(dist) > 0) {
+      const perDifficulty = !!quotaLevelCounts(cfg) && family !== 'mcq';
+      const sliceLimit = perDifficulty
+        ? Number(dist[diff]?.[srcKey] || 0)
+        : ['easy', 'medium', 'hard'].reduce((s, r) => s + Number(dist[r]?.[srcKey] || 0), 0);
+      const usedSlice = countMatching((q) =>
+        sameScope(q)
+        && quotaSourceOf(q) === srcKey
+        && (!perDifficulty || quotaDifficultyOf(q) === diff));
+      if (usedSlice >= sliceLimit) {
+        const srcLabel = srcKey === 'ai' ? 'AI' : srcKey === 'thirdParty' ? 'Other Platform' : 'Manual';
+        const scope = perDifficulty ? ` ${diff}` : '';
+        // Manual is the shared pool for Scratch / Question Bank / Document
+        // Upload; the message names all three so the caller doesn't hunt for
+        // a phantom "Question Bank quota".
+        const sharedNote = srcKey === 'scratch'
+          ? ' Manual is shared by Scratch, Question Bank and Document Upload — free a slot in any of them.'
+          : ' Use a different source or delete one of its questions.';
+        return `${label}: the${scope} ${srcLabel} quota${where} is full (${usedSlice}/${sliceLimit}).${sharedNote}`;
+      }
+    }
+
+    pending.push({
+      questionType: qType,
+      sectionId,
+      difficulty: incoming.difficulty,
+      source: incoming.source,
+      bankQuestionId: bankId,
+      isActive: true,
+    });
+  }
+
+  return null;
+};
+
+/**
+ * Should the step-1 approver notification fire *now* for this exercise?
+ * Idempotent — returns false once steps[0].notifiedAt is set.
+ * Callers must set notifiedAt themselves before saving, then fire the notify.
+ */
+const shouldFireStep1Notification = (ex) => {
+  const wf = ex?.approvalWorkflow;
+  if (!wf || !Array.isArray(wf.steps) || wf.steps.length === 0) return false;
+  if ((wf.currentStep || 0) !== 1) return false;
+  const step = wf.steps[0];
+  if (!step || step.status !== 'pending') return false;
+  if (step.notifiedAt) return false; // already sent
+  const scope = ex?.availabilityPeriod?.approvalScope || 'settings';
+  if (scope === 'settings') return true;
+  // settings_and_questions → defer until fully configured
+  return isExerciseFullyConfigured(ex);
+};
 
 const path = require('path');
 const fs = require('fs');
@@ -12,11 +389,12 @@ const fs = require('fs');
 
 const cloudinary = require('cloudinary').v2;
 const stream = require('stream');
-const { createClient } = require("@supabase/supabase-js");
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabaseUrl = process.env.SUPABASE_URL;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
+// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
+// resolving { data, error }), so the call sites below are unchanged — see
+// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+const { storage, publicUrlFor } = require("../../../utils/storage");
 // Configure Cloudinary
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -43,6 +421,22 @@ const modelMap = {
 
 
 // Get a single exercise by ID - Return FULL exercise data
+// Does this (lean) node hold an exercise with `exerciseId` anywhere — in its
+// shared pedagogy or in any batch's bucket? A cheap in-memory pre-check so
+// the id-only lookup scopes just the matching node instead of every node.
+const PEDAGOGY_SECTIONS = ['I_Do', 'We_Do', 'You_Do'];
+const entriesOf = (v) => (v instanceof Map ? Array.from(v.entries()) : v && typeof v === 'object' ? Object.entries(v) : []);
+const containerHoldsExercise = (container, exerciseId) =>
+  PEDAGOGY_SECTIONS.some((section) =>
+    entriesOf(container?.[section]).some(([, list]) => {
+      const arr = Array.isArray(list) ? list : list?._id ? [list] : [];
+      return arr.some((ex) => ex?._id && ex._id.toString() === exerciseId);
+    })
+  );
+const nodeHoldsExercise = (node, exerciseId) =>
+  containerHoldsExercise(node?.pedagogy, exerciseId) ||
+  entriesOf(node?.batchPedagogy).some(([, bucket]) => containerHoldsExercise(bucket, exerciseId));
+
 exports.getExerciseById = async (req, res) => {
   try {
     const { exerciseId } = req.params;
@@ -68,11 +462,20 @@ exports.getExerciseById = async (req, res) => {
       const { model } = modelMap[type];
       const entity = await model.findById(id);
 
-      if (entity && entity.pedagogy) {
+      // ── Resources by Batch ─────────────────────────────────────────────
+      // This lookup is by exercise id alone, with no section to scope by, so
+      // search the caller's batch container FIRST and the shared one after.
+      // Both are needed: an id can legitimately live in either, and a course
+      // whose config was flipped after content existed has some of each. The
+      // batch container comes first so a batch's own copy wins.
+      const searchScopes = entity ? await resolveSearchScopes(entity, req) : [];
+
+      for (const scope of searchScopes) {
+        if (foundExercise) break;
         // Search through all pedagogy sections
         ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
-          if (entity.pedagogy[section]) {
-            const sectionData = entity.pedagogy[section];
+          if (scope.container[section]) {
+            const sectionData = scope.container[section];
 
             // Handle Map and object formats
             let subcategories = [];
@@ -134,14 +537,47 @@ exports.getExerciseById = async (req, res) => {
         { name: 'subtopics', model: SubTopic1, type: 'subtopic' }
       ];
 
-      for (const { model, type } of modelsToSearch) {
+      // Resources by Batch — `batchPedagogy` has to be in the filter as well
+      // as the walk. A node whose only content is batch-wise has NO
+      // `pedagogy` at all, so a `pedagogy: {$exists: true}` filter alone
+      // would skip it and this fallback would report the exercise as missing.
+      // The four levels are fetched in parallel instead of one after another.
+      const nodeFilter = {
+        $or: [
+          { 'pedagogy': { $exists: true, $ne: null } },
+          { 'batchPedagogy': { $exists: true, $ne: null } },
+        ],
+      };
+      const entitiesByModel = await Promise.all(
+        modelsToSearch.map(({ model, type }) =>
+          model.find(nodeFilter).lean().catch((err) => {
+            console.log(`Error searching in ${type}:`, err.message);
+            return [];
+          })
+        )
+      );
+
+      for (let mi = 0; mi < modelsToSearch.length; mi++) {
+        const { type } = modelsToSearch[mi];
         try {
-          // Search all entities with pedagogy
-          const entities = await model.find({
-            'pedagogy': { $exists: true, $ne: null }
-          }).lean();
+          // Only the node(s) that actually hold this id go on to the batch
+          // scoping below — that step costs a course lookup per node, which
+          // across every node of a large course ran past the client's 30s
+          // timeout.
+          const entities = entitiesByModel[mi].filter((entity) => nodeHoldsExercise(entity, exerciseId));
 
           for (const entity of entities) {
+            // Flatten the caller's batch onto `pedagogy` before walking, so
+            // one loop covers shared and batch-wise content alike. Safe to
+            // mutate: these are `.lean()` copies, not live documents.
+            const batchCourse = await loadCourseForNode(entity);
+            if (batchCourse) {
+              scopeNodePedagogy(
+                entity,
+                batchCourse,
+                resolveViewerBatchId(batchCourse, req.user, readRequestedBatch(req)),
+              );
+            }
             if (entity.pedagogy) {
               // Search through all sections
               ['I_Do', 'We_Do', 'You_Do'].forEach(section => {
@@ -209,6 +645,16 @@ exports.getExerciseById = async (req, res) => {
       });
     }
 
+    // ── Approval gating ─────────────────────────────────────────────────
+    // Students may only fetch exercises whose approval chain has finished —
+    // this payload ships questions with correct answers and test cases.
+    const requesterIsStudent = await isStudentRequester(req.user);
+    if (!isExerciseStudentVisible(foundExercise) && requesterIsStudent) {
+      return res.status(403).json({
+        message: [{ key: "error", value: "This exercise is awaiting approval and is not yet available." }]
+      });
+    }
+
     // Return the COMPLETE exercise object as it exists in database
     // This includes ALL fields: questions, options, correctAnswer, etc.
     const completeExerciseData = {
@@ -218,6 +664,14 @@ exports.getExerciseById = async (req, res) => {
       entity: foundEntity,
       location: foundLocation
     };
+
+    // This is the endpoint the student attempt UI calls to load the exercise
+    // + its questions into the code editor — blank hidden test cases and
+    // Code Setup's Solution Code before they leave the server. Trainers/staff
+    // (requesterIsStudent === false) still get the full authoring view.
+    if (requesterIsStudent && Array.isArray(completeExerciseData.questions)) {
+      completeExerciseData.questions.forEach(stripHiddenOnQuestion);
+    }
 
     // Remove any Mongoose-specific properties if they exist
     if (completeExerciseData.__v !== undefined) {
@@ -310,6 +764,11 @@ const computeAutoGrades = (exerciseType, exerciseInfo, gradeSettingsRaw) => {
     ? Number(gradeSettingsRaw.overallMarkToPass)
     : null;
 
+  // Grade bands (labelled % ranges) — passed through untouched when provided.
+  result.gradeBands = Array.isArray(gradeSettingsRaw.gradeBands)
+    ? gradeSettingsRaw.gradeBands
+    : undefined;
+
   return result;
 };
 /**
@@ -341,6 +800,9 @@ const buildAvailabilityPeriod = (avail) => {
     ap.gracePeriodDate = safeD(avail.gracePeriodDate);
 
   ap.extendedDays = avail.extendedDays ?? 0;
+  ap.requiresAdminApproval = !!avail.requiresAdminApproval;
+  // Approval scope is only meaningful when approval is on; default to "settings"
+  ap.approvalScope = avail.approvalScope === 'settings_and_questions' ? 'settings_and_questions' : 'settings';
   return ap;
 };
 
@@ -364,6 +826,22 @@ exports.addExercise = async (req, res) => {
       additionalOptions,      // NEW — from frontend buildFullPayload
       isGraded,               // Graded / Non-Graded toggle
       stepsSaved,             // Array of step titles explicitly saved by user
+      selectedTopics,         // NEW — course topics this assessment covers (Select Content step)
+      instructions,           // NEW — assessment instructions (Select Content step)
+      // ── Question Source feature (Phase 2 / 5 / 6) ──────────────────────────
+      questionSource,
+      customDistribution,
+      customSources,
+      // Section-based Custom mix: per-section distribution keyed by sectionId.
+      customDistributionBySection,
+      saveToBank,
+      // Combined-only: MCQ part's own source + single-cell Custom split.
+      questionSourceMcq,
+      customSourcesMcq,
+      customDistributionMcq,
+      // Evaluation Method — { method: 'testcase' | 'ai' }. Stored as-is; no
+      // evaluation runs off it yet.
+      evaluationMethod,
     } = req.body;
 
     // ── Validate entity type ───────────────────────────────────────────────
@@ -447,16 +925,25 @@ exports.addExercise = async (req, res) => {
         message: [{ key: 'error', value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
 
-    if (!entity.pedagogy) {
-      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
-    }
-    if (!entity.pedagogy[tabType]) {
-      entity.pedagogy[tabType] = new Map();
+
+    // (The container is created by resolvePedagogyScope above — it is the one
+    // place that decides whether that is `pedagogy` or a batch's own bucket.)
+    if (!pedagogyRoot[tabType]) {
+      pedagogyRoot[tabType] = new Map();
     }
 
-    let exercises = entity.pedagogy[tabType].has(subcategory)
-      ? entity.pedagogy[tabType].get(subcategory)
+    let exercises = pedagogyRoot[tabType].has(subcategory)
+      ? pedagogyRoot[tabType].get(subcategory)
       : [];
 
     // ── Generate exercise ID ───────────────────────────────────────────────
@@ -717,6 +1204,33 @@ exports.addExercise = async (req, res) => {
     // ── Build availabilityPeriod (endDate always stored) ──────────────────
     const availabilityPeriodData = buildAvailabilityPeriod(availPeriod);
 
+    // ── Build approvalWorkflow (snapshot from course hierarchy) ───────────
+    let approvalWorkflowData = null;
+    if (availabilityPeriodData.requiresAdminApproval) {
+      const courseIdForWorkflow = resolveCourseId(entity);
+      // Capture the trainer who submitted this for approval — the Pending
+      // Approvals queue shows this as "Submitted by …", and the snapshot
+      // means the record survives a later rename or deactivation of the
+      // trainer's account.
+      const submitterName = [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ")
+        || req.user?.email
+        || "Trainer";
+      const submittedBy = {
+        userId: req.user?._id || req.user?.id || null,
+        name: submitterName,
+        email: req.user?.email || "",
+      };
+      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow, submittedBy);
+      if (!approvalWorkflowData) {
+        return res.status(400).json({
+          message: [{
+            key: 'error',
+            value: 'Approval is required for this exercise, but no approver could be resolved — the course has no Approval Hierarchy and the institution has no L&D role to default to. Configure the hierarchy on the Approvals page first.'
+          }]
+        });
+      }
+    }
+
     // ── Build notificationSettings (full, separate from grades) ───────────
     // const notificationSettingsData = {
     //   notifyUsers: notifSettings.notifyUsers || false,
@@ -787,6 +1301,23 @@ exports.addExercise = async (req, res) => {
       isGraded: isGraded !== false,
       stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : [],
       configurationType: configTypeSettings,
+      // Phase 2 / 5 / 6 — question source, custom matrix, save-to-bank flag.
+      questionSource: questionSource || null,
+      customDistribution: customDistribution || null,
+      customSources: Array.isArray(customSources) ? customSources : [],
+      // Section-based Custom mix's per-section split (keyed by sectionId).
+      // Non-section flow sends {}. Persist as-is (schema is Mixed).
+      customDistributionBySection: customDistributionBySection && typeof customDistributionBySection === 'object'
+        ? customDistributionBySection
+        : {},
+      saveToBank: !!saveToBank,
+      // Combined-only MCQ-part source (null = inherit questionSource).
+      questionSourceMcq: questionSourceMcq || null,
+      customSourcesMcq: Array.isArray(customSourcesMcq) ? customSourcesMcq : [],
+      customDistributionMcq: customDistributionMcq || null,
+      // Evaluation Method config ({ method }). null when the client didn't
+      // send one — downstream reads that as test-case based.
+      evaluationMethod: parseIfNeeded(evaluationMethod) || null,
 
       exerciseInformation: {
         exerciseId: exerciseId,
@@ -812,6 +1343,9 @@ exports.addExercise = async (req, res) => {
       // Availability (endDate is always stored)
       availabilityPeriod: availabilityPeriodData,
 
+      // Sequential approval workflow snapshot (null when toggle is off)
+      approvalWorkflow: approvalWorkflowData,
+
       // Notifications (separate from grades)
       notificationSettings: notificationSettingsData,
       // Keep legacy field populated for backward compatibility
@@ -835,6 +1369,10 @@ exports.addExercise = async (req, res) => {
           : true,
       },
 
+      // Select Assessment Content step — topics covered + instructions shown to students.
+      selectedTopics: Array.isArray(selectedTopics) ? selectedTopics : [],
+      instructions: typeof instructions === 'string' ? instructions : '',
+
       questions: quesConfig.questions || [],
       createdAt: new Date(),
       createdBy: req.user?.email || 'system',
@@ -855,12 +1393,47 @@ exports.addExercise = async (req, res) => {
     if (othersQuestionConfig) newExercise.questionConfiguration.othersQuestionConfiguration = othersQuestionConfig;
 
     // ── Persist ────────────────────────────────────────────────────────────
+    // Decide notification BEFORE save so we can stamp notifiedAt in the same
+    // write (avoids a second entity.save() round-trip).
+    const willNotifyStep1 = shouldFireStep1Notification(newExercise);
+    if (willNotifyStep1) {
+      newExercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+    }
     exercises.push(newExercise);
-    entity.pedagogy[tabType].set(subcategory, exercises);
-    entity.markModified(`pedagogy.${tabType}`);
+    pedagogyRoot[tabType].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabType}`);
     entity.updatedBy = req.user?.email || 'system';
     entity.updatedAt = new Date();
     await entity.save();
+
+    // Phase 6 — When the teacher opts in via saveToBank, clone the new
+    // exercise's attached questions into the institution's Question Bank.
+    if (newExercise.saveToBank && Array.isArray(newExercise.questions) && newExercise.questions.length > 0) {
+      const institutionId = req.user?.institution?._id || req.user?.institution;
+      cloneQuestionsToBank({
+        institutionId,
+        exerciseId: newExercise._id.toString(),
+        questions: newExercise.questions,
+        actorEmail: req.user?.email,
+      });
+    }
+
+    // ── Notify step-1 approvers when the gate says so (non-blocking) ───────
+    // Gate skips when approvalScope="settings_and_questions" and questions
+    // are not yet fully added — that path fires later from addQuestion.
+    if (willNotifyStep1) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: newExercise.approvalWorkflow.steps[0],
+        exerciseName: newExercise.exerciseInformation?.exerciseName,
+        exerciseId: newExercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
+    }
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
@@ -923,6 +1496,18 @@ exports.updateExercise = async (req, res) => {
       additionalOptions,      // NEW
       isGraded,               // Graded / Non-Graded toggle
       stepsSaved,             // Array of step titles explicitly saved by user
+      selectedTopics,         // NEW — Select Assessment Content step
+      instructions,           // NEW — Select Assessment Content step
+      // ── Question Source feature (Phase 2 / 5 / 6) ──────────────────────────
+      questionSource,         // 'scratch' | 'ai' | 'thirdParty' | 'custom' | null
+      customDistribution,     // { easy:{scratch,ai,thirdParty}, medium:{...}, hard:{...} }
+      customDistributionBySection, // { <sectionId>: { easy:{...}, medium:{...}, hard:{...} } } — per-section split
+      customSources,          // ['scratch','ai','thirdParty'] — subset for Custom
+      saveToBank,             // boolean — clone attached questions to Question Bank
+      questionSourceMcq,      // Combined-only: MCQ part's own source (null = inherit)
+      customSourcesMcq,       // Combined-only: ['scratch','ai'] for MCQ Custom
+      customDistributionMcq,  // Combined-only: { scratch, ai, thirdParty } single cell
+      evaluationMethod,     // Evaluation Method: { method: 'testcase' | 'ai' }
     } = req.body;
 
     // ── Validate ──────────────────────────────────────────────────────────
@@ -972,12 +1557,22 @@ exports.updateExercise = async (req, res) => {
     const entity = await model.findById(id);
 
     if (!entity) return res.status(404).json({ message: [{ key: 'error', value: `${type} with ID ${id} not found` }] });
-    if (!entity.pedagogy) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
-    if (!entity.pedagogy[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
-    if (!entity.pedagogy[tabType].has(subcategory))
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
+    if (!pedagogyRoot) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
+    if (!pedagogyRoot[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
+    if (!pedagogyRoot[tabType].has(subcategory))
       return res.status(404).json({ message: [{ key: 'error', value: `Subcategory '${subcategory}' not found in ${tabType}` }] });
 
-    const exercises = entity.pedagogy[tabType].get(subcategory);
+    const exercises = pedagogyRoot[tabType].get(subcategory);
     const exerciseIndex = exercises.findIndex(ex => ex._id.toString() === exerciseId);
 
     if (exerciseIndex === -1) {
@@ -1206,6 +1801,30 @@ exports.updateExercise = async (req, res) => {
       isGraded: isGraded !== undefined ? isGraded !== false : (existingExercise.isGraded !== false),
       stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : (existingExercise.stepsSaved || []),
       configurationType: configTypeSettings,
+      // Select Assessment Content step — preserve when not re-sent.
+      selectedTopics: Array.isArray(selectedTopics) ? selectedTopics : (existingExercise.selectedTopics || []),
+      instructions: typeof instructions === 'string' ? instructions : (existingExercise.instructions || ''),
+      // Phase 2 / 5 / 6 — teacher's source choice + custom matrix + save-to-bank flag.
+      // Merge from incoming, else preserve existing.
+      questionSource: questionSource !== undefined ? questionSource : (existingExercise.questionSource || null),
+      customDistribution: customDistribution !== undefined ? customDistribution : (existingExercise.customDistribution || null),
+      customSources: Array.isArray(customSources) ? customSources : (existingExercise.customSources || []),
+      // Section-based per-section split — merge-or-preserve, same as the
+      // aggregate customDistribution above. Empty object is a valid value
+      // (non-section flow / trainer cleared it) so use `!== undefined`.
+      customDistributionBySection: customDistributionBySection !== undefined
+        ? (customDistributionBySection && typeof customDistributionBySection === 'object' ? customDistributionBySection : {})
+        : (existingExercise.customDistributionBySection || {}),
+      saveToBank: typeof saveToBank === 'boolean' ? saveToBank : !!existingExercise.saveToBank,
+      // Combined-only MCQ-part source — merge-or-preserve like the above.
+      questionSourceMcq: questionSourceMcq !== undefined ? questionSourceMcq : (existingExercise.questionSourceMcq || null),
+      customSourcesMcq: Array.isArray(customSourcesMcq) ? customSourcesMcq : (existingExercise.customSourcesMcq || []),
+      customDistributionMcq: customDistributionMcq !== undefined ? customDistributionMcq : (existingExercise.customDistributionMcq || null),
+      // Evaluation Method — merge-or-preserve, so a step-scoped save that
+      // doesn't own this step leaves the stored config untouched.
+      evaluationMethod: evaluationMethod !== undefined
+        ? (parseIfNeeded(evaluationMethod) || null)
+        : (existingExercise.evaluationMethod || null),
       updatedAt: new Date(),
       updatedBy: req.user?.email || 'system',
       version: (existingExercise.version || 1) + 1,
@@ -1307,7 +1926,40 @@ exports.updateExercise = async (req, res) => {
         ap.gracePeriodEnabled = gracePeriodOn;
         if (gracePeriodOn && gracePeriodDate) ap.gracePeriodDate = gracePeriodDate;
         ap.extendedDays = parsedAvailPeriod.extendedDays ?? existAvail.extendedDays ?? 0;
+        ap.requiresAdminApproval = parsedAvailPeriod.requiresAdminApproval !== undefined
+          ? !!parsedAvailPeriod.requiresAdminApproval
+          : !!existAvail.requiresAdminApproval;
+        // Approval scope — locked once a workflow exists, otherwise editable.
+        const incomingScope = parsedAvailPeriod.approvalScope === 'settings_and_questions'
+          ? 'settings_and_questions'
+          : parsedAvailPeriod.approvalScope === 'settings'
+          ? 'settings'
+          : null;
+        ap.approvalScope = incomingScope || existAvail.approvalScope || 'settings';
         updatedExercise.availabilityPeriod = ap;
+
+        // ── Approval workflow transitions on toggle change ─────────────────
+        const prevApproval = !!existAvail.requiresAdminApproval;
+        const nextApproval = !!ap.requiresAdminApproval;
+        if (nextApproval && !prevApproval) {
+          // off → on: snapshot a new workflow from the course hierarchy
+          const courseIdForWorkflow = resolveCourseId(entity);
+          const wf = await buildInitialApprovalWorkflow(courseIdForWorkflow);
+          if (!wf) {
+            return res.status(400).json({
+              message: [{
+                key: 'error',
+                value: 'Approval is required, but no approver could be resolved — the course has no Approval Hierarchy and the institution has no L&D role to default to. Configure the hierarchy on the Approvals page first.'
+              }]
+            });
+          }
+          updatedExercise.approvalWorkflow = wf;
+          // Step-1 notification is fired after entity.save() below.
+        } else if (!nextApproval && prevApproval) {
+          // on → off: clear workflow and reopen for students
+          updatedExercise.approvalWorkflow = null;
+        }
+        // unchanged → leave any existing approvalWorkflow alone
       } else {
         delete updatedExercise.availabilityPeriod;
       }
@@ -1418,6 +2070,11 @@ exports.updateExercise = async (req, res) => {
         overallMarkToPass: parsedGradeSettings?.overallMarkToPass !== undefined
           ? (parsedGradeSettings.overallMarkToPass !== null ? Number(parsedGradeSettings.overallMarkToPass) : null)
           : exGrade.overallMarkToPass ?? null,
+
+        // Grade bands (labelled % ranges) — incoming wins, else keep existing.
+        gradeBands: Array.isArray(parsedGradeSettings?.gradeBands)
+          ? parsedGradeSettings.gradeBands
+          : (exGrade.gradeBands ?? undefined),
       };
 
       // Re-run auto-compute so grade fields always reflect current totalMarks
@@ -1438,13 +2095,79 @@ exports.updateExercise = async (req, res) => {
     }
 
     // ── Persist ────────────────────────────────────────────────────────────
+    // Decide notification BEFORE the JSON snapshot so notifiedAt persists in
+    // the same save. `updatedExercise` is a partial merge — for the gate check
+    // we overlay it on the existing exercise so `approvalScope`, question
+    // counts, config etc. all resolve correctly.
+    const mergedForGate = { ...existingExercise, ...updatedExercise };
+    const willNotifyStep1 = shouldFireStep1Notification(mergedForGate);
+    if (willNotifyStep1) {
+      if (!updatedExercise.approvalWorkflow) updatedExercise.approvalWorkflow = existingExercise.approvalWorkflow;
+      updatedExercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+    }
+    // Trainer just saved an edit — if the workflow is currently `rejected`,
+    // mark it so the approver's UI shows a plain "Approve" instead of
+    // "Approve anyway". Applied whether or not the approval scope defers,
+    // and irrespective of what fields actually changed (any save counts).
+    if (existingExercise?.approvalWorkflow?.overallStatus === 'rejected') {
+      if (!updatedExercise.approvalWorkflow) updatedExercise.approvalWorkflow = existingExercise.approvalWorkflow;
+      updatedExercise.approvalWorkflow.editedSinceReject = true;
+    }
     const cleanExercise = JSON.parse(JSON.stringify(updatedExercise));
     exercises[exerciseIndex] = cleanExercise;
-    entity.pedagogy[tabType].set(subcategory, exercises);
-    entity.markModified(`pedagogy.${tabType}`);
+    pedagogyRoot[tabType].set(subcategory, exercises);
+    // Mongoose change tracking for pedagogy.{tabType}: Map<String, [exerciseSchema]>
+    // is unreliable when the mutation is deep inside a nested subdocument (e.g.
+    // availabilityPeriod.startDate / endDate Date fields). A single
+    // markModified on the Map path is NOT enough — schedule updates were
+    // silently being dropped at save time. Mark each level of the nesting so
+    // Mongoose emits the SET ops for these Date fields. Every other handler in
+    // this file that touches an exercise inside the pedagogy Map already does
+    // this; updateExercise was the outlier.
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.availabilityPeriod`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.approvalWorkflow`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.evaluationMethod`);
+    // customDistributionBySection is a Mixed type (dynamic section-id keys).
+    // Mongoose can't auto-detect deep changes on Mixed fields, so without an
+    // explicit markModified the update payload is written into memory but
+    // .save() skips emitting it to Mongo — trainer edits vanish silently.
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.customDistributionBySection`);
     entity.updatedBy = req.user?.email || 'system';
     entity.updatedAt = new Date();
     await entity.save();
+
+    // Phase 6 — When the teacher opts in via saveToBank, clone the exercise's
+    // attached questions into the institution's Question Bank. Fire-and-forget
+    // so an occasional bank failure never breaks the exercise save response.
+    if (updatedExercise.saveToBank && Array.isArray(cleanExercise.questions) && cleanExercise.questions.length > 0) {
+      const institutionId = req.user?.institution?._id || req.user?.institution;
+      cloneQuestionsToBank({
+        institutionId,
+        exerciseId,
+        questions: cleanExercise.questions,
+        actorEmail: req.user?.email,
+      });
+    }
+
+    // Notify step-1 approvers only when the gate said so above. This handles
+    // both "settings" scope (fire immediately) and "settings_and_questions"
+    // scope (skipped here; fires from addQuestion once complete).
+    if (willNotifyStep1) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: updatedExercise.approvalWorkflow.steps[0],
+        exerciseName: updatedExercise.exerciseInformation?.exerciseName,
+        exerciseId: updatedExercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
+    }
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
@@ -1479,6 +2202,85 @@ exports.updateExercise = async (req, res) => {
     });
   }
 };
+// ── Is this pedagogy entry an EXERCISE? ──────────────────────────────────────
+// A pedagogy subcategory holds either a list of exercises or a container of
+// lecture resources — and Mongoose gives BOTH an `_id`, so "has an _id" cannot
+// tell them apart. That was the whole test, which is why an I Do lecture folder
+// ({ _id, description, files, folders, pages }) was listed in Grades as
+// "Unnamed Exercise" with 0 questions and 0 marks: a row nobody created, that
+// nobody could grade, and that no amount of deleting would remove.
+//
+// An exercise is identified by carrying at least one field only an exercise
+// has. Deliberately generous — a half-finished exercise still has the
+// exerciseInformation it got from step one of the wizard — so this hides
+// resource containers without hiding drafts.
+const EXERCISE_MARKER_KEYS = [
+  'exerciseType',
+  'exerciseInformation',
+  'questions',
+  'programmingSettings',
+  'availabilityPeriod',
+  'stepsSaved',
+];
+const looksLikeExercise = (value) =>
+  Boolean(value && value._id) &&
+  EXERCISE_MARKER_KEYS.some((key) => value[key] !== undefined && value[key] !== null);
+
+// ── Derived Assignment-list status ───────────────────────────────────────────
+// Mirror of the client's isExerciseComplete + getExerciseStatus in
+// ProblemSolving.tsx — keep the two in LOCKSTEP. Used only by getExercises'
+// paginated mode so the list's "Incomplete / Completed" status filter can run
+// server-side over the whole list, not just the visible page.
+const psIsExerciseComplete = (ex) => {
+  if (!ex.exerciseType) return false;
+  if (!(ex.exerciseInformation?.exerciseName || '').trim()) return false;
+  if (!ex.availabilityPeriod?.startDate) return false;
+
+  if (ex.isGraded !== false) {
+    if (ex.exerciseType === 'Combined') {
+      if ((ex.exerciseInformation?.totalMarksMCQ ?? 0) <= 0) return false;
+      if ((ex.exerciseInformation?.totalMarksProgramming ?? 0) <= 0) return false;
+    } else {
+      if ((ex.exerciseInformation?.totalMarks ?? 0) <= 0) return false;
+    }
+  }
+
+  const saved = Array.isArray(ex.stepsSaved) ? ex.stepsSaved : [];
+  const requiredSteps = ['Exercise Details', 'Question Configuration', 'Schedule', 'Notifications'];
+  if (ex.isGraded !== false) requiredSteps.push('Grade Settings');
+  return requiredSteps.every((step) => saved.includes(step));
+};
+
+const psExerciseStatus = (ex) => {
+  if (!psIsExerciseComplete(ex)) return 'Incomplete';
+  const questions = ex.questions ?? [];
+  const mcqCfg = ex.questionConfiguration?.mcqQuestionConfiguration ?? null;
+  const progCfg = ex.questionConfiguration?.programmingQuestionConfiguration ?? null;
+  const mcqCount = questions.filter((q) => q.questionType === 'mcq').length;
+  const progCount = questions.filter(
+    (q) => q.questionType === 'programming' || q.questionType === 'database' || q.questionType === 'others'
+  ).length;
+  let maxQ = 0, curQ = 0;
+  const progMaxOf = () => {
+    const counts = progCfg?.levelBasedCounts ?? progCfg?.selectionLevelCounts ?? {};
+    return progCfg?.questionConfigType === 'general'
+      ? (progCfg?.generalQuestionCount ?? 0)
+      : ((counts.easy ?? 0) + (counts.medium ?? 0) + (counts.hard ?? 0));
+  };
+  if (ex.exerciseType === 'MCQ') {
+    maxQ = mcqCfg?.totalMcqQuestions ?? 0;
+    curQ = mcqCount;
+  } else if (ex.exerciseType === 'Programming') {
+    maxQ = progMaxOf();
+    curQ = progCount;
+  } else if (ex.exerciseType === 'Combined') {
+    maxQ = (mcqCfg?.totalMcqQuestions ?? 0) + progMaxOf();
+    curQ = mcqCount + progCount;
+  }
+  if (maxQ > 0 && curQ < maxQ) return 'Incomplete';
+  return 'Completed';
+};
+
 exports.getExercises = async (req, res) => {
   try {
     const { type, id } = req.params;
@@ -1502,9 +2304,19 @@ exports.getExercises = async (req, res) => {
         message: [{ key: "error", value: `${type} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, section, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy || !entity.pedagogy[section]) {
+    if (!pedagogyRoot || !pedagogyRoot[section]) {
       return res.json({
         message: [{ key: "success", value: "No exercises found" }],
         data: {
@@ -1519,11 +2331,11 @@ exports.getExercises = async (req, res) => {
     // Get exercises for specific subcategory or all in section
     let exercises = [];
     if (subcategory) {
-      exercises = entity.pedagogy[section].get(subcategory) || [];
+      exercises = pedagogyRoot[section].get(subcategory) || [];
     } else {
       // Return all exercises from all subcategories in section
       const allExercises = [];
-      entity.pedagogy[section].forEach((exArray, subcat) => {
+      pedagogyRoot[section].forEach((exArray, subcat) => {
         if (Array.isArray(exArray)) {
           exArray.forEach(ex => {
             allExercises.push({
@@ -1534,6 +2346,45 @@ exports.getExercises = async (req, res) => {
         }
       });
       exercises = allExercises;
+    }
+
+    // ── Question-Bank-style optional pagination ──────────────────────────
+    // Passing `page` switches this endpoint into paginated mode: the list's
+    // filters (search / exerciseType / derived status) + newest-first sort
+    // run over the WHOLE list here, and one slice goes back with the pager
+    // totals. Without `page` the response below is the original full array,
+    // unchanged — every existing caller keeps working.
+    const { page, limit, search, exerciseType, status } = req.query;
+    if (page !== undefined) {
+      let rows = [...exercises];
+      rows.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      if (exerciseType) rows = rows.filter((ex) => ex.exerciseType === exerciseType);
+      if (status) rows = rows.filter((ex) => psExerciseStatus(ex) === status);
+      if (search) {
+        const q = String(search).toLowerCase();
+        rows = rows.filter((ex) =>
+          (ex.exerciseInformation?.exerciseName || '').toLowerCase().includes(q) ||
+          (ex.exerciseInformation?.exerciseId || '').toLowerCase().includes(q)
+        );
+      }
+      const itemsPerPage = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+      const totalItems = rows.length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
+      const currentPage = Math.min(Math.max(parseInt(page, 10) || 1, 1), totalPages);
+      const slice = rows.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
+      return res.json({
+        message: [{ key: "success", value: "Exercises retrieved successfully" }],
+        data: {
+          exercises: slice,
+          section: section,
+          subcategory: subcategory,
+          total: totalItems,
+          pagination: { currentPage, totalPages, totalItems, itemsPerPage },
+          entityType: type,
+          entityId: id
+        }
+      });
     }
 
     return res.json({
@@ -1597,23 +2448,33 @@ exports.deleteExercise = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy) {
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "Pedagogy structure not found for this entity" }]
       });
     }
 
     // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `Pedagogy tab '${tabType}' not found` }]
       });
     }
 
     // Convert Map to object if needed
-    let tabData = entity.pedagogy[tabType];
+    let tabData = pedagogyRoot[tabType];
     if (tabData instanceof Map) {
       tabData = Object.fromEntries(tabData);
     }
@@ -1653,15 +2514,15 @@ exports.deleteExercise = async (req, res) => {
     tabData[subcategory].splice(exerciseIndex, 1);
 
     // Convert back to Map if needed
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, tabData[subcategory]);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, tabData[subcategory]);
     } else {
-      entity.pedagogy[tabType][subcategory] = tabData[subcategory];
+      pedagogyRoot[tabType][subcategory] = tabData[subcategory];
     }
 
     // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
 
     // Update entity timestamps
     entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -1717,9 +2578,19 @@ exports.getSubcategories = async (req, res) => {
         message: [{ key: "error", value: `${type} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, section, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy || !entity.pedagogy[section]) {
+    if (!pedagogyRoot || !pedagogyRoot[section]) {
       return res.json({
         message: [{ key: "success", value: "No subcategories found" }],
         data: {
@@ -1731,11 +2602,11 @@ exports.getSubcategories = async (req, res) => {
     }
 
     // Get all subcategories
-    const subcategories = Array.from(entity.pedagogy[section].keys());
+    const subcategories = Array.from(pedagogyRoot[section].keys());
 
     // Count exercises in each subcategory
     const subcategoryDetails = subcategories.map(subcat => {
-      const exercises = entity.pedagogy[section].get(subcat) || [];
+      const exercises = pedagogyRoot[section].get(subcat) || [];
       return {
         name: subcat,
         exerciseCount: exercises.length,
@@ -2091,7 +2962,7 @@ exports.saveAssessmentRecording = async (req, res) => {
 
 async function uploadBufferToSupabase(buffer, filePath, mimeType) {
   try {
-    const { data, error } = await supabase.storage
+    const { data, error } = await storage
       .from("smartlms")
       .upload(filePath, buffer, {
         contentType: mimeType,
@@ -2104,7 +2975,7 @@ async function uploadBufferToSupabase(buffer, filePath, mimeType) {
     }
 
     // Generate public URL
-    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const imageUrl = publicUrlFor(filePath);
 
     return imageUrl;
 
@@ -2124,7 +2995,7 @@ async function uploadImageToSupabase(file, folderPath) {
     const filePath = `question/${folderPath}/${fileName}`;
 
     // Upload to Supabase
-    const { data, error } = await supabase.storage
+    const { data, error } = await storage
       .from("smartlms")
       .upload(filePath, file.data, {
         contentType: file.mimetype,
@@ -2137,7 +3008,7 @@ async function uploadImageToSupabase(file, folderPath) {
     }
 
     // Generate public URL
-    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const imageUrl = publicUrlFor(filePath);
 
     return imageUrl;
 
@@ -2215,6 +3086,21 @@ exports.addQuestion = async (req, res) => {
           });
         }
       } else if (qType === 'programming') {
+        // ── Link questions: the teacher pastes ONE external URL (e.g. a
+        // LeetCode problem) instead of authoring the question here. Only the
+        // link is validated — title/description/test cases don't exist for
+        // these. http/https only: the value becomes a student-facing iframe
+        // src, so javascript:/data: URLs must never pass.
+        if (questionData.isLinkQuestion === true) {
+          const _link = typeof questionData.questionLink === 'string' ? questionData.questionLink.trim() : '';
+          if (!/^https?:\/\/\S+$/i.test(_link)) {
+            return res.status(400).json({
+              message: [{ key: "error", value: `Question ${questionIndex}: A valid http(s) question link is required` }]
+            });
+          }
+          continue;
+        }
+
         // Validate Programming fields
         // title can be a plain string OR an array of content blocks (programmingQuestionTitle)
         const _progTitleText = typeof questionData.title === 'string' ? questionData.title.trim() : '';
@@ -2295,25 +3181,35 @@ exports.addQuestion = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy) {
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
     }
 
     // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
       });
     }
 
     // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
+    const tabData = pedagogyRoot[tabType] instanceof Map
+      ? Object.fromEntries(pedagogyRoot[tabType])
+      : pedagogyRoot[tabType];
 
     // Check if subcategory exists
     if (!tabData[subcategory]) {
@@ -2377,6 +3273,19 @@ exports.addQuestion = async (req, res) => {
       foundExercise.questions = [];
     }
 
+    // ── Quota gate ────────────────────────────────────────────────────────────
+    // The configuration decides how many questions this exercise may hold, per
+    // section, difficulty and source slice. Checked here — before anything is
+    // written — so a disabled button in the UI is a convenience, not the only
+    // thing standing between a quota of 2 and a batch of 50.
+    const quotaError = validateQuestionQuota(foundExercise, questionsToAdd);
+    if (quotaError) {
+      return res.status(400).json({
+        message: [{ key: "error", value: quotaError }],
+        quotaExceeded: true,
+      });
+    }
+
     const addedQuestions = [];
     const startSequence = foundExercise.questions.length;
 
@@ -2392,6 +3301,12 @@ exports.addQuestion = async (req, res) => {
         _id: questionId,
         questionType: qType,
         sectionId: questionData.sectionId || null, // ✅ ADD THIS LINE
+        // Question Source tag ('scratch-manual' / 'scratch-bank' / 'ai' /
+        // 'thirdParty') — drives the source badge and per-source quota math.
+        source: questionData.source || null,
+        // Origin Question Bank doc id — lets the picker and quota validator
+        // reject re-imports of the same bank question.
+        bankQuestionId: questionData.bankQuestionId || null,
         isActive: questionData.isActive !== undefined ? questionData.isActive : true,
         sequence: startSequence + i,
         createdAt: new Date(),
@@ -2528,18 +3443,8 @@ exports.addQuestion = async (req, res) => {
           sampleInput: questionData.sampleInput || '',
           sampleOutput: questionData.sampleOutput || '',
           score: questionData.score || 0,
-          constraints: Array.isArray(questionData.constraints) && questionData.constraints.length > 0
-            ? questionData.constraints.filter(c => c && c.trim())
-            : undefined,
-          hints: Array.isArray(questionData.hints) && questionData.hints.length > 0
-            ? questionData.hints.map((hint, index) => ({
-              _id: new mongoose.Types.ObjectId(),
-              hintText: hint.hintText || hint,
-              pointsDeduction: hint.pointsDeduction || 0,
-              isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-              sequence: hint.sequence || index
-            }))
-            : undefined,
+          constraints: normalizeConstraints(questionData.constraints),
+          hints: normalizeHints(questionData.hints),
           testCases: Array.isArray(questionData.testCases) && questionData.testCases.length > 0
             ? questionData.testCases.map((testCase, index) => ({
               _id: new mongoose.Types.ObjectId(),
@@ -2561,6 +3466,73 @@ exports.addQuestion = async (req, res) => {
             : undefined,
           timeLimit: questionData.timeLimit || 2000,
           memoryLimit: questionData.memoryLimit || 256,
+          // Per-question AI test case count. When the exercise's
+          // evaluationMethod is 'ai' + 'perQuestion' mode, the client sends a
+          // non-null value; otherwise it may be omitted / null. Clamped and
+          // filtered by the "Remove undefined fields" pass below.
+          aiTestCasesCount: (typeof questionData.aiTestCasesCount === 'number'
+              && questionData.aiTestCasesCount >= 0)
+            ? Math.min(50, Math.floor(questionData.aiTestCasesCount))
+            : (questionData.aiTestCasesCount === null ? null : undefined),
+          // Link questions: the external URL replaces the authored content;
+          // validated http(s)-only above. Absent → stripped by the
+          // remove-undefined pass.
+          isLinkQuestion: questionData.isLinkQuestion === true ? true : undefined,
+          questionLink: (questionData.isLinkQuestion === true
+              && typeof questionData.questionLink === 'string'
+              && /^https?:\/\/\S+$/i.test(questionData.questionLink.trim()))
+            ? questionData.questionLink.trim()
+            : undefined,
+          // Code Setup — starterCode ships to the student attempt UI;
+          // solutionCode is author-only (stripped for students by
+          // testCaseVisibility.js on every pedagogy read). Link questions
+          // carry neither.
+          starterCode: questionData.isLinkQuestion === true
+            ? undefined
+            : normalizeCodeSetupValue(questionData.starterCode),
+          solutionCode: questionData.isLinkQuestion === true
+            ? undefined
+            : normalizeCodeSetupValue(questionData.solutionCode),
+          codeSetupLanguage: (questionData.isLinkQuestion !== true
+              && typeof questionData.codeSetupLanguage === 'string'
+              && questionData.codeSetupLanguage)
+            ? questionData.codeSetupLanguage
+            : undefined,
+          // ── Execution Setup — Function/Full Program + Blank/Generated/
+          // Custom. Persist so re-opening the question editor restores the
+          // exact choice the teacher last saved; before this the schema
+          // silently dropped these fields (they weren't declared) and the
+          // form always fell back to Blank Editor. Link questions carry
+          // none of these. ──
+          executionType: (questionData.isLinkQuestion !== true
+              && (questionData.executionType === 'function' || questionData.executionType === 'fullProgram'))
+            ? questionData.executionType
+            : undefined,
+          functionContract: (questionData.isLinkQuestion !== true
+              && questionData.functionContract && typeof questionData.functionContract === 'object')
+            ? questionData.functionContract
+            : undefined,
+          startingExperience: (questionData.isLinkQuestion !== true
+              && (questionData.startingExperience === 'blank'
+                  || questionData.startingExperience === 'generated'
+                  || questionData.startingExperience === 'custom'))
+            ? questionData.startingExperience
+            : undefined,
+          // ── Author-provided taxonomy (2026-08-30 UI redesign) ──
+          // `category` is a single preset string from the client-side
+          // QUESTION_CATEGORIES list, or '' / omitted for uncategorised.
+          // `tags` is a small array of short strings. Both persist through
+          // the schema's `strict: false` (no schema change needed); the
+          // client reads them back via `loadQuestionIntoForm`. The Remove
+          // undefined pass below drops them when the client sent nothing.
+          category: (typeof questionData.category === 'string' && questionData.category.trim())
+            ? questionData.category.trim()
+            : undefined,
+          tags: Array.isArray(questionData.tags) && questionData.tags.length > 0
+            ? questionData.tags
+                .filter(t => typeof t === 'string' && t.trim())
+                .map(t => t.trim())
+            : undefined,
         });
 
         // Remove undefined fields
@@ -2594,18 +3566,13 @@ exports.addQuestion = async (req, res) => {
           points: questionData.score || questionData.points || 0,
           isDatabase: true,
           moduleType: 'Database',
-          constraints: Array.isArray(questionData.constraints)
-            ? questionData.constraints.filter(c => c && c.trim())
-            : [],
-          hints: Array.isArray(questionData.hints) && questionData.hints.length > 0
-            ? questionData.hints.map((hint, index) => ({
-              _id: new mongoose.Types.ObjectId(),
-              hintText: hint.hintText || hint,
-              pointsDeduction: hint.pointsDeduction || 0,
-              isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-              sequence: hint.sequence || index,
-            }))
-            : undefined,
+          constraints: normalizeConstraints(questionData.constraints),
+          hints: normalizeHints(questionData.hints),
+          // Code Setup — starterCode ships to the student attempt UI;
+          // solutionCode is author-only (stripped for students by
+          // testCaseVisibility.js on every pedagogy read).
+          starterCode: typeof questionData.starterCode === 'string' ? questionData.starterCode : undefined,
+          solutionCode: typeof questionData.solutionCode === 'string' ? questionData.solutionCode : undefined,
         });
       } else if (qType === 'others') {
         // Build othersDescription object with text, html, images, and attachments
@@ -2717,6 +3684,11 @@ exports.addQuestion = async (req, res) => {
           attachmentsDetails: othersDescription.attachments.map(a => ({ name: a.name, mimeType: a.mimeType }))
         });
       }
+      // Stamp creator + initial approval so the approver-query notification
+      // has a recipient and per-step approval starts in 'pending'.
+      newQuestion.createdBy = req.user?._id || req.user?.id || null;
+      newQuestion.createdByEmail = req.user?.email || '';
+      if (!newQuestion.approval) newQuestion.approval = { status: 'pending', queries: [] };
       // Add question to exercise
       foundExercise.questions.push(newQuestion);
       addedQuestions.push({
@@ -2728,17 +3700,35 @@ exports.addQuestion = async (req, res) => {
     // Update the exercise in the array
     exercises[foundExerciseIndex] = foundExercise;
 
+    // ── Deferred approval-notify for "settings_and_questions" scope ────────
+    // If the exercise's approvalScope was "settings_and_questions", the
+    // step-1 notification was deliberately skipped at create-time. Now that
+    // questions have been added, re-check: if the exercise just became
+    // fully configured, stamp notifiedAt (idempotent) and fire the notify
+    // after save.
+    const questionAddNotify = shouldFireStep1Notification(foundExercise);
+    if (questionAddNotify) {
+      foundExercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.approvalWorkflow`);
+    }
+    // Trainer added a question to a rejected assessment — flip the flag so
+    // the approver's UI shows "Approve" (not "Approve anyway").
+    if (foundExercise?.approvalWorkflow?.overallStatus === 'rejected') {
+      foundExercise.approvalWorkflow.editedSinceReject = true;
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.approvalWorkflow`);
+    }
+
     // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, exercises);
     } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+      pedagogyRoot[tabType][subcategory] = exercises;
     }
 
     // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
 
     // Update timestamps
     entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -2746,6 +3736,21 @@ exports.addQuestion = async (req, res) => {
 
     // Save entity
     await entity.save();
+
+    // ── Fire deferred approval notify (best-effort, non-blocking) ──────────
+    if (questionAddNotify) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: foundExercise.approvalWorkflow.steps[0],
+        exerciseName: foundExercise.exerciseInformation?.exerciseName,
+        exerciseId: foundExercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep (deferred) failed:', e.message));
+    }
 
     // Prepare response data
     const responseData = {
@@ -2882,8 +3887,20 @@ exports.updateQuestion = async (req, res) => {
         }
       }
     } else if (questionTypeValue === 'programming') {
+      // Link questions: the URL is the whole question — an empty authored
+      // body is the NORMAL state, not an error (mirror of the add path).
+      const _isLinkUpdate = updateData.isLinkQuestion === true;
+      if (_isLinkUpdate) {
+        const _lnk = typeof updateData.questionLink === 'string' ? updateData.questionLink.trim() : '';
+        if (!/^https?:\/\/\S+$/i.test(_lnk)) {
+          return res.status(400).json({
+            message: [{ key: "error", value: "A valid http(s) question link is required" }]
+          });
+        }
+      }
+
       // Validate Programming fields if they are being updated
-      if (updateData.title !== undefined) {
+      if (!_isLinkUpdate && updateData.title !== undefined) {
         if (!updateData.title || !updateData.title.trim()) {
           return res.status(400).json({
             message: [{ key: "error", value: "Programming question title cannot be empty" }]
@@ -2892,7 +3909,7 @@ exports.updateQuestion = async (req, res) => {
       }
 
       // Check if description is being updated and validate
-      if (updateData.description !== undefined) {
+      if (!_isLinkUpdate && updateData.description !== undefined) {
         let descriptionText = '';
         if (Array.isArray(updateData.description)) {
           // New format: ProgContentBlock[] array
@@ -2953,25 +3970,35 @@ exports.updateQuestion = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy) {
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
     }
 
     // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
       });
     }
 
     // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
+    const tabData = pedagogyRoot[tabType] instanceof Map
+      ? Object.fromEntries(pedagogyRoot[tabType])
+      : pedagogyRoot[tabType];
 
     // Check if subcategory exists
     if (!tabData[subcategory]) {
@@ -3062,6 +4089,11 @@ if (updateData.isActive !== undefined) {
 }
 if (updateData.sectionId !== undefined) {
   updatedQuestion.sectionId = updateData.sectionId; // ✅ ADD THIS
+}
+// Question Source tag — only overwrite when the client sends a real value so
+// legacy edit paths (no source in payload) can't wipe an existing tag.
+if (updateData.source) {
+  updatedQuestion.source = updateData.source;
 }
 
     // Update based on question type
@@ -3214,24 +4246,12 @@ if (updateData.sectionId !== undefined) {
 
       // Update constraints if provided
       if (updateData.constraints !== undefined) {
-        updatedQuestion.constraints = Array.isArray(updateData.constraints) && updateData.constraints.length > 0
-          ? updateData.constraints.filter(c => c && c.trim())
-          : undefined;
+        updatedQuestion.constraints = normalizeConstraints(updateData.constraints);
       }
 
       // Update hints if provided
       if (updateData.hints !== undefined) {
-        if (Array.isArray(updateData.hints) && updateData.hints.length > 0) {
-          updatedQuestion.hints = updateData.hints.map((hint, index) => ({
-            _id: hint._id || new mongoose.Types.ObjectId(),
-            hintText: hint.hintText || hint,
-            pointsDeduction: hint.pointsDeduction || 0,
-            isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-            sequence: hint.sequence || index
-          }));
-        } else {
-          updatedQuestion.hints = undefined;
-        }
+        updatedQuestion.hints = normalizeHints(updateData.hints, { keepIds: true });
       }
 
       // Update test cases if provided
@@ -3272,6 +4292,76 @@ if (updateData.sectionId !== undefined) {
       if (updateData.memoryLimit !== undefined) {
         updatedQuestion.memoryLimit = updateData.memoryLimit;
       }
+
+      // Per-question AI test case count — clamped [0, 50]; null accepted
+      // (means "not set", falls back to exercise count at Submit time).
+      if (updateData.aiTestCasesCount !== undefined) {
+        const raw = updateData.aiTestCasesCount;
+        if (raw === null) {
+          updatedQuestion.aiTestCasesCount = null;
+        } else if (typeof raw === 'number' && raw >= 0) {
+          updatedQuestion.aiTestCasesCount = Math.min(50, Math.floor(raw));
+        }
+      }
+
+      // Link questions — same http(s)-only sanitising as the add path (the
+      // value becomes a student-facing iframe src).
+      if (updateData.isLinkQuestion !== undefined) {
+        updatedQuestion.isLinkQuestion = updateData.isLinkQuestion === true;
+      }
+      if (updateData.questionLink !== undefined) {
+        const link = typeof updateData.questionLink === 'string' ? updateData.questionLink.trim() : '';
+        updatedQuestion.questionLink = /^https?:\/\/\S+$/i.test(link) ? link : '';
+      }
+
+      // Code Setup — starterCode ships to the student attempt UI; solutionCode
+      // is author-only (stripped for students by testCaseVisibility.js on
+      // every pedagogy read). Switching a question to link mode clears both.
+      if (updatedQuestion.isLinkQuestion === true) {
+        updatedQuestion.starterCode = undefined;
+        updatedQuestion.solutionCode = undefined;
+      } else {
+        if (updateData.starterCode !== undefined) {
+          updatedQuestion.starterCode = normalizeCodeSetupValue(updateData.starterCode);
+        }
+        if (updateData.solutionCode !== undefined) {
+          updatedQuestion.solutionCode = normalizeCodeSetupValue(updateData.solutionCode);
+        }
+      }
+      if (updateData.codeSetupLanguage !== undefined) {
+        updatedQuestion.codeSetupLanguage = (typeof updateData.codeSetupLanguage === 'string' && updateData.codeSetupLanguage)
+          ? updateData.codeSetupLanguage
+          : undefined;
+      }
+      // Execution Setup — round-trip the Function/Full Program +
+      // Blank/Generated/Custom choice so the question editor loads back
+      // the way the teacher saved it. Link questions clear the trio.
+      if (updatedQuestion.isLinkQuestion === true) {
+        updatedQuestion.executionType = undefined;
+        updatedQuestion.functionContract = undefined;
+        updatedQuestion.startingExperience = undefined;
+      } else {
+        if (updateData.executionType !== undefined) {
+          updatedQuestion.executionType =
+            (updateData.executionType === 'function' || updateData.executionType === 'fullProgram')
+              ? updateData.executionType
+              : undefined;
+        }
+        if (updateData.functionContract !== undefined) {
+          updatedQuestion.functionContract =
+            (updateData.functionContract && typeof updateData.functionContract === 'object')
+              ? updateData.functionContract
+              : undefined;
+        }
+        if (updateData.startingExperience !== undefined) {
+          updatedQuestion.startingExperience =
+            (updateData.startingExperience === 'blank'
+              || updateData.startingExperience === 'generated'
+              || updateData.startingExperience === 'custom')
+              ? updateData.startingExperience
+              : undefined;
+        }
+      }
     } else if (finalQuestionType === 'database') {
       // Update Database fields
       if (updateData.title !== undefined) {
@@ -3311,23 +4401,21 @@ if (updateData.sectionId !== undefined) {
       }
 
       if (updateData.constraints !== undefined) {
-        updatedQuestion.constraints = Array.isArray(updateData.constraints)
-          ? updateData.constraints.filter(c => c && c.trim())
-          : [];
+        updatedQuestion.constraints = normalizeConstraints(updateData.constraints);
       }
 
       if (updateData.hints !== undefined) {
-        if (Array.isArray(updateData.hints) && updateData.hints.length > 0) {
-          updatedQuestion.hints = updateData.hints.map((hint, index) => ({
-            _id: hint._id || new mongoose.Types.ObjectId(),
-            hintText: hint.hintText || hint,
-            pointsDeduction: hint.pointsDeduction || 0,
-            isPublic: hint.isPublic !== undefined ? hint.isPublic : true,
-            sequence: hint.sequence || index,
-          }));
-        } else {
-          updatedQuestion.hints = [];
-        }
+        updatedQuestion.hints = normalizeHints(updateData.hints, { keepIds: true });
+      }
+
+      // Code Setup — starterCode ships to the student attempt UI; solutionCode
+      // is author-only (stripped for students by testCaseVisibility.js on
+      // every pedagogy read).
+      if (updateData.starterCode !== undefined) {
+        updatedQuestion.starterCode = typeof updateData.starterCode === 'string' ? updateData.starterCode : '';
+      }
+      if (updateData.solutionCode !== undefined) {
+        updatedQuestion.solutionCode = typeof updateData.solutionCode === 'string' ? updateData.solutionCode : '';
       }
 
       // Preserve database flags
@@ -3454,6 +4542,27 @@ if (updateData.sectionId !== undefined) {
         updatedQuestion.attachments = Array.isArray(updateData.attachments) ? updateData.attachments : [];
       }
     }
+
+    // ── Author-provided taxonomy (2026-08-30 UI redesign) ──
+    // `category` (single string) and `tags` (short array of strings) are
+    // set from the Question details section of the Programming form. Kept
+    // outside the type-specific blocks so they persist across every
+    // question type as those forms adopt the same UI. `undefined` = client
+    // didn't send the field, so leave the existing value alone; empty
+    // string or empty array = teacher explicitly cleared it.
+    if (updateData.category !== undefined) {
+      updatedQuestion.category = typeof updateData.category === 'string'
+        ? updateData.category.trim()
+        : '';
+    }
+    if (updateData.tags !== undefined) {
+      updatedQuestion.tags = Array.isArray(updateData.tags)
+        ? updateData.tags
+            .filter(t => typeof t === 'string' && t.trim())
+            .map(t => t.trim())
+        : [];
+    }
+
     // Update timestamp
     updatedQuestion.updatedAt = new Date();
 
@@ -3464,6 +4573,12 @@ if (updateData.sectionId !== undefined) {
       }
     });
 
+    // Flip the "trainer touched this rejected question" marker so the
+    // approver's UI re-enables Approve/Reject on this row.
+    if (updatedQuestion?.approval?.status === 'rejected') {
+      updatedQuestion.approval.editedSinceReject = true;
+    }
+
     // Update the question in the array
     foundExercise.questions[questionIndex] = updatedQuestion;
 
@@ -3471,17 +4586,55 @@ if (updateData.sectionId !== undefined) {
     exercises[foundExerciseIndex] = foundExercise;
 
     // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, exercises);
     } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+      pedagogyRoot[tabType][subcategory] = exercises;
     }
 
     // Mark as modified
-    entity.markModified(`pedagogy.${tabType}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions.${questionIndex}`);
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.questions.${questionIndex}`);
+
+    // ── Rerun tracking: if this edit touches a scoring-relevant field AND at
+    // least one student has already submitted an answer to this question, flag
+    // the question so the Rerun UI's "Recently edited" filter surfaces it. The
+    // flag is cleared by the rerun endpoint on successful batch completion.
+    // False positives (unchanged values that just pass through the payload)
+    // are acceptable — the worst case is a rerun that produces identical
+    // scores, which is harmless.
+    try {
+      const isProgramming = (updatedQuestion.questionType === 'programming'
+        || (updatedQuestion.testCases && updatedQuestion.testCases.length > 0));
+      const SCORING_FIELDS = ['testCases','sampleInput','sampleOutput','expectedOutput','constraints','score'];
+      const touchedScoring = SCORING_FIELDS.some(f => Object.prototype.hasOwnProperty.call(updateData, f));
+      if (isProgramming && touchedScoring) {
+        // Cheap existence check: any User doc with a submission for this
+        // question in this course? If so, flag.
+        const User = require('../../../models/UserModel');
+        const submissionExists = await User.exists({
+          'courses.answers.I_Do': { $exists: true },
+          $or: [
+            { 'courses.answers.I_Do': { $exists: true } },
+            { 'courses.answers.We_Do': { $exists: true } },
+            { 'courses.answers.You_Do': { $exists: true } },
+          ],
+          [`courses.answers.${tabType}`]: { $exists: true },
+        });
+        if (submissionExists) {
+          // A more precise check would walk the Map to confirm THIS questionId
+          // is present, but the coarse-grained check is cheap and the false-
+          // positive risk (flag set when no submission for THIS question yet
+          // exists) just means a harmless zero-op rerun.
+          updatedQuestion.lastEditedAfterSubmissionAt = new Date();
+        }
+      }
+    } catch (flagErr) {
+      // Flag setting is best-effort — never block a successful question save.
+      console.warn('[updateQuestion] lastEditedAfterSubmissionAt hook failed:', flagErr.message);
+    }
 
     // Update timestamps
     entity.updatedBy = req.user?.email || "roobankr5@gmail.com";
@@ -3578,8 +4731,20 @@ exports.getQuestions = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    // Id-only lookup with no section in the request — `tabType` does not
+    // exist in this handler's scope (referencing it threw a ReferenceError
+    // and every questions-get call 500'd). Search the caller's batch
+    // container first, then the shared one, like getExerciseById.
+    const searchScopes = await resolveSearchScopes(entity, req);
 
-    if (!entity.pedagogy) {
+    if (searchScopes.length === 0) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
@@ -3591,13 +4756,14 @@ exports.getQuestions = async (req, res) => {
     let foundSubcategory = null;
 
     // Search through all tab types for the exercise
+    for (const scope of searchScopes) {
     for (const tabType of validTabTypes) {
-      if (!entity.pedagogy[tabType]) continue;
+      if (!scope.container[tabType]) continue;
 
       // Convert Map to object if needed
-      const tabData = entity.pedagogy[tabType] instanceof Map
-        ? Object.fromEntries(entity.pedagogy[tabType])
-        : entity.pedagogy[tabType];
+      const tabData = scope.container[tabType] instanceof Map
+        ? Object.fromEntries(scope.container[tabType])
+        : scope.container[tabType];
 
       // Search through all subcategories in this tabType
       for (const [subcategory, exercises] of Object.entries(tabData)) {
@@ -3617,17 +4783,20 @@ exports.getQuestions = async (req, res) => {
       }
       if (foundExercise) break; // Stop searching if found
     }
+    if (foundExercise) break; // batch copy wins — skip the shared scope
+    }
 
     if (!foundExercise) {
       console.error(`❌ Exercise with ID "${exerciseId}" not found in ${type} "${entity.title || entity.name}"`);
 
       // Log available exercises for debugging
       const availableExercises = [];
+      searchScopes.forEach(scope => {
       validTabTypes.forEach(tabType => {
-        if (entity.pedagogy[tabType]) {
-          const tabData = entity.pedagogy[tabType] instanceof Map
-            ? Object.fromEntries(entity.pedagogy[tabType])
-            : entity.pedagogy[tabType];
+        if (scope.container[tabType]) {
+          const tabData = scope.container[tabType] instanceof Map
+            ? Object.fromEntries(scope.container[tabType])
+            : scope.container[tabType];
 
           Object.entries(tabData).forEach(([subcat, exercises]) => {
             if (Array.isArray(exercises)) {
@@ -3645,6 +4814,7 @@ exports.getQuestions = async (req, res) => {
             }
           });
         }
+      });
       });
 
       return res.status(404).json({
@@ -3709,7 +4879,7 @@ exports.getQuestions = async (req, res) => {
       compilerSettings: foundExercise.compilerSettings || {},
       availabilityPeriod: foundExercise.availabilityPeriod || {},
       questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
+      evaluationMethod: foundExercise.evaluationMethod || {},
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {}, // Include security settings
@@ -3780,8 +4950,19 @@ exports.getQuestionById = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    // Id-only lookup — same ReferenceError fix as getQuestions above:
+    // there is no `tabType` in this handler's scope, so use the search-scope
+    // helper (batch container first, shared after).
+    const searchScopes = await resolveSearchScopes(entity, req);
 
-    if (!entity.pedagogy) {
+    if (searchScopes.length === 0) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
@@ -3795,13 +4976,14 @@ exports.getQuestionById = async (req, res) => {
     let questionIndex = -1;
 
     // Search through all tab types for the exercise and question
+    for (const scope of searchScopes) {
     for (const tabType of validTabTypes) {
-      if (!entity.pedagogy[tabType]) continue;
+      if (!scope.container[tabType]) continue;
 
       // Convert Map to object if needed
-      const tabData = entity.pedagogy[tabType] instanceof Map
-        ? Object.fromEntries(entity.pedagogy[tabType])
-        : entity.pedagogy[tabType];
+      const tabData = scope.container[tabType] instanceof Map
+        ? Object.fromEntries(scope.container[tabType])
+        : scope.container[tabType];
 
       // Search through all subcategories in this tabType
       for (const [subcategory, exercises] of Object.entries(tabData)) {
@@ -3833,6 +5015,8 @@ exports.getQuestionById = async (req, res) => {
         if (foundQuestion) break;
       }
       if (foundQuestion) break; // Stop searching if found
+    }
+    if (foundQuestion) break; // batch copy wins — skip the shared scope
     }
 
     if (!foundExercise) {
@@ -3887,7 +5071,7 @@ exports.getQuestionById = async (req, res) => {
       compilerSettings: foundExercise.compilerSettings || {},
       availabilityPeriod: foundExercise.availabilityPeriod || {},
       questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
+      evaluationMethod: foundExercise.evaluationMethod || {},
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {}, // Include security settings
@@ -4007,25 +5191,35 @@ exports.deleteQuestion = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy) {
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
     }
 
     // Check if tabType exists
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
       });
     }
 
     // Convert Map to object if needed
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
+    const tabData = pedagogyRoot[tabType] instanceof Map
+      ? Object.fromEntries(pedagogyRoot[tabType])
+      : pedagogyRoot[tabType];
 
     // Check if subcategory exists
     if (!tabData[subcategory]) {
@@ -4127,15 +5321,15 @@ exports.deleteQuestion = async (req, res) => {
     exercises[foundExerciseIndex] = foundExercise;
 
     // Update the entity's pedagogy structure
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, exercises);
     } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+      pedagogyRoot[tabType][subcategory] = exercises;
     }
 
     // Mark as modified
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${foundExerciseIndex}.questions`);
 
     // Update timestamps
     entity.updatedBy = req.user?.email || "system";
@@ -4164,7 +5358,7 @@ exports.deleteQuestion = async (req, res) => {
       compilerSettings: foundExercise.compilerSettings || {},
       availabilityPeriod: foundExercise.availabilityPeriod || {},
       questionBehavior: foundExercise.questionBehavior || {},
-      evaluationSettings: foundExercise.evaluationSettings || {},
+      evaluationMethod: foundExercise.evaluationMethod || {},
       groupSettings: foundExercise.groupSettings || {},
       scoreSettings: foundExercise.scoreSettings || {},
       securitySettings: foundExercise.securitySettings || {},
@@ -4267,7 +5461,12 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    const userCourse = user.courses.find(c =>
+    // `courses` is absent entirely on accounts that were never enrolled — and
+    // .lean() returns the raw document, so the schema's [] default is NOT
+    // applied. Reading .find() straight off it threw a TypeError into the
+    // outer catch and answered a 500 "Internal server error", when the honest
+    // answer is the same 404 an enrolled-elsewhere user already gets.
+    const userCourse = (user.courses || []).find(c =>
       c.courseId && c.courseId.toString() === courseId
     );
 
@@ -4289,7 +5488,9 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
     console.log(`\n🔍 SEARCHING USER ANSWERS...`);
 
     const searchCategories = category ? [category] : ['I_Do', 'We_Do', 'You_Do'];
-    const searchSubcategories = subcategory ? [subcategory] : ['practical', 'assignments', 'assessments', 'assesments', 'homework', 'practice', 'project_development'];
+    // 'assignment' / 'assesment' (singular) are the keys the We Do and You Do
+    // screens actually write — omitting them made this lookup miss real data.
+    const searchSubcategories = subcategory ? [subcategory] : ['practical', 'assignments', 'assignment', 'assessments', 'assesments', 'assesment', 'homework', 'practice', 'project_development'];
 
     let answersData = userCourse.answers;
 
@@ -4440,7 +5641,8 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       const targetIdStr = targetExerciseId.toString ? targetExerciseId.toString() : String(targetExerciseId);
 
       const categories = ['I_Do', 'We_Do', 'You_Do'];
-      const subcategories = ['practical', 'assignments', 'assessments', 'assesments', 'homework', 'practice', 'project_development'];
+      // Includes the singular 'assignment' / 'assesment' keys the UI writes.
+      const subcategories = ['practical', 'assignments', 'assignment', 'assessments', 'assesments', 'assesment', 'homework', 'practice', 'project_development'];
 
       for (const cat of categories) {
         if (pedagogy[cat]) {
@@ -4475,6 +5677,19 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
       return null;
     };
 
+    // ── Resources by Batch ──────────────────────────────────────────────────
+    // One lookup for the whole scan below: which batch this caller sees, and
+    // the course config that says whether We Do / You Do are even batch-wise.
+    // Each node is then flattened to that batch before it is searched, so the
+    // walk stays batch-agnostic and finds batch-wise exercises the same way it
+    // finds shared ones.
+    const batchCourseForScan = await CourseStructure.findById(courseId)
+      .select(COURSE_BATCH_FIELDS)
+      .lean();
+    const scanBatchId = batchCourseForScan
+      ? resolveViewerBatchId(batchCourseForScan, req.user, readRequestedBatch(req))
+      : "";
+
     const entityModels = [
       { name: 'Module1', model: Module1 },
       { name: 'SubModule1', model: SubModule1 },
@@ -4485,6 +5700,11 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
     for (const { name, model } of entityModels) {
       try {
         const entities = await model.find({ courses: courseId }).lean();
+        // Flatten each node to the caller's batch. Safe to mutate — these are
+        // .lean() copies, not live documents.
+        if (batchCourseForScan) {
+          entities.forEach(e => scopeNodePedagogy(e, batchCourseForScan, scanBatchId));
+        }
         console.log(`  Checking ${name}: ${entities.length} entities`);
 
         for (const entity of entities) {
@@ -4631,11 +5851,24 @@ exports.getUserExerciseGradeAnalytics = async (req, res) => {
         console.log(`\n⚠️ Exercise question has no ID: "${displayTitle}"`);
       }
 
-      const questionMaxScore = exerciseQuestion.mcqQuestionScore ||
-        exerciseQuestion.score ||
-        10;
-      const userScore = userAttempt?.score || 0;
-      const totalScore = userAttempt?.totalScore || questionMaxScore;
+      // Scores are COERCED, not trusted. Several writers persist these as
+      // strings ("4"), and a string here poisoned the running totals below:
+      // `reduce((sum, q) => sum + q.userScore, 0)` concatenates instead of
+      // adding, so two questions worth 4 summed to the string "044" and the
+      // `.toFixed(2)` that followed threw "totalUserScore.toFixed is not a
+      // function" — a 500 on a request where every lookup had succeeded.
+      // Division (`userScore / totalScore`) coerced silently, which is why
+      // only the sums broke.
+      const toNum = (v, fallback = 0) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fallback;
+      };
+      const questionMaxScore = toNum(
+        exerciseQuestion.mcqQuestionScore || exerciseQuestion.score || 10,
+        10,
+      );
+      const userScore = toNum(userAttempt?.score);
+      const totalScore = toNum(userAttempt?.totalScore || questionMaxScore, questionMaxScore);
       const percentage = totalScore > 0 ? (userScore / totalScore) * 100 : 0;
 
       return {
@@ -4853,27 +6086,44 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
 
     // Get modules
     const modules = await Module1.find({ courses: courseId })
-      .select('_id title description level duration pedagogy')
+      .select('_id title description level duration pedagogy batchPedagogy')
       .lean();
     modules.forEach(mod => allEntities.push({ ...mod, type: 'module' }));
 
     // Get submodules
     const subModules = await SubModule1.find({ courses: courseId })
-      .select('_id title description level duration pedagogy')
+      .select('_id title description level duration pedagogy batchPedagogy')
       .lean();
     subModules.forEach(sub => allEntities.push({ ...sub, type: 'submodule' }));
 
     // Get topics
     const topics = await Topic1.find({ courses: courseId })
-      .select('_id title description level duration pedagogy')
+      .select('_id title description level duration pedagogy batchPedagogy')
       .lean();
     topics.forEach(topic => allEntities.push({ ...topic, type: 'topic' }));
 
     // Get subtopics
     const subTopics = await SubTopic1.find({ courses: courseId })
-      .select('_id title description level duration pedagogy')
+      .select('_id title description level duration pedagogy batchPedagogy')
       .lean();
     subTopics.forEach(st => allEntities.push({ ...st, type: 'subtopic' }));
+
+    // ── Resources by Batch ──────────────────────────────────────────────────
+    // Flatten every node to ONE batch's view before any exercise is read out.
+    // Doing it here, on the whole collected set, keeps the extraction loop
+    // below batch-agnostic — it walks `entity.pedagogy` exactly as it always
+    // did, and that now holds the caller's batch's We Do / You Do exercises
+    // when those elements are batch-wise.
+    //
+    // Students get their enrolled batch whatever they send; staff get the one
+    // selected in the Resources page batch strip.
+    const batchCourse = await CourseStructure.findById(courseId)
+      .select(COURSE_BATCH_FIELDS)
+      .lean();
+    if (batchCourse) {
+      const viewerBatchId = resolveViewerBatchId(batchCourse, req.user, readRequestedBatch(req));
+      allEntities.forEach(entity => scopeNodePedagogy(entity, batchCourse, viewerBatchId));
+    }
 
     // 4. Extract all exercises from all entities
     const allExercises = [];
@@ -4908,13 +6158,14 @@ exports.getCourseExercisesWithUserScores = async (req, res) => {
               exercisesArray = value;
             } else if (value.exercises && Array.isArray(value.exercises)) {
               exercisesArray = value.exercises;
-            } else if (value._id) {
-              // Single exercise object
+            } else if (looksLikeExercise(value)) {
+              // Single exercise object — NOT a bare `_id`, which a lecture
+              // resource container also has.
               exercisesArray = [value];
             }
 
             exercisesArray.forEach(exercise => {
-              if (exercise && exercise._id) {
+              if (looksLikeExercise(exercise)) {
                 allExercises.push({
                   ...exercise,
                   entity: {
@@ -5215,9 +6466,11 @@ exports.getCourseExercisesAdminView = async (req, res) => {
       });
     }
 
-    // 1. Get course details
+    // 1. Get course details. Combined with the batch-scoping select below —
+    // this handler used to run TWO separate CourseStructure.findById(courseId)
+    // queries for the same document; one select covers both purposes now.
     const course = await CourseStructure.findById(courseId)
-      .select('courseName courseCode description startDate endDate status')
+      .select('courseName courseCode description startDate endDate status ' + COURSE_BATCH_FIELDS)
       .lean();
 
     if (!course) {
@@ -5226,39 +6479,39 @@ exports.getCourseExercisesAdminView = async (req, res) => {
         message: "Course not found"
       });
     }
+    const batchCourse = course;
 
     console.log(`📚 Course found: ${course.courseName}`);
 
-    // 2. Get all entities for this course
+    // 2. Get all entities for this course. Four independent reads — Promise.all
+    // (no early-exit logic here to preserve, unlike the exercise-search loops
+    // in the other two handlers below).
     const allEntities = [];
-
-    // Get modules
-    const modules = await Module1.find({ courses: courseId })
-      .select('_id title description level duration orderIndex pedagogy')
-      .sort({ orderIndex: 1 })
-      .lean();
+    const nodeSelect = '_id title description level duration orderIndex pedagogy batchPedagogy';
+    const [modules, subModules, topics, subTopics] = await Promise.all([
+      Module1.find({ courses: courseId }).select(nodeSelect).sort({ orderIndex: 1 }).lean(),
+      SubModule1.find({ courses: courseId }).select(nodeSelect).sort({ orderIndex: 1 }).lean(),
+      Topic1.find({ courses: courseId }).select(nodeSelect).sort({ orderIndex: 1 }).lean(),
+      SubTopic1.find({ courses: courseId }).select(nodeSelect).sort({ orderIndex: 1 }).lean(),
+    ]);
     modules.forEach(mod => allEntities.push({ ...mod, type: 'module' }));
-
-    // Get submodules
-    const subModules = await SubModule1.find({ courses: courseId })
-      .select('_id title description level duration orderIndex pedagogy')
-      .sort({ orderIndex: 1 })
-      .lean();
     subModules.forEach(sub => allEntities.push({ ...sub, type: 'submodule' }));
-
-    // Get topics
-    const topics = await Topic1.find({ courses: courseId })
-      .select('_id title description level duration orderIndex pedagogy')
-      .sort({ orderIndex: 1 })
-      .lean();
     topics.forEach(topic => allEntities.push({ ...topic, type: 'topic' }));
-
-    // Get subtopics
-    const subTopics = await SubTopic1.find({ courses: courseId })
-      .select('_id title description level duration orderIndex pedagogy')
-      .sort({ orderIndex: 1 })
-      .lean();
     subTopics.forEach(st => allEntities.push({ ...st, type: 'subtopic' }));
+
+    // ── Resources by Batch ──────────────────────────────────────────────────
+    // Flatten every node to ONE batch's view before any exercise is read out.
+    // Doing it here, on the whole collected set, keeps the extraction loop
+    // below batch-agnostic — it walks `entity.pedagogy` exactly as it always
+    // did, and that now holds the caller's batch's We Do / You Do exercises
+    // when those elements are batch-wise.
+    //
+    // Students get their enrolled batch whatever they send; staff get the one
+    // selected in the Resources page batch strip.
+    if (batchCourse) {
+      const viewerBatchId = resolveViewerBatchId(batchCourse, req.user, readRequestedBatch(req));
+      allEntities.forEach(entity => scopeNodePedagogy(entity, batchCourse, viewerBatchId));
+    }
 
     console.log(`📦 Found ${allEntities.length} entities for course`);
 
@@ -5298,12 +6551,13 @@ exports.getCourseExercisesAdminView = async (req, res) => {
               exercisesArray = value;
             } else if (value.exercises && Array.isArray(value.exercises)) {
               exercisesArray = value.exercises;
-            } else if (value._id) {
+            } else if (looksLikeExercise(value)) {
+              // Same guard as above: an `_id` alone is not an exercise.
               exercisesArray = [value];
             }
 
             exercisesArray.forEach(exercise => {
-              if (exercise && exercise._id) {
+              if (looksLikeExercise(exercise)) {
                 allExercises.push({
                   ...exercise,
                   entity: {
@@ -5624,9 +6878,10 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
       });
     }
 
-    // 1. Get course details
+    // 1. Get course details. Combined with the batch-scoping select below —
+    // was two separate findById(courseId) queries for the same document.
     const course = await CourseStructure.findById(courseId)
-      .select('courseName courseCode description')
+      .select('courseName courseCode description ' + COURSE_BATCH_FIELDS)
       .lean();
 
     if (!course) {
@@ -5635,6 +6890,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         message: "Course not found"
       });
     }
+    const batchCourseForScan = course;
 
     // 2. Get exercise details to verify it exists and get grade settings
     let exerciseDetails = null;
@@ -5644,6 +6900,15 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     let exerciseName = '';
 
     // Search for exercise in all entity types
+    // ── Resources by Batch ──────────────────────────────────────────────────
+    // Which batch this caller sees, and the course config that says whether
+    // We Do / You Do are even batch-wise. Each node is then flattened to that
+    // batch before it is searched, so the walk stays batch-agnostic and finds
+    // batch-wise exercises the same way it finds shared ones.
+    const scanBatchId = batchCourseForScan
+      ? resolveViewerBatchId(batchCourseForScan, req.user, readRequestedBatch(req))
+      : "";
+
     const entityModels = [
       { name: 'Module1', model: Module1 },
       { name: 'SubModule1', model: SubModule1 },
@@ -5654,8 +6919,13 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     for (const { name, model } of entityModels) {
       try {
         const entities = await model.find({ courses: courseId })
-          .select('_id title pedagogy')
+          .select('_id title pedagogy batchPedagogy')
           .lean();
+        // Flatten each node to the caller's batch. Safe to mutate — these are
+        // .lean() copies, not live documents.
+        if (batchCourseForScan) {
+          entities.forEach(e => scopeNodePedagogy(e, batchCourseForScan, scanBatchId));
+        }
 
         for (const entity of entities) {
           if (entity.pedagogy) {
@@ -5707,8 +6977,12 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
 
                     // Calculate total max score
                     if (exercise.questions && Array.isArray(exercise.questions)) {
+                      // Same string-concatenation hazard as overallScore
+                      // below: mcqQuestionScore / score are String on a
+                      // number of records, so coerce before summing or the
+                      // Marks denominator comes back glued together too.
                       totalMaxScore = exercise.questions.reduce((sum, q) => {
-                        const qScore = q.mcqQuestionScore || q.score || 10;
+                        const qScore = Number(q.mcqQuestionScore ?? q.score) || 10;
                         return sum + qScore;
                       }, 0);
                     }
@@ -5737,26 +7011,19 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
 
     console.log(`✅ Exercise found: ${exerciseName}`);
 
-    // 3. Get all enrolled users for this course
-    const enrolledUsers = await User.find({
-      courses: { $exists: true, $ne: null }
+    // 3. Get all enrolled users for this course. Was an UNSCOPED
+    // User.find({courses: {$exists:true, $ne:null}}) — every user in the
+    // entire platform with any course progress, filtered down to this course
+    // in JS afterward. Scoping the query itself to the array-element match
+    // returns the identical final set (the JS filter below checks exactly
+    // this condition) without paying for every other tenant's users.
+    const enrolledInCourse = await User.find({
+      'courses.courseId': courseId
     })
       .select('_id firstName lastName email profile phone status createdAt role courses')
       .lean();
 
-    console.log(`👥 Found ${enrolledUsers.length} users with courses data`);
-
-    // Filter users who are enrolled in this specific course
-    const enrolledInCourse = enrolledUsers.filter(user => {
-      if (!user.courses || !Array.isArray(user.courses)) {
-        return false;
-      }
-      return user.courses.some(course =>
-        course && course.courseId && course.courseId.toString() === courseId
-      );
-    });
-
-    console.log(`📊 ${enrolledInCourse.length} users enrolled in course ${courseId}`);
+    console.log(`👥 ${enrolledInCourse.length} users enrolled in course ${courseId}`);
 
     // 4. Process each user to find their exercise progress with Pass/Fail
     const studentsWithProgress = await Promise.all(
@@ -5807,12 +7074,22 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
                 ex && ex.exerciseId && ex.exerciseId.toString() === exerciseId
               );
 
-              if (userExercise) {
+              // The same exercise can sit under two subcategory keys (an
+              // older Unlock filed an empty record under the label beside the
+              // real attempt under the map key). Keep the record that carries
+              // the student's answers rather than whichever came last.
+              if (userExercise && (!exerciseProgress ||
+                  (userExercise.questions || []).length >= (exerciseProgress.questions || []).length)) {
                 exerciseProgress = userExercise;
                 questionAttempts = userExercise.questions || [];
 
-                // Calculate overall score
-                overallScore = questionAttempts.reduce((sum, q) => sum + (q.score || 0), 0);
+                // Number(q.score) — several exercise records persist the
+                // per-question score as a String, and `0 + "5"` in JS is
+                // string CONCATENATION, so this reduce was emitting
+                // overallScore: "05555505050" (ten questions' scores glued
+                // together) instead of the sum, 35. That string then
+                // rendered verbatim in the Student List Marks column.
+                overallScore = questionAttempts.reduce((sum, q) => sum + (Number(q.score) || 0), 0);
 
                 // Calculate completion percentage
                 const totalQuestions = exerciseDetails.questions?.length || 0;
@@ -6156,9 +7433,14 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       });
     }
 
-    // 2. Get student details
+    // 2. Get student details. This handler used to run THREE separate
+    // User.findById(studentId) queries for the same document (display
+    // fields, then '.courses' twice more for the enrollment check and the
+    // answer lookup below) — one select covering all three uses. `courses`
+    // is never spread into the response (built field-by-field at the
+    // bottom), so carrying it here doesn't change the payload.
     const student = await User.findById(studentId)
-      .select('_id firstName lastName email profile status createdAt')
+      .select('_id firstName lastName email profile status createdAt courses')
       .lean();
 
     if (!student) {
@@ -6168,9 +7450,10 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       });
     }
 
-    // 3. Get course details
+    // 3. Get course details. Combined with the batch-scoping select below —
+    // was two separate findById(courseId) queries for the same document.
     const course = await CourseStructure.findById(courseId)
-      .select('courseName courseCode description')
+      .select('courseName courseCode description ' + COURSE_BATCH_FIELDS)
       .lean();
 
     if (!course) {
@@ -6179,13 +7462,10 @@ exports.getStudentExerciseQuestions = async (req, res) => {
         message: "Course not found"
       });
     }
+    const batchCourseForScan = course;
 
     // 4. Check if student is enrolled
-    const studentWithCourses = await User.findById(studentId)
-      .select('courses')
-      .lean();
-
-    const isEnrolled = studentWithCourses?.courses?.some(c =>
+    const isEnrolled = student.courses?.some(c =>
       c.courseId && c.courseId.toString() === courseId
     );
 
@@ -6201,6 +7481,15 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     let exerciseLocation = null;
 
     // Search in all entity types
+    // ── Resources by Batch ──────────────────────────────────────────────────
+    // Which batch this caller sees, and the course config that says whether
+    // We Do / You Do are even batch-wise. Each node is then flattened to that
+    // batch before it is searched, so the walk stays batch-agnostic and finds
+    // batch-wise exercises the same way it finds shared ones.
+    const scanBatchId = batchCourseForScan
+      ? resolveViewerBatchId(batchCourseForScan, req.user, readRequestedBatch(req))
+      : "";
+
     const entityModels = [
       { name: 'Module1', model: Module1 },
       { name: 'SubModule1', model: SubModule1 },
@@ -6211,8 +7500,13 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     for (const { name, model } of entityModels) {
       try {
         const entities = await model.find({ courses: courseId })
-          .select('_id title pedagogy')
+          .select('_id title pedagogy batchPedagogy')
           .lean();
+        // Flatten each node to the caller's batch. Safe to mutate — these are
+        // .lean() copies, not live documents.
+        if (batchCourseForScan) {
+          entities.forEach(e => scopeNodePedagogy(e, batchCourseForScan, scanBatchId));
+        }
 
         for (const entity of entities) {
           if (entity.pedagogy) {
@@ -6271,17 +7565,15 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     }
 
 
-    // 6. Get student's answers for this exercise
-    const studentWithAnswers = await User.findById(studentId)
-      .select('courses')
-      .lean();
-
+    // 6. Get student's answers for this exercise — reuses the `student` doc
+    // fetched in step 2 (was a third User.findById(studentId) for the same
+    // 'courses' field already selected there).
     let studentAnswers = [];
     let exerciseProgress = null;
     let foundInCategory = null;
 
-    if (studentWithAnswers?.courses) {
-      const userCourse = studentWithAnswers.courses.find(c =>
+    if (student.courses) {
+      const userCourse = student.courses.find(c =>
         c.courseId && c.courseId.toString() === courseId
       );
 
@@ -6343,6 +7635,31 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     // 8. Get exercise questions and combine with student answers
     const exerciseQuestions = exerciseDetails.questions || [];
 
+    // MCQ questions keep their text in `mcqQuestionTitle`, programming ones in
+    // `title` — reading only `title` meant every MCQ fell through to the
+    // "Question N" placeholder, so the grades Question List showed
+    // "Question 1, Question 2, …" instead of the actual wording, and a trainer
+    // could not tell which question a mark belonged to. `mcqQuestionTitle` is
+    // usually a string but can be an array of rich-content blocks (the
+    // authoring UI allows both), so flatten that to plain text.
+    // `mcqQuestionTitle` is an array of content blocks, each shaped
+    //   { id: "cb-text-…", type: "text", value: "Which data structure …" }
+    // — the wording lives in `value`. Non-text blocks (images and the like)
+    // carry no wording and are skipped so they cannot inject empty strings
+    // or "[object Object]" into the title.
+    const blockText = (b) => {
+      if (typeof b === 'string') return b;
+      if (!b || (b.type && b.type !== 'text')) return '';
+      return b.value ?? b.text ?? b.content ?? '';
+    };
+    const resolveQuestionTitle = (q, index) => {
+      const raw = q.mcqQuestionTitle ?? q.title ?? q.questionTitle;
+      const text = Array.isArray(raw)
+        ? raw.map(blockText).filter(Boolean).join(' ').trim()
+        : (typeof raw === 'string' ? raw.trim() : '');
+      return text || `Question ${index + 1}`;
+    };
+
     const questionsWithStudentAnswers = exerciseQuestions.map((question, index) => {
       const questionId = question._id?.toString();
       const studentAnswer = questionId ? studentAnswerMap.get(questionId) : null;
@@ -6351,14 +7668,23 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       const formattedQuestion = {
         _id: question._id,
         sequence: question.sequence || index + 1,
-        title: question.title || `Question ${index + 1}`,
+        title: resolveQuestionTitle(question, index),
         description: question.description || '',
         difficulty: question.difficulty || 'medium',
-        score: question.score || 10,
+        // Same split as the title above: an MCQ's per-question mark is
+        // `mcqQuestionScore`, so reading only `score` fell through to the
+        // default 10 and the Question List rendered "5/10" for questions
+        // actually worth 5 — disagreeing with both the Manage Exercise list
+        // and the 30/50 total on the Student List.
+        score: Number(question.mcqQuestionScore ?? question.score) || 10,
         timeLimit: question.timeLimit || 2000,
         memoryLimit: question.memoryLimit || 256,
         isActive: question.isActive !== false,
         createdAt: question.createdAt,
+        // Link questions — the admin viewer must know to show the URL
+        // instead of an empty authored body.
+        isLinkQuestion: question.isLinkQuestion === true,
+        questionLink: question.questionLink || '',
 
         // Student's attempt (if any)
         studentAttempt: studentAnswer ? {
@@ -6555,7 +7881,7 @@ async function uploadImageToSupabase(file, folderPath) {
     const filePath = `question/${folderPath}/${fileName}`;
 
     // Upload to Supabase
-    const { data, error } = await supabase.storage
+    const { data, error } = await storage
       .from("smartlms")
       .upload(filePath, file.data, {
         contentType: file.mimetype,
@@ -6568,7 +7894,7 @@ async function uploadImageToSupabase(file, folderPath) {
     }
 
     // Generate public URL
-    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const imageUrl = publicUrlFor(filePath);
 
     return imageUrl;
 
@@ -6748,7 +8074,9 @@ exports.addMCQQuestions = async (req, res) => {
         correctAnswers = question.mcqQuestionCorrectAnswers || [];
       } else if (isTextBased) {
         // For short_answer and essay, store the answer key in mcqQuestionCorrectAnswers
-        if (question.shortAnswer && typeof question.shortAnswer === 'string' && question.shortAnswer.trim()) {
+        if (question.mcqQuestionType === 'essay' && question.essayAnswer && typeof question.essayAnswer === 'string' && question.essayAnswer.trim()) {
+          correctAnswers = [question.essayAnswer.trim()];
+        } else if (question.shortAnswer && typeof question.shortAnswer === 'string' && question.shortAnswer.trim()) {
           correctAnswers = [question.shortAnswer.trim()];
         } else if (question.mcqQuestionCorrectAnswers && Array.isArray(question.mcqQuestionCorrectAnswers)) {
           correctAnswers = question.mcqQuestionCorrectAnswers;
@@ -6796,6 +8124,12 @@ exports.addMCQQuestions = async (req, res) => {
         _id: new mongoose.Types.ObjectId(),
         questionType: 'mcq',
         sectionId: question.sectionId || null,
+        // Question Source tag ('scratch-manual' / 'scratch-bank' / 'ai') —
+        // mirrors addQuestion; drives the source badge + per-source quotas.
+        source: question.source || null,
+        // Origin Question Bank doc id — mirrors addQuestion; drives
+        // duplicate-import rejection.
+        bankQuestionId: question.bankQuestionId || null,
         mcqQuestionTitle: processedTitle,
         mcqQuestionType: question.mcqQuestionType,
         mcqQuestionDifficulty: question.mcqQuestionDifficulty || undefined,
@@ -6835,9 +8169,12 @@ exports.addMCQQuestions = async (req, res) => {
       }
 
       if (question.mcqQuestionType === 'essay') {
-        processedQuestion.shortAnswer = (question.shortAnswer && typeof question.shortAnswer === 'string') 
-          ? question.shortAnswer.trim() 
-          : '';
+        // Sample/model answer used for auto-correction (word-overlap match)
+        processedQuestion.essayAnswer = (question.essayAnswer && typeof question.essayAnswer === 'string')
+          ? question.essayAnswer.trim()
+          : ((question.shortAnswer && typeof question.shortAnswer === 'string') ? question.shortAnswer.trim() : '');
+        // Keep legacy shortAnswer in sync for older readers
+        processedQuestion.shortAnswer = processedQuestion.essayAnswer;
       }
 
       if (question.mcqQuestionType === 'numeric') {
@@ -6876,22 +8213,32 @@ exports.addMCQQuestions = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
 
-    if (!entity.pedagogy) {
+
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
     }
 
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
       });
     }
 
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
+    const tabData = pedagogyRoot[tabType] instanceof Map
+      ? Object.fromEntries(pedagogyRoot[tabType])
+      : pedagogyRoot[tabType];
 
     if (!tabData[subcategory]) {
       return res.status(404).json({
@@ -6936,11 +8283,26 @@ exports.addMCQQuestions = async (req, res) => {
       exercise.questions = [];
     }
 
+    // Same server-side quota + duplicate-bank gate as addQuestion — this MCQ
+    // route is reachable from the assessment add-question flow, so it must
+    // enforce the same rules before anything is pushed.
+    const quotaError = validateQuestionQuota(exercise, processedQuestions);
+    if (quotaError) {
+      return res.status(400).json({
+        message: [{ key: "error", value: quotaError }],
+        quotaExceeded: true,
+      });
+    }
+
     const startSequence = exercise.questions.length;
     const addedQuestions = [];
 
     processedQuestions.forEach((question, index) => {
       question.sequence = startSequence + index;
+      // Stamp creator + initial approval for query notifications & per-step gate
+      question.createdBy = req.user?._id || req.user?.id || null;
+      question.createdByEmail = req.user?.email || '';
+      if (!question.approval) question.approval = { status: 'pending', queries: [] };
       exercise.questions.push(question);
       
       // Prepare response with safe title representation
@@ -6961,6 +8323,7 @@ exports.addMCQQuestions = async (req, res) => {
         sectionId: question.sectionId,
         mcqQuestionCorrectAnswers: question.mcqQuestionCorrectAnswers,
         shortAnswer: question.shortAnswer,
+        essayAnswer: question.essayAnswer,
         optionsCount: question.mcqQuestionOptions.length,
         mcqQuestionRequired: question.mcqQuestionRequired
       });
@@ -6968,18 +8331,46 @@ exports.addMCQQuestions = async (req, res) => {
 
     exercises[exerciseIndex] = exercise;
 
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
-    } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+    // ── Deferred approval-notify for "settings_and_questions" scope ────────
+    // Mirror of the check in the generic addQuestion handler: if the exercise
+    // just crossed the completeness threshold, fire step-1 now (idempotent
+    // via steps[0].notifiedAt).
+    const questionAddNotify = shouldFireStep1Notification(exercise);
+    if (questionAddNotify) {
+      exercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.approvalWorkflow`);
+    }
+    if (exercise?.approvalWorkflow?.overallStatus === 'rejected') {
+      exercise.approvalWorkflow.editedSinceReject = true;
+      entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.approvalWorkflow`);
     }
 
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${exerciseIndex}.questions`);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, exercises);
+    } else {
+      pedagogyRoot[tabType][subcategory] = exercises;
+    }
+
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.questions`);
     entity.updatedAt = new Date();
     entity.updatedBy = req.user?.email || "system";
 
     await entity.save();
+
+    if (questionAddNotify) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: exercise.approvalWorkflow.steps[0],
+        exerciseName: exercise.exerciseInformation?.exerciseName,
+        exerciseId: exercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep (deferred) failed:', e.message));
+    }
 
     const totalMCQMarks = processedQuestions.reduce((sum, q) => sum + (q.mcqQuestionScore || 0), 0);
 
@@ -7105,22 +8496,32 @@ exports.updateMCQQuestion = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
 
-    if (!entity.pedagogy) {
+
+    if (!pedagogyRoot) {
       return res.status(404).json({
         message: [{ key: "error", value: "No pedagogy structure found in this entity" }]
       });
     }
 
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         message: [{ key: "error", value: `No ${tabType} section found in pedagogy` }]
       });
     }
 
-    const tabData = entity.pedagogy[tabType] instanceof Map
-      ? Object.fromEntries(entity.pedagogy[tabType])
-      : entity.pedagogy[tabType];
+    const tabData = pedagogyRoot[tabType] instanceof Map
+      ? Object.fromEntries(pedagogyRoot[tabType])
+      : pedagogyRoot[tabType];
 
     if (!tabData[subcategory]) {
       return res.status(404).json({
@@ -7231,6 +8632,10 @@ exports.updateMCQQuestion = async (req, res) => {
       _id: originalQuestion._id,
       questionType: 'mcq',
       sectionId: questionData.sectionId !== undefined ? questionData.sectionId : (originalQuestion.sectionId || null), // 🆕 NEW: Section update support
+      // Source tag: accept a new value when sent, otherwise preserve the
+      // stored one — this literal fully replaces the question (see below),
+      // so omitting the field here would wipe the tag on every edit.
+      source: questionData.source !== undefined ? questionData.source : (originalQuestion.source || null),
       mcqQuestionTitle: Array.isArray(questionData.mcqQuestionTitle)
         ? questionData.mcqQuestionTitle
         : (questionData.mcqQuestionTitle || '').trim(),
@@ -7273,6 +8678,14 @@ exports.updateMCQQuestion = async (req, res) => {
         : (originalQuestion.shortAnswer || '');
     }
 
+    if (questionData.mcqQuestionType === 'essay') {
+      updatedQuestion.essayAnswer = questionData.essayAnswer !== undefined
+        ? questionData.essayAnswer
+        : (originalQuestion.essayAnswer || originalQuestion.shortAnswer || '');
+      // Keep legacy shortAnswer in sync for older readers
+      updatedQuestion.shortAnswer = updatedQuestion.essayAnswer;
+    }
+
     if (questionData.mcqQuestionType === 'numeric') {
       updatedQuestion.numericAnswer = questionData.numericAnswer !== undefined
         ? questionData.numericAnswer
@@ -7294,18 +8707,41 @@ exports.updateMCQQuestion = async (req, res) => {
         : (originalQuestion.orderingItems || []);
     }
 
+    // Preserve approval-workflow bookkeeping across the update — the
+    // rewrite of `updatedQuestion` above doesn't spread `originalQuestion`,
+    // so `approval` / `createdBy` would be wiped otherwise. That would also
+    // reset a rejected question's status to `pending` on every edit, which
+    // is not what we want. Instead:
+    //   - Carry `approval` (with rejection state) forward.
+    //   - Flip `editedSinceReject` when saving into a rejected question so
+    //     the approver's UI re-opens Approve/Reject on the row.
+    //   - Same-shape carry-over for `createdBy` / `createdByEmail`.
+    const origApproval = (originalQuestion && originalQuestion.approval)
+      ? (originalQuestion.approval.toObject ? originalQuestion.approval.toObject() : { ...originalQuestion.approval })
+      : { status: 'pending', queries: [] };
+    if (origApproval.status === 'rejected') {
+      origApproval.editedSinceReject = true;
+    }
+    updatedQuestion.approval = origApproval;
+    if (originalQuestion?.createdBy && !updatedQuestion.createdBy) {
+      updatedQuestion.createdBy = originalQuestion.createdBy;
+    }
+    if (originalQuestion?.createdByEmail && !updatedQuestion.createdByEmail) {
+      updatedQuestion.createdByEmail = originalQuestion.createdByEmail;
+    }
+
     // Update in array
     exercise.questions[questionIndex] = updatedQuestion;
     exercises[exerciseIndex] = exercise;
 
-    if (entity.pedagogy[tabType] instanceof Map) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
+    if (pedagogyRoot[tabType] instanceof Map) {
+      pedagogyRoot[tabType].set(subcategory, exercises);
     } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+      pedagogyRoot[tabType][subcategory] = exercises;
     }
 
-    entity.markModified(`pedagogy.${tabType}.${subcategory}`);
-    entity.markModified(`pedagogy.${tabType}.${subcategory}.${exerciseIndex}.questions.${questionIndex}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.questions.${questionIndex}`);
     entity.updatedAt = new Date();
     entity.updatedBy = req.user?.email || "system";
 
@@ -7395,15 +8831,25 @@ exports.deleteMCQQuestion = async (req, res) => {
         message: [{ key: "error", value: `${type} with ID ${id} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
 
-    if (!entity.pedagogy) {
+
+    if (!pedagogyRoot) {
       return res.status(404).json({
         success: false,
         message: [{ key: "error", value: "No pedagogy data found on this entity" }]
       });
     }
 
-    if (!entity.pedagogy[tabType]) {
+    if (!pedagogyRoot[tabType]) {
       return res.status(404).json({
         success: false,
         message: [{ key: "error", value: `tabType "${tabType}" not found in pedagogy` }]
@@ -7411,7 +8857,7 @@ exports.deleteMCQQuestion = async (req, res) => {
     }
 
     // ── 3. Handle Mongoose Map — MUST use .get() not bracket access ───────────
-    const tabSection = entity.pedagogy[tabType];
+    const tabSection = pedagogyRoot[tabType];
     const isMap = tabSection instanceof Map;
 
     // Get actual subcategory keys for error messages
@@ -7485,12 +8931,12 @@ exports.deleteMCQQuestion = async (req, res) => {
     exercises[exerciseIndex] = exercise;
 
     if (isMap) {
-      entity.pedagogy[tabType].set(subcategory, exercises);
+      pedagogyRoot[tabType].set(subcategory, exercises);
     } else {
-      entity.pedagogy[tabType][subcategory] = exercises;
+      pedagogyRoot[tabType][subcategory] = exercises;
     }
 
-    entity.markModified(`pedagogy.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}`);
     entity.updatedAt = new Date();
     entity.updatedBy = req.user?.email || "system";
 
@@ -7597,7 +9043,7 @@ exports.uploadQuestionFile = async (req, res) => {
     const fileName = `${timestamp}_${cleanName}`;
     const filePath = `question/others/attachments/${fileName}`;
 
-    const { error } = await supabase.storage
+    const { error } = await storage
       .from('smartlms')
       .upload(filePath, file.data, {
         contentType: file.mimetype,
@@ -7609,7 +9055,7 @@ exports.uploadQuestionFile = async (req, res) => {
       throw new Error(`Supabase upload failed: ${error.message}`);
     }
 
-    const url = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const url = publicUrlFor(filePath);
     // Return cleanName (correct extension) — NOT file.name which may be mangled
     return res.status(200).json({ success: true, url, name: cleanName, mimeType: file.mimetype });
   } catch (error) {
@@ -7638,6 +9084,25 @@ exports.addYouDoExercise = async (req, res) => {
       sectionConfigs,
       questions = [],
       securitySettings,  // ← Add securitySettings to destructuring
+      selectedTopics,    // ← Select Assessment Content step: topics covered
+      instructions,      // ← Select Assessment Content step: instructions
+      // Question Source step (parity with the generic addExercise) — without
+      // these, a You_Do assessment created via this endpoint silently dropped
+      // the source config until the first updateYouDoExercise call.
+      questionSource,
+      customDistribution,
+      customSources,
+      // Section-based Custom mix: per-section split keyed by sectionId.
+      customDistributionBySection,
+      saveToBank,
+      stepsSaved,
+      isGraded,
+      // Combined-only: MCQ part's own source + single-cell Custom split.
+      questionSourceMcq,
+      customSourcesMcq,
+      customDistributionMcq,
+      // Evaluation Method — { method: 'testcase' | 'ai' }.
+      evaluationMethod,
     } = req.body;
 
     // ── Helper: parse JSON strings if needed (MUST be defined FIRST) ──────
@@ -7699,18 +9164,27 @@ exports.addYouDoExercise = async (req, res) => {
     }
 
     // ── Initialize pedagogy structure ─────────────────────────────────────
-    if (!entity.pedagogy) {
-      entity.pedagogy = { I_Do: new Map(), We_Do: new Map(), You_Do: new Map() };
-    }
+    // (The container is created by resolvePedagogyScope above — it is the one
+    // place that decides whether that is `pedagogy` or a batch's own bucket.)
 
     const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabKey, req);
 
-    if (!entity.pedagogy[tabKey]) {
-      entity.pedagogy[tabKey] = new Map();
+
+    if (!pedagogyRoot[tabKey]) {
+      pedagogyRoot[tabKey] = new Map();
     }
 
-    let exercises = entity.pedagogy[tabKey].has(subcategory)
-      ? entity.pedagogy[tabKey].get(subcategory)
+    let exercises = pedagogyRoot[tabKey].has(subcategory)
+      ? pedagogyRoot[tabKey].get(subcategory)
       : [];
 
     // ── Generate exercise ID ───────────────────────────────────────────────
@@ -7912,7 +9386,14 @@ exports.addYouDoExercise = async (req, res) => {
     // ── Build availabilityPeriod ───────────────────────────────────────────
     const buildAvailabilityPeriod = (period) => {
       const parseDate = (dateObj) => {
-        if (!dateObj || !dateObj.year || !dateObj.month || !dateObj.day) return null;
+        if (!dateObj) return null;
+        // The client now sends ISO instant strings; keep object support for
+        // backwards-compatibility with older payloads.
+        if (typeof dateObj === 'string') {
+          const d = new Date(dateObj);
+          return isNaN(d.getTime()) ? null : d;
+        }
+        if (!dateObj.year || !dateObj.month || !dateObj.day) return null;
         return new Date(
           dateObj.year,
           dateObj.month - 1,
@@ -7926,20 +9407,50 @@ exports.addYouDoExercise = async (req, res) => {
       const endDate = parseDate(period.endDate);
       const cutOffDate = period.cutOffEnabled ? parseDate(period.cutOffDate) : null;
       const gracePeriodDate = period.gracePeriodEnabled ? parseDate(period.gracePeriodDate) : null;
+      const remindGradeBy = period.remindGradeByEnabled ? parseDate(period.remindGradeBy) : null;
 
       return {
         startDate,
         endDate,
         cutOffDate,
         cutOffEnabled: period.cutOffEnabled || false,
+        remindGradeByEnabled: !!period.remindGradeByEnabled,
+        remindGradeBy,
         gracePeriodAllowed: period.gracePeriodEnabled || false,
         gracePeriodEnabled: period.gracePeriodEnabled || false,
         gracePeriodDate,
         extendedDays: period.extendedDays || 0,
+        requiresAdminApproval: !!period.requiresAdminApproval,
+        approvalScope: period.approvalScope === 'settings_and_questions' ? 'settings_and_questions' : 'settings',
       };
     };
 
     const availabilityPeriodData = buildAvailabilityPeriod(availPeriod);
+
+    // ── Build approvalWorkflow (when staff turned on Requires Approval) ────
+    // Snapshot the parent course's approvalHierarchy.steps so subsequent
+    // changes to the course-level template don't disrupt this assessment.
+    let approvalWorkflowData = null;
+    if (availabilityPeriodData.requiresAdminApproval) {
+      const courseIdForWorkflow = resolveCourseId(entity);
+      const submitterName = [req.user?.firstName, req.user?.lastName].filter(Boolean).join(" ")
+        || req.user?.email
+        || "Trainer";
+      const submittedBy = {
+        userId: req.user?._id || req.user?.id || null,
+        name: submitterName,
+        email: req.user?.email || "",
+      };
+      approvalWorkflowData = await buildInitialApprovalWorkflow(courseIdForWorkflow, submittedBy);
+      if (!approvalWorkflowData) {
+        return res.status(400).json({
+          message: [{
+            key: 'error',
+            value: 'Approval is required for this assessment, but no approver could be resolved — the course has no Approval Hierarchy and the institution has no L&D role to default to. Configure the hierarchy on the Approvals page first.'
+          }]
+        });
+      }
+    }
 
     // ── Build notificationSettings ─────────────────────────────────────────
     const notificationSettingsData = {
@@ -7950,6 +9461,11 @@ exports.addYouDoExercise = async (req, res) => {
       notifyGradersSubmissions: notifSettings.notifyGradersSubmissions || false,
       notifyGradersLateSubmissions: notifSettings.notifyGradersLateSubmissions || false,
       notifyStudent: notifSettings.notifyStudent !== undefined ? notifSettings.notifyStudent : true,
+      // Per-toggle delivery channels (Dashboard / Gmail / WhatsApp) — same
+      // shape the We_Do assignment stores.
+      notifyStudentChannels: pickChannels(notifSettings.notifyStudentChannels),
+      notifyGradersSubmissionsChannels: pickChannels(notifSettings.notifyGradersSubmissionsChannels),
+      notifyGradersLateSubmissionsChannels: pickChannels(notifSettings.notifyGradersLateSubmissionsChannels),
     };
 
     // ── Build gradeSettings ────────────────────────────────────────────────
@@ -7969,6 +9485,12 @@ exports.addYouDoExercise = async (req, res) => {
       combinedGrade: totalMarksCombined > 0 ? totalMarksCombined : null,
       combinedGradeToPass: gradeSettingsRaw.combinedGradeToPass || null,
       separateMarks: gradeSettingsRaw.separateMarks || false,
+      // Grade-level "Section Based" split (toggle + per-part total/pass marks).
+      sectionBased: gradeSettingsRaw.sectionBased || false,
+      sections: Array.isArray(gradeSettingsRaw.sections) ? gradeSettingsRaw.sections : [],
+      sectionPassMarks: gradeSettingsRaw.sectionPassMarks || {},
+      // Grade bands (labelled % ranges) — passed through untouched when provided.
+      gradeBands: Array.isArray(gradeSettingsRaw.gradeBands) ? gradeSettingsRaw.gradeBands : undefined,
     };
 
     // ── Build additionalOptions ────────────────────────────────────────────
@@ -7987,7 +9509,26 @@ exports.addYouDoExercise = async (req, res) => {
     const newExercise = {
       _id: new mongoose.Types.ObjectId(),
       exerciseType: exerciseTypeParsed,
+      isGraded: isGraded !== false,
+      stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : [],
       configurationType: configTypeSettings,
+      // Question Source step — same shape addExercise persists.
+      questionSource: questionSource || null,
+      customDistribution: customDistribution || null,
+      customSources: Array.isArray(customSources) ? customSources : [],
+      // Section-based Custom mix's per-section split — parity with the other
+      // add path so a You_Do assessment created here doesn't drop the field.
+      customDistributionBySection: customDistributionBySection && typeof customDistributionBySection === 'object'
+        ? customDistributionBySection
+        : {},
+      saveToBank: !!saveToBank,
+      // Combined-only MCQ-part source (null = inherit questionSource).
+      questionSourceMcq: questionSourceMcq || null,
+      customSourcesMcq: Array.isArray(customSourcesMcq) ? customSourcesMcq : [],
+      customDistributionMcq: customDistributionMcq || null,
+      // Evaluation Method config ({ method }). null when the client didn't
+      // send one — downstream reads that as test-case based.
+      evaluationMethod: parseIfNeeded(evaluationMethod) || null,
       isSectionBased: isSectionBased || false,
       sections: sections || [],
       sectionConfigs: sectionConfigs || {},
@@ -8012,9 +9553,16 @@ exports.addYouDoExercise = async (req, res) => {
       securitySettings: securitySettingsData,  // ← Add security settings
       questionConfiguration: {},
       availabilityPeriod: availabilityPeriodData,
+      approvalWorkflow: approvalWorkflowData,
       notificationSettings: notificationSettingsData,
       gradeSettings: gradeSettingsData,
       additionalOptions: additionalOptionsData,
+
+      // Select Assessment Content step — topics covered + instructions shown
+      // to students. Persisted so the attend flow can scope/brief the test.
+      selectedTopics: Array.isArray(selectedTopics) ? selectedTopics : [],
+      instructions: typeof instructions === 'string' ? instructions : '',
+
       questions: questions,
       createdAt: new Date(),
       createdBy: req.user?.email || 'system',
@@ -8041,12 +9589,46 @@ exports.addYouDoExercise = async (req, res) => {
     }
 
     // ── Save to database ───────────────────────────────────────────────────
+    // Decide notification BEFORE save so we can stamp notifiedAt in the same
+    // write. Gate skips when approvalScope="settings_and_questions" and the
+    // exercise isn't yet fully configured — that path fires from addQuestion.
+    const willNotifyStep1 = shouldFireStep1Notification(newExercise);
+    if (willNotifyStep1) {
+      newExercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+    }
     exercises.push(newExercise);
-    entity.pedagogy[tabKey].set(subcategory, exercises);
-    entity.markModified(`pedagogy.${tabKey}`);
+    pedagogyRoot[tabKey].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabKey}`);
     entity.updatedBy = req.user?.email || 'system';
     entity.updatedAt = new Date();
     await entity.save();
+
+    // When the teacher opted in via saveToBank, clone any attached questions
+    // into the institution's Question Bank (mirrors addExercise; fire-and-forget).
+    if (newExercise.saveToBank && Array.isArray(newExercise.questions) && newExercise.questions.length > 0) {
+      const institutionId = req.user?.institution?._id || req.user?.institution;
+      cloneQuestionsToBank({
+        institutionId,
+        exerciseId: newExercise._id.toString(),
+        questions: newExercise.questions,
+        actorEmail: req.user?.email,
+      });
+    }
+
+    // ── Notify step-1 approvers (best-effort, non-blocking) ────────────────
+    if (willNotifyStep1) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: newExercise.approvalWorkflow.steps[0],
+        exerciseName: newExercise.exerciseInformation?.exerciseName,
+        exerciseId: newExercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
+    }
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
@@ -8111,6 +9693,23 @@ exports.updateYouDoExercise = async (req, res) => {
       sections,            // ← ADD THIS
       sectionConfigs,      // ← ADD THIS
       securitySettings,    // ← ADD THIS (if needed)
+      selectedTopics,      // ← Select Assessment Content step: topics covered
+      instructions,        // ← Select Assessment Content step: instructions
+      isGraded,            // Graded / Non-Graded toggle (controls Grade Settings step)
+      stepsSaved,          // Array of step titles explicitly saved — drives the sidebar
+      // ── Question Source feature (Phase 2 / 5 / 6) ──────────────────────────
+      questionSource,
+      customDistribution,
+      customSources,
+      // Section-based Custom mix: per-section split keyed by sectionId.
+      customDistributionBySection,
+      saveToBank,
+      // Combined-only: MCQ part's own source + single-cell Custom split.
+      questionSourceMcq,
+      customSourcesMcq,
+      customDistributionMcq,
+      // Evaluation Method — { method: 'testcase' | 'ai' }.
+      evaluationMethod,
     } = req.body;
 
     // ── Validate ──────────────────────────────────────────────────────────
@@ -8159,18 +9758,30 @@ exports.updateYouDoExercise = async (req, res) => {
     const parsedSections = sections ? parseIfNeeded(sections) : [];
     const parsedSectionConfigs = sectionConfigs ? parseIfNeeded(sectionConfigs) : {};
     const parsedSecuritySettings = securitySettings ? parseIfNeeded(securitySettings) : null;
+    const parsedSelectedTopics = selectedTopics !== undefined ? parseIfNeeded(selectedTopics) : undefined;
+    const parsedInstructions = instructions !== undefined ? parseIfNeeded(instructions) : undefined;
 
     // ── Find entity ───────────────────────────────────────────────────────
     const { model } = modelMap[type];
     const entity = await model.findById(id);
 
     if (!entity) return res.status(404).json({ message: [{ key: 'error', value: `${type} with ID ${id} not found` }] });
-    if (!entity.pedagogy) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
-    if (!entity.pedagogy[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
-    if (!entity.pedagogy[tabType].has(subcategory))
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
+    if (!pedagogyRoot) return res.status(404).json({ message: [{ key: 'error', value: 'Pedagogy structure not found' }] });
+    if (!pedagogyRoot[tabType]) return res.status(404).json({ message: [{ key: 'error', value: `Pedagogy tab '${tabType}' not found` }] });
+    if (!pedagogyRoot[tabType].has(subcategory))
       return res.status(404).json({ message: [{ key: 'error', value: `Subcategory '${subcategory}' not found in ${tabType}` }] });
 
-    const exercises = entity.pedagogy[tabType].get(subcategory);
+    const exercises = pedagogyRoot[tabType].get(subcategory);
     const exerciseIndex = exercises.findIndex(ex => ex._id.toString() === exerciseId);
 
     if (exerciseIndex === -1) {
@@ -8385,6 +9996,32 @@ exports.updateYouDoExercise = async (req, res) => {
       ...existingExercise,
       ...(parsedExerciseType && { exerciseType: finalExerciseType }),
       configurationType: configTypeSettings,
+      // Persist which steps the user has explicitly saved so the edit sidebar
+      // shows them as "Completed" instead of falling back to the stale/empty
+      // value preserved by the spread. Keep the existing list when the client
+      // doesn't send one (e.g. partial updates that don't touch step progress).
+      stepsSaved: Array.isArray(stepsSaved) ? stepsSaved : (existingExercise.stepsSaved || []),
+      isGraded: isGraded !== undefined ? isGraded !== false : (existingExercise.isGraded !== false),
+      // Phase 2 / 5 / 6 — source choice + custom matrix + save-to-bank flag.
+      questionSource: questionSource !== undefined ? questionSource : (existingExercise.questionSource || null),
+      customDistribution: customDistribution !== undefined ? customDistribution : (existingExercise.customDistribution || null),
+      customSources: Array.isArray(customSources) ? customSources : (existingExercise.customSources || []),
+      // Section-based per-section split — merge-or-preserve, same as the
+      // aggregate customDistribution above. Empty object is a valid value
+      // (non-section flow / trainer cleared it) so use `!== undefined`.
+      customDistributionBySection: customDistributionBySection !== undefined
+        ? (customDistributionBySection && typeof customDistributionBySection === 'object' ? customDistributionBySection : {})
+        : (existingExercise.customDistributionBySection || {}),
+      saveToBank: typeof saveToBank === 'boolean' ? saveToBank : !!existingExercise.saveToBank,
+      // Combined-only MCQ-part source — merge-or-preserve like the above.
+      questionSourceMcq: questionSourceMcq !== undefined ? questionSourceMcq : (existingExercise.questionSourceMcq || null),
+      customSourcesMcq: Array.isArray(customSourcesMcq) ? customSourcesMcq : (existingExercise.customSourcesMcq || []),
+      customDistributionMcq: customDistributionMcq !== undefined ? customDistributionMcq : (existingExercise.customDistributionMcq || null),
+      // Evaluation Method — merge-or-preserve, so a step-scoped save that
+      // doesn't own this step leaves the stored config untouched.
+      evaluationMethod: evaluationMethod !== undefined
+        ? (parseIfNeeded(evaluationMethod) || null)
+        : (existingExercise.evaluationMethod || null),
       updatedAt: new Date(),
       updatedBy: req.user?.email || 'system',
       version: (existingExercise.version || 1) + 1,
@@ -8402,6 +10039,16 @@ exports.updateYouDoExercise = async (req, res) => {
     }
     if (parsedSecuritySettings) {
       updatedExercise.securitySettings = parsedSecuritySettings;
+    }
+
+    // ── Select Assessment Content step — topics covered + instructions ─────
+    // Spread already preserves the existing values; override only when the
+    // client actually sent new ones so editing the step persists correctly.
+    if (parsedSelectedTopics !== undefined) {
+      updatedExercise.selectedTopics = Array.isArray(parsedSelectedTopics) ? parsedSelectedTopics : [];
+    }
+    if (parsedInstructions !== undefined) {
+      updatedExercise.instructions = typeof parsedInstructions === 'string' ? parsedInstructions : '';
     }
 
     // ── Exercise information ───────────────────────────────────────────────
@@ -8486,7 +10133,35 @@ exports.updateYouDoExercise = async (req, res) => {
         ap.gracePeriodEnabled = gracePeriodOn;
         if (gracePeriodOn && gracePeriodDate) ap.gracePeriodDate = gracePeriodDate;
         ap.extendedDays = parsedAvailPeriod.extendedDays ?? existAvail.extendedDays ?? 0;
+        ap.requiresAdminApproval = parsedAvailPeriod.requiresAdminApproval !== undefined
+          ? !!parsedAvailPeriod.requiresAdminApproval
+          : !!existAvail.requiresAdminApproval;
+        const incomingScope = parsedAvailPeriod.approvalScope === 'settings_and_questions'
+          ? 'settings_and_questions'
+          : parsedAvailPeriod.approvalScope === 'settings'
+          ? 'settings'
+          : null;
+        ap.approvalScope = incomingScope || existAvail.approvalScope || 'settings';
         updatedExercise.availabilityPeriod = ap;
+
+        // ── Approval workflow transitions on toggle change ─────────────────
+        const prevApproval = !!existAvail.requiresAdminApproval;
+        const nextApproval = !!ap.requiresAdminApproval;
+        if (nextApproval && !prevApproval) {
+          const courseIdForWorkflow = resolveCourseId(entity);
+          const wf = await buildInitialApprovalWorkflow(courseIdForWorkflow);
+          if (!wf) {
+            return res.status(400).json({
+              message: [{
+                key: 'error',
+                value: 'Approval is required, but no approver could be resolved — the course has no Approval Hierarchy and the institution has no L&D role to default to. Configure the hierarchy on the Approvals page first.'
+              }]
+            });
+          }
+          updatedExercise.approvalWorkflow = wf;
+        } else if (!nextApproval && prevApproval) {
+          updatedExercise.approvalWorkflow = null;
+        }
       } else {
         delete updatedExercise.availabilityPeriod;
       }
@@ -8503,6 +10178,9 @@ exports.updateYouDoExercise = async (req, res) => {
         notifyGradersSubmissions: parsedNotifSettings.notifyGradersSubmissions !== undefined ? parsedNotifSettings.notifyGradersSubmissions : (ex.notifyGradersSubmissions ?? false),
         notifyGradersLateSubmissions: parsedNotifSettings.notifyGradersLateSubmissions !== undefined ? parsedNotifSettings.notifyGradersLateSubmissions : (ex.notifyGradersLateSubmissions ?? false),
         notifyStudent: parsedNotifSettings.notifyStudent !== undefined ? parsedNotifSettings.notifyStudent : (ex.notifyStudent ?? true),
+        notifyStudentChannels: pickChannels(parsedNotifSettings.notifyStudentChannels, ex.notifyStudentChannels),
+        notifyGradersSubmissionsChannels: pickChannels(parsedNotifSettings.notifyGradersSubmissionsChannels, ex.notifyGradersSubmissionsChannels),
+        notifyGradersLateSubmissionsChannels: pickChannels(parsedNotifSettings.notifyGradersLateSubmissionsChannels, ex.notifyGradersLateSubmissionsChannels),
       };
       updatedExercise.notificatonandGradeSettings = {
         notifyUsers: updatedExercise.notificationSettings.notifyUsers,
@@ -8529,6 +10207,12 @@ exports.updateYouDoExercise = async (req, res) => {
           ? (parsedGradeSettings.combinedGradeToPass !== null ? Number(parsedGradeSettings.combinedGradeToPass) : null)
           : exGrade.combinedGradeToPass,
         separateMarks: parsedGradeSettings?.separateMarks !== undefined ? parsedGradeSettings.separateMarks : (exGrade.separateMarks ?? false),
+        // Grade-level "Section Based" split (toggle + per-part total/pass marks).
+        sectionBased: parsedGradeSettings?.sectionBased !== undefined ? !!parsedGradeSettings.sectionBased : (exGrade.sectionBased ?? false),
+        sections: Array.isArray(parsedGradeSettings?.sections) ? parsedGradeSettings.sections : (exGrade.sections ?? []),
+        sectionPassMarks: parsedGradeSettings?.sectionPassMarks !== undefined ? parsedGradeSettings.sectionPassMarks : (exGrade.sectionPassMarks ?? {}),
+        // Grade bands (labelled % ranges) — incoming wins, else keep existing.
+        gradeBands: Array.isArray(parsedGradeSettings?.gradeBands) ? parsedGradeSettings.gradeBands : (exGrade.gradeBands ?? undefined),
       };
       updatedExercise.gradeSettings = merged;
     }
@@ -8543,13 +10227,75 @@ exports.updateYouDoExercise = async (req, res) => {
     }
 
     // ── Persist ────────────────────────────────────────────────────────────
+    // Decide notification BEFORE the JSON snapshot so notifiedAt persists in
+    // the same save. `updatedExercise` is a partial merge — for the gate check
+    // we overlay it on the existing exercise so `approvalScope`, question
+    // counts, config etc. all resolve correctly.
+    const mergedForGate = { ...existingExercise, ...updatedExercise };
+    const willNotifyStep1 = shouldFireStep1Notification(mergedForGate);
+    if (willNotifyStep1) {
+      if (!updatedExercise.approvalWorkflow) updatedExercise.approvalWorkflow = existingExercise.approvalWorkflow;
+      updatedExercise.approvalWorkflow.steps[0].notifiedAt = new Date();
+    }
+    // Trainer just saved an edit — if the workflow is currently `rejected`,
+    // mark it so the approver's UI shows a plain "Approve" instead of
+    // "Approve anyway". Applied whether or not the approval scope defers,
+    // and irrespective of what fields actually changed (any save counts).
+    if (existingExercise?.approvalWorkflow?.overallStatus === 'rejected') {
+      if (!updatedExercise.approvalWorkflow) updatedExercise.approvalWorkflow = existingExercise.approvalWorkflow;
+      updatedExercise.approvalWorkflow.editedSinceReject = true;
+    }
     const cleanExercise = JSON.parse(JSON.stringify(updatedExercise));
     exercises[exerciseIndex] = cleanExercise;
-    entity.pedagogy[tabType].set(subcategory, exercises);
-    entity.markModified(`pedagogy.${tabType}`);
+    pedagogyRoot[tabType].set(subcategory, exercises);
+    // Same Map-of-Array-of-Subdoc tracking issue as updateExercise above:
+    // marking only the Map path does NOT reliably persist changes to deeply
+    // nested Date fields like availabilityPeriod.startDate/endDate. Mark each
+    // level so Mongoose emits the SET ops. Without this, the Schedule step's
+    // Save would return 200 but the new start/end times never reached MongoDB.
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.availabilityPeriod`);
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.approvalWorkflow`);
+    // customDistributionBySection is a Mixed type (dynamic section-id keys).
+    // Mongoose can't auto-detect deep changes on Mixed fields, so without an
+    // explicit markModified the update payload is written into memory but
+    // .save() skips emitting it to Mongo — trainer edits vanish silently.
+    entity.markModified(`${pedagogyPath}.${tabType}.${subcategory}.${exerciseIndex}.customDistributionBySection`);
     entity.updatedBy = req.user?.email || 'system';
     entity.updatedAt = new Date();
     await entity.save();
+
+    // Phase 6 — When the teacher opts in via saveToBank, clone the exercise's
+    // attached questions into the institution's Question Bank. Fire-and-forget
+    // so an occasional bank failure never breaks the exercise save response.
+    if (updatedExercise.saveToBank && Array.isArray(cleanExercise.questions) && cleanExercise.questions.length > 0) {
+      const institutionId = req.user?.institution?._id || req.user?.institution;
+      cloneQuestionsToBank({
+        institutionId,
+        exerciseId,
+        questions: cleanExercise.questions,
+        actorEmail: req.user?.email,
+      });
+    }
+
+    // Notify step-1 approvers only when the gate said so above. This handles
+    // both "settings" scope (fire immediately) and "settings_and_questions"
+    // scope (skipped here; fires from addQuestion once complete).
+    if (willNotifyStep1) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: updatedExercise.approvalWorkflow.steps[0],
+        exerciseName: updatedExercise.exerciseInformation?.exerciseName,
+        exerciseId: updatedExercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
+    }
 
     // ── Build response config ──────────────────────────────────────────────
     let responseConfig = {};
@@ -8614,9 +10360,19 @@ exports.getYouDoExercises = async (req, res) => {
         message: [{ key: "error", value: `${type} not found` }]
       });
     }
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Which I_Do/We_Do/You_Do set this request belongs to. For a shared
+    // element that is the course-level `pedagogy`; for one ticked batch-wise
+    // in Course Setup it is this batch's own `batchPedagogy.<batchId>`.
+    // Resolving it here means every lookup and markModified below lands in
+    // the right place — without it We Do and You Do would keep reading the
+    // course-level set while the batch strip claimed otherwise.
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+
 
     // Check if pedagogy exists
-    if (!entity.pedagogy || !entity.pedagogy[tabType]) {
+    if (!pedagogyRoot || !pedagogyRoot[tabType]) {
       return res.json({
         message: [{ key: "success", value: "No exercises found" }],
         data: {
@@ -8634,11 +10390,11 @@ exports.getYouDoExercises = async (req, res) => {
     // Get exercises for specific subcategory
     let exercises = [];
     if (subcategory) {
-      exercises = entity.pedagogy[tabType].get(subcategory) || [];
+      exercises = pedagogyRoot[tabType].get(subcategory) || [];
     } else {
       // Return all exercises from all subcategories in tabType
       const allExercises = [];
-      entity.pedagogy[tabType].forEach((exArray, subcat) => {
+      pedagogyRoot[tabType].forEach((exArray, subcat) => {
         if (Array.isArray(exArray)) {
           exArray.forEach(ex => {
             const exerciseObj = ex.toObject ? ex.toObject() : { ...ex };
@@ -8664,6 +10420,26 @@ exports.getYouDoExercises = async (req, res) => {
         sortUpdatedAt: obj.updatedAt ? new Date(obj.updatedAt).getTime() : 0,
       };
     });
+
+    // Hide exercises gated by an unfinished approval workflow from anyone whose
+    // role doesn't match the currently-pending step. Approved (studentVisible)
+    // exercises stay visible to everyone. The creator is always allowed to see
+    // their own exercise — even mid-approval — so they can track its status
+    // via the "Waiting Approval" badge on the client.
+    {
+      const callerRoleId = req.user?.role?._id?.toString() || req.user?.role?.toString() || null;
+      const callerEmail = req.user?.email || null;
+      exercisesArray = exercisesArray.filter((ex) => {
+        const wf = ex?.approvalWorkflow;
+        if (!wf || !wf.steps || wf.steps.length === 0) return true;
+        if (wf.studentVisible) return true;
+        if (callerEmail && ex.createdBy && ex.createdBy === callerEmail) return true;
+        if (!callerRoleId) return false;
+        const idx = (wf.currentStep || 1) - 1;
+        const step = wf.steps[idx];
+        return step && step.roleId?.toString() === callerRoleId;
+      });
+    }
 
     // Sort exercises (descending order by default - latest first)
     exercisesArray.sort((a, b) => {
@@ -8714,6 +10490,33 @@ exports.getYouDoExercises = async (req, res) => {
     // Remove temporary sort fields from response
     const cleanExercises = paginatedExercises.map(({ sortCreatedAt, sortUpdatedAt, ...rest }) => rest);
 
+    // ── Stamp `hasParticipants` on each row ─────────────────────────────
+    // One `distinct` over the small page slice — cheap and scales with the
+    // page size, not the total ExamSession count. Presence in the returned
+    // set means "at least one student has ever joined this test". The client
+    // gates the Live Dashboard menu entry on this bit; ExamSession rows are
+    // never deleted (submittedAt flips but the row stays), so this is
+    // permanently true once flipped — matches the product rule "once
+    // started, never hide the Dashboard entry even after the schedule ends".
+    try {
+      const pageIds = cleanExercises
+        .map(ex => String(ex?._id || ex?.id || ""))
+        .filter(Boolean);
+      if (pageIds.length > 0) {
+        const withParticipants = new Set(
+          (await ExamSession.distinct("assessmentId", { assessmentId: { $in: pageIds } })).map(String)
+        );
+        for (const ex of cleanExercises) {
+          ex.hasParticipants = withParticipants.has(String(ex._id || ex.id || ""));
+        }
+      }
+    } catch (e) {
+      // Never let this enrichment break the primary list response — if the
+      // ExamSession lookup fails we ship the exercises without the flag and
+      // the client falls back to "Dashboard hidden" (the safer default).
+      console.warn("hasParticipants stamp failed:", e.message);
+    }
+
     return res.json({
       message: [{ key: "success", value: "Exercises retrieved successfully" }],
       data: {
@@ -8742,5 +10545,1276 @@ exports.getYouDoExercises = async (req, res) => {
     res.status(500).json({
       message: [{ key: "error", value: "Internal server error" }]
     });
+  }
+};
+
+// ============================================================================
+// Approval workflow: list pending approvals + approve an exercise step
+// ============================================================================
+
+/**
+ * GET /courses/:courseId/approvals/overview?tabType=We_Do|You_Do
+ * Returns a flat list of all exercises in the course (across Module / SubModule
+ * / Topic / SubTopic) for the given tab, with full approvalWorkflow details
+ * and a `canApprove` flag for the caller.
+ */
+exports.getCourseApprovalsOverview = async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { tabType } = req.query;
+    if (!courseId || !mongoose.Types.ObjectId.isValid(courseId)) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'Invalid courseId' }] });
+    }
+    const targetTab = tabType === 'We_Do' ? 'We_Do' : tabType === 'You_Do' ? 'You_Do' : null;
+    if (!targetTab) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'tabType must be We_Do or You_Do' }] });
+    }
+    const callerRoleId = req.user?.role?._id?.toString() || req.user?.role?.toString() || null;
+    const callerUserId = (req.user?._id || req.user?.id)?.toString() || null;
+
+    const collections = [
+      { Model: Module1, kind: 'modules' },
+      { Model: SubModule1, kind: 'submodules' },
+      { Model: Topic1, kind: 'topics' },
+      { Model: SubTopic1, kind: 'subtopics' },
+    ];
+
+    const items = [];
+    for (const { Model, kind } of collections) {
+      const docs = await Model.find(
+        { courses: courseId },
+        { _id: 1, name: 1, pedagogy: 1, batchPedagogy: 1 },
+      ).lean();
+      for (const doc of docs) {
+        // Resources by Batch — approval is a CROSS-batch duty, so this queue
+        // deliberately does not scope to one batch: it lists every batch's
+        // pending items. Each entry carries the `batchId` it came from so the
+        // approve/reject call can be scoped back to the right container.
+        for (const [subcategory, exercises, entryBatchId] of mergeSectionAcrossBatches(doc, targetTab)) {
+          if (!Array.isArray(exercises)) continue;
+          for (const ex of exercises) {
+            const wf = ex.approvalWorkflow || null;
+            // Only list exercises that actually have an approval workflow
+            // attached. Items created with requiresAdminApproval=false have
+            // no workflow and don't belong on this page.
+            if (!wf || !Array.isArray(wf.steps) || wf.steps.length === 0) continue;
+            // Hide any "settings_and_questions"-scoped item that isn't yet
+            // fully configured, regardless of workflow status. Rule: the
+            // approver only ever sees these once the trainer has actually
+            // added all questions — the step-1 notification is what surfaces
+            // it on this page in the first place.
+            {
+              const scope = ex.availabilityPeriod?.approvalScope || 'settings';
+              if (scope === 'settings_and_questions' && !isExerciseFullyConfigured(ex)) {
+                continue;
+              }
+            }
+            let canApprove = false;
+            if (wf.overallStatus === 'in_progress') {
+              const idx = (wf.currentStep || 1) - 1;
+              const step = wf.steps[idx];
+              if (step && step.status === 'pending'
+                  && (await canUserActOnStep(step, callerUserId, callerRoleId)).ok) {
+                canApprove = true;
+              }
+            } else if (wf.overallStatus === 'rejected' && wf.editedSinceReject) {
+              // Rejected but the trainer has since edited/saved — reopen the
+              // action buttons for the assigned approver so they can approve
+              // (or reject again) against the reworked content. Without an
+              // edit, `canApprove` stays false and the approver's UI shows
+              // only View (they wait for the trainer to make changes).
+              const idx = (wf.currentStep || 1) - 1;
+              const step = wf.steps[idx];
+              if (step && step.status === 'rejected'
+                  && (await canUserActOnStep(step, callerUserId, callerRoleId)).ok) {
+                canApprove = true;
+              }
+            }
+            items.push({
+              exerciseId: ex._id,
+              exerciseName: ex.exerciseInformation?.exerciseName || '',
+              exerciseType: ex.exerciseType || ex.exerciseInformation?.exerciseType || '',
+              testType: ex.exerciseInformation?.testType || '',
+              totalDuration: ex.exerciseInformation?.totalDuration || null,
+              totalMarks: ex.exerciseInformation?.totalMarks || null,
+              schedule: ex.availabilityPeriod || null,
+              entityType: kind,
+              entityId: doc._id,
+              entityName: doc.name || '',
+              subcategory,
+              tabType: targetTab,
+              // Which batch this item belongs to ("" = the shared, course-level
+              // set). The approve/reject call must send it back, or a
+              // batch-wise exercise is looked up in the wrong container and
+              // reported as not found.
+              batchId: entryBatchId || '',
+              approvalWorkflow: wf,
+              canApprove,
+              createdAt: ex.createdAt || null,
+              updatedAt: ex.updatedAt || null,
+              createdBy: ex.createdBy || null,
+              // Full exercise blob so the View dialog can render every section
+              // (configuration, grades, notifications, security, etc.) without
+              // an extra round-trip.
+              exercise: ex,
+            });
+          }
+        }
+      }
+    }
+
+    items.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+    res.status(200).json({ success: true, data: items });
+  } catch (err) {
+    console.error('getCourseApprovalsOverview error:', err);
+    res.status(500).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * GET /approvals/pending
+ * Lists exercises across all courses where the caller's role matches the
+ * currently-pending step. Used by approvers to see their queue.
+ */
+exports.listPendingApprovals = async (req, res) => {
+  try {
+    const callerRoleId = req.user?.role?._id || req.user?.role;
+    const callerUserId = req.user?._id || req.user?.id;
+    if (!callerRoleId) {
+      return res.status(403).json({ message: [{ key: 'error', value: 'No role on caller' }] });
+    }
+
+    const collections = [
+      { Model: Module1, kind: 'modules' },
+      { Model: SubModule1, kind: 'submodules' },
+      { Model: Topic1, kind: 'topics' },
+      { Model: SubTopic1, kind: 'subtopics' },
+    ];
+
+    // Institution-scoped (was an unfiltered cross-tenant scan of every
+    // pedagogy node in the database — verified live that no node doc lacks
+    // `institution`, and a step's role/pin can only ever match a caller of
+    // the same institution, so the visible result set is identical) and
+    // projected down to the two sections this loop reads — I_Do (typically
+    // the largest subtree: files/folders/blobs) is never consumed here.
+    // The four finds are independent → run concurrently; iteration order
+    // stays modules → submodules → topics → subtopics.
+    const docLists = await Promise.all(
+      collections.map(({ Model }) =>
+        Model.find(
+          { institution: req.user.institution },
+          { _id: 1, name: 1, courses: 1, 'pedagogy.We_Do': 1, 'pedagogy.You_Do': 1, batchPedagogy: 1 },
+        ).lean()
+      )
+    );
+
+    // canUserActOnStep hits User.findById for every pinned step; the same
+    // approver is pinned on many exercises, so memoize per request. The
+    // pre-filter below (before the await) is provably identical to the
+    // function's own logic: it can only return ok when the caller IS the
+    // pinned user or HOLDS the step's role — anything else is a guaranteed
+    // "no" that needn't cost a query.
+    const actCache = new Map();
+    const callerUserStr = callerUserId ? String(callerUserId) : '';
+    const callerRoleStr = callerRoleId ? String(callerRoleId) : '';
+    const canActCached = async (step) => {
+      const stepUserStr = step.userId ? String(step.userId) : '';
+      const stepRoleStr = step.roleId ? String(step.roleId) : '';
+      if (stepUserStr !== callerUserStr && stepRoleStr !== callerRoleStr) {
+        return { ok: false };
+      }
+      const key = `${stepUserStr}|${stepRoleStr}`;
+      if (!actCache.has(key)) {
+        actCache.set(key, await canUserActOnStep(step, callerUserId, callerRoleId));
+      }
+      return actCache.get(key);
+    };
+
+    const pending = [];
+    for (let ci = 0; ci < collections.length; ci++) {
+      const { kind } = collections[ci];
+      const docs = docLists[ci];
+      for (const doc of docs) {
+        const courseId = Array.isArray(doc.courses) ? doc.courses[0] : doc.courses;
+        // Resources by Batch — cross-batch by design, like the overview above.
+        // The `if (!doc.pedagogy) continue` that used to guard this loop also
+        // had to go: a node whose We Do / You Do is entirely batch-wise has no
+        // `pedagogy` at all, and its pending approvals would never be listed.
+        for (const tabType of ['We_Do', 'You_Do']) {
+          for (const [subcategory, exercises, entryBatchId] of mergeSectionAcrossBatches(doc, tabType)) {
+            if (!Array.isArray(exercises)) continue;
+            for (const ex of exercises) {
+              const wf = ex.approvalWorkflow;
+              if (!wf || wf.overallStatus !== 'in_progress') continue;
+              // Same rule as the overview + step-1 notification: a
+              // settings_and_questions item isn't reviewable (and its
+              // approver was never notified) until the trainer finishes
+              // configuring it — don't count it in queues/badges either.
+              const exScope = ex.availabilityPeriod?.approvalScope || 'settings';
+              if (exScope === 'settings_and_questions' && !isExerciseFullyConfigured(ex)) continue;
+              const idx = (wf.currentStep || 1) - 1;
+              const step = wf.steps?.[idx];
+              if (!step || step.status !== 'pending') continue;
+              // Person-specific queue: a step with a pinned userId lists only
+              // for THAT user; a legacy role-only step still lists for anyone
+              // holding the role — same rule as the approve gate below.
+              if (!(await canActCached(step)).ok) continue;
+              pending.push({
+                exerciseId: ex._id,
+                exerciseName: ex.exerciseInformation?.exerciseName,
+                exerciseType: ex.exerciseType || '',
+                courseId,
+                entityType: kind,
+                entityId: doc._id,
+                tabType,
+                subcategory,
+                // See the overview endpoint — the approve/reject call needs
+                // this to find a batch-wise exercise again.
+                batchId: entryBatchId || '',
+                step: {
+                  order: step.order,
+                  roleName: step.roleName,
+                  userId: step.userId || null,
+                  userName: step.userName || '',
+                },
+                currentStep: wf.currentStep,
+                totalSteps: wf.steps?.length || 0,
+                initiatedAt: wf.initiatedAt,
+                // Submitter identity — captured on the workflow itself
+                // (initiatedByUserId/Name/Email since 2026-09-04); older
+                // exercises without those fields fall back to the raw
+                // createdBy email on the exercise document.
+                submittedBy: {
+                  userId: wf.initiatedByUserId || null,
+                  name: wf.initiatedByName || '',
+                  email: wf.initiatedByEmail || ex.createdBy || '',
+                },
+                resubmissionCount: wf.resubmissionCount || 0,
+                approvalScope: ex.availabilityPeriod?.approvalScope || 'settings',
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // ── Enrich rows with client + course display info ────────────────────
+    // The row-level fields above only carry the courseId — the new Pending
+    // Approvals table needs the client name/logo and the course name to
+    // render, and the Client filter dropdown needs a list of clients that
+    // actually have pending items. Do it in ONE course lookup (batched over
+    // the whole page) rather than a per-row query.
+    const courseIds = Array.from(new Set(pending.map((p) => String(p.courseId || '')).filter(Boolean)));
+    let courseInfoById = new Map();
+    if (courseIds.length > 0) {
+      const courseDocs = await CourseStructure.find({ _id: { $in: courseIds } })
+        .select('_id courseName clientId clientName')
+        .lean();
+      courseInfoById = new Map(courseDocs.map((c) => [String(c._id), c]));
+    }
+    // Optional client hydration — fills a logo URL and re-checks the name
+    // (a rename on the client doesn't propagate to the embedded course
+    // scalar). ClientManagement is a separate collection, imported lazily
+    // so this controller doesn't load it when unused.
+    let clientById = new Map();
+    if (courseInfoById.size > 0) {
+      const ClientManagement = require('../../../models/ClientManagementModel');
+      const clientIds = Array.from(new Set(
+        Array.from(courseInfoById.values())
+          .map((c) => c?.clientId ? String(c.clientId) : null)
+          .filter(Boolean)
+      ));
+      if (clientIds.length > 0) {
+        const clientDocs = await ClientManagement.find({ _id: { $in: clientIds } })
+          .select('_id clientCompany clientLogo')
+          .lean();
+        clientById = new Map(clientDocs.map((cl) => [String(cl._id), cl]));
+      }
+    }
+    const enriched = pending.map((p) => {
+      const course = courseInfoById.get(String(p.courseId || '')) || null;
+      const client = course?.clientId ? clientById.get(String(course.clientId)) || null : null;
+      return {
+        ...p,
+        courseName: course?.courseName || '',
+        clientId: course?.clientId ? String(course.clientId) : '',
+        clientName: client?.clientCompany || course?.clientName || '',
+        clientLogo: client?.clientLogo || '',
+      };
+    });
+
+    res.status(200).json({ success: true, data: enriched });
+  } catch (err) {
+    console.error('listPendingApprovals error:', err);
+    res.status(500).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/approve
+ * Body: { entityType, entityId, tabType, subcategory, exerciseId, comment? }
+ * - Verifies caller's role == current step's roleId
+ * - Marks step approved, advances chain
+ * - Notifies next step (or students if final)
+ */
+exports.approveExerciseStep = async (req, res) => {
+  try {
+    const { entityType, entityId, tabType, subcategory, exerciseId, comment } = req.body;
+    if (!entityType || !entityId || !tabType || !subcategory || !exerciseId) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'entityType, entityId, tabType, subcategory, exerciseId all required' }] });
+    }
+    if (!modelMap[entityType]) {
+      return res.status(400).json({ message: [{ key: 'error', value: `Invalid entityType: ${entityType}` }] });
+    }
+    const { model } = modelMap[entityType];
+    const entity = await model.findById(entityId);
+    if (!entity) {
+      return res.status(404).json({ message: [{ key: 'error', value: `${entityType} not found` }] });
+    }
+
+    const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Locate the exercise BY ID across the shared container and every batch,
+    // rather than assuming the actor's own selected batch. The batch is a
+    // property of the exercise, not of the person acting on it: an approver
+    // works a queue spanning every batch, so scoping to whatever their
+    // Resources page happened to have selected would look in the wrong
+    // container and report the exercise as missing.
+    const located = locateExerciseContainer(entity, tabKey, subcategory, exerciseId);
+    if (!located) {
+      return res.status(404).json({ message: [{ key: 'error', value: 'Exercise not found' }] });
+    }
+    const { container: pedagogyRoot, basePath: pedagogyPath, exercises, index: idx, exercise } = located;
+    const wf = exercise.approvalWorkflow;
+    // Accept both 'in_progress' (normal approval) and 'rejected' (approver
+    // overrides their earlier rejection without a trainer resubmit).
+    if (!wf || (wf.overallStatus !== 'in_progress' && wf.overallStatus !== 'rejected')) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No active approval workflow on this exercise' }] });
+    }
+    const stepIdx = (wf.currentStep || 1) - 1;
+    const currentStep = wf.steps?.[stepIdx];
+    // Same reasoning: the current step is 'pending' in normal flow, or
+    // 'rejected' when the same approver is un-rejecting.
+    if (!currentStep || (currentStep.status !== 'pending' && currentStep.status !== 'rejected')) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No pending step' }] });
+    }
+    const isOverridingReject = wf.overallStatus === 'rejected' && currentStep.status === 'rejected';
+
+    const callerUserId = req.user?._id || req.user?.id;
+    const callerRoleId = req.user?.role?._id || req.user?.role;
+    const gate = await canUserActOnStep(currentStep, callerUserId, callerRoleId);
+    if (!gate.ok) {
+      return res.status(403).json({ message: [{ key: 'error', value: gate.reason }] });
+    }
+
+    // When scope is "settings_and_questions", require every question to be
+    // approved before the step can advance.
+    const scope = exercise.availabilityPeriod?.approvalScope || 'settings';
+    if (scope === 'settings_and_questions') {
+      const qs = Array.isArray(exercise.questions) ? exercise.questions : [];
+      const notApproved = qs.filter(q => (q?.approval?.status || 'pending') !== 'approved');
+      if (qs.length === 0) {
+        return res.status(400).json({ message: [{ key: 'error', value: 'This exercise has no questions to approve.' }] });
+      }
+      if (notApproved.length > 0) {
+        return res.status(400).json({
+          message: [{
+            key: 'error',
+            value: `${notApproved.length} of ${qs.length} question(s) still need your approval before this step can advance.`
+          }],
+        });
+      }
+    }
+
+    currentStep.status = 'approved';
+    currentStep.decidedBy = req.user._id || req.user.id;
+    currentStep.decidedAt = new Date();
+    // If this is an override, drop the old rejection comment; otherwise take
+    // whatever the approver typed (may be empty).
+    currentStep.comment = typeof comment === 'string' ? comment : '';
+    // Any approve outcome clears the "was edited since reject" marker — the
+    // decision has been made on the current content and the flag is stale.
+    wf.editedSinceReject = false;
+
+    const isLast = wf.currentStep >= wf.steps.length;
+    let nextStep = null;
+    if (isLast) {
+      wf.overallStatus = 'approved';
+      wf.studentVisible = true;
+      wf.completedAt = new Date();
+    } else {
+      wf.currentStep += 1;
+      // Reset overallStatus in case we're coming out of 'rejected', and clear
+      // the stale completedAt that reject set.
+      wf.overallStatus = 'in_progress';
+      wf.completedAt = null;
+      nextStep = wf.steps[wf.currentStep - 1];
+      nextStep.status = 'pending';
+      // Reset every question's approval for the new step's clean slate.
+      if (scope === 'settings_and_questions' && Array.isArray(exercise.questions)) {
+        exercise.questions.forEach((q) => {
+          if (!q.approval) q.approval = {};
+          q.approval.status = 'pending';
+          q.approval.currentStepOrder = nextStep.order;
+          q.approval.decidedBy = null;
+          q.approval.decidedAt = null;
+          q.approval.queries = [];
+        });
+      }
+    }
+
+    exercise.approvalWorkflow = wf;
+    exercises[idx] = exercise;
+    pedagogyRoot[tabKey].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabKey}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}.approvalWorkflow`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    // Notify next step (or students on final approval) — non-blocking.
+    const courseIdForNotify = resolveCourseId(entity);
+    const courseDoc = courseIdForNotify
+      ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+      : null;
+    if (nextStep) {
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: nextStep,
+        exerciseName: exercise.exerciseInformation?.exerciseName,
+        exerciseId: exercise._id,
+      }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
+    } else if (tabKey !== 'We_Do') {
+      // We Do assignments are announced by the node model's save hook
+      // (utils/assignmentStudentNotify.js) — the save just above flipped the
+      // workflow to approved, so it has already fired, scoped to the
+      // assignment's batch and honouring Notify Student + its channels.
+      // Calling this too would re-announce it to every batch of the course.
+      notifyStudentsExerciseAvailable({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        exerciseName: exercise.exerciseInformation?.exerciseName,
+        exerciseId: exercise._id,
+      }).catch((e) => console.warn('notifyStudentsExerciseAvailable failed:', e.message));
+    }
+
+    res.status(200).json({
+      success: true,
+      message: isLast ? 'Final approval — exercise is now visible to students.' : 'Step approved. Next approver notified.',
+      data: { approvalWorkflow: wf },
+    });
+  } catch (err) {
+    console.error('approveExerciseStep error:', err);
+    res.status(500).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/reject
+ * Body: { entityType, entityId, tabType, subcategory, exerciseId, comment }
+ * - Only the current-step approver can call it.
+ * - `comment` (the query message) is required — this is what the trainer sees.
+ * - Marks the step rejected, sets overallStatus=rejected, and notifies the
+ *   creator (trainer) with a deep-link to the assessment list.
+ * - Workflow stays "rejected" until the trainer edits and explicitly clicks
+ *   Resubmit for Approval (see `resubmitExerciseForApproval` below).
+ */
+exports.rejectExerciseStep = async (req, res) => {
+  try {
+    const { entityType, entityId, tabType, subcategory, exerciseId, comment } = req.body;
+    if (!entityType || !entityId || !tabType || !subcategory || !exerciseId) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'entityType, entityId, tabType, subcategory, exerciseId all required' }] });
+    }
+    if (typeof comment !== 'string' || !comment.trim()) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'A rejection message is required — describe what the trainer should fix.' }] });
+    }
+    if (!modelMap[entityType]) {
+      return res.status(400).json({ message: [{ key: 'error', value: `Invalid entityType: ${entityType}` }] });
+    }
+    const { model } = modelMap[entityType];
+    const entity = await model.findById(entityId);
+    if (!entity) {
+      return res.status(404).json({ message: [{ key: 'error', value: `${entityType} not found` }] });
+    }
+
+    const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Locate the exercise BY ID across the shared container and every batch,
+    // rather than assuming the actor's own selected batch. The batch is a
+    // property of the exercise, not of the person acting on it: an approver
+    // works a queue spanning every batch, so scoping to whatever their
+    // Resources page happened to have selected would look in the wrong
+    // container and report the exercise as missing.
+    const located = locateExerciseContainer(entity, tabKey, subcategory, exerciseId);
+    if (!located) {
+      return res.status(404).json({ message: [{ key: 'error', value: 'Exercise not found' }] });
+    }
+    const { container: pedagogyRoot, basePath: pedagogyPath, exercises, index: idx, exercise } = located;
+    const wf = exercise.approvalWorkflow;
+    // Accept normal 'in_progress' AND the "rejected + editedSinceReject"
+    // state — the approver can reject again with a new comment after the
+    // trainer's edits. `editedSinceReject` guards against re-rejecting stale
+    // rejected content (that button won't be shown on the client either).
+    const rejectedAndEdited = wf && wf.overallStatus === 'rejected' && wf.editedSinceReject;
+    if (!wf || (wf.overallStatus !== 'in_progress' && !rejectedAndEdited)) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No active approval workflow on this exercise' }] });
+    }
+    const stepIdx = (wf.currentStep || 1) - 1;
+    const currentStep = wf.steps?.[stepIdx];
+    if (!currentStep || (currentStep.status !== 'pending' && currentStep.status !== 'rejected')) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No pending step' }] });
+    }
+    const callerUserId = req.user?._id || req.user?.id;
+    const callerRoleId = req.user?.role?._id || req.user?.role;
+    const gate = await canUserActOnStep(currentStep, callerUserId, callerRoleId);
+    if (!gate.ok) {
+      return res.status(403).json({ message: [{ key: 'error', value: gate.reason }] });
+    }
+
+    currentStep.status = 'rejected';
+    currentStep.decidedBy = req.user._id || req.user.id;
+    currentStep.decidedAt = new Date();
+    currentStep.comment = comment.trim();
+    wf.overallStatus = 'rejected';
+    wf.completedAt = new Date();
+    // Fresh reject on the reworked content — clear the "edited since reject"
+    // marker so the row falls back to View-only until the trainer edits again.
+    wf.editedSinceReject = false;
+
+    exercise.approvalWorkflow = wf;
+    exercises[idx] = exercise;
+    pedagogyRoot[tabKey].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabKey}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}.approvalWorkflow`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    // ── Notify the creator (trainer) with the rejection message ────────────
+    // Uses `notifySingleUser` (existing) which handles both in-app + email.
+    // The metadata carries everything the client needs to build a deep link
+    // back to the exact assessment (nodeType, nodeId, tabType, subcategory,
+    // exerciseId) so a notification click drops the trainer right on the
+    // row for editing.
+    const courseIdForNotify = resolveCourseId(entity);
+    const courseDoc = courseIdForNotify
+      ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+      : null;
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+    const deepLinkPath = `/lms/pages/courses/uploadcourseresources?courseId=${courseIdForNotify || ''}&nodeId=${entity._id}&activeTab=${tabKey}&activeSubcategory=${encodeURIComponent(subcategory)}&highlightExerciseId=${exercise._id}`;
+    const deepLinkAbs = `${baseUrl}${deepLinkPath}`;
+    const exerciseName = exercise.exerciseInformation?.exerciseName || 'Your assessment';
+    const emailBody = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color:#dc2626;">Approval rejected</h2>
+        <p><strong>${exerciseName}</strong> in <strong>${courseDoc?.courseName || 'your course'}</strong> was rejected by ${currentStep.roleName}.</p>
+        <div style="background:#fff7ed; border-left:4px solid #f59e0b; padding:12px 16px; margin:16px 0; color:#1f2937;">
+          <p style="margin:0; font-weight:600;">Reviewer's message</p>
+          <p style="margin:6px 0 0; white-space:pre-wrap;">${comment.trim().replace(/</g, '&lt;')}</p>
+        </div>
+        <p>Open the assessment, address the feedback, then click <strong>Resubmit for Approval</strong> to send it back through the chain.</p>
+        <p style="margin-top:20px;"><a href="${deepLinkAbs}" style="background:#4f46e5;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Open assessment</a></p>
+      </div>
+    `;
+    if (exercise.createdBy) {
+      notifySingleUser({
+        email: exercise.createdBy, // createdBy is the trainer's email (see createExercise)
+        title: 'Approval rejected',
+        message: `${exerciseName}: ${comment.trim()}`,
+        type: 'warning',
+        subject: `Approval rejected: ${exerciseName}`,
+        body: emailBody,
+        metadata: {
+          kind: 'approval_rejected',
+          exerciseId: String(exercise._id),
+          entityType: entityType,
+          entityId: String(entity._id),
+          tabType: tabKey,
+          subcategory: subcategory,
+          courseId: courseIdForNotify ? String(courseIdForNotify) : '',
+          redirectUrl: deepLinkPath,
+          rejectedByRole: currentStep.roleName || '',
+          rejectedAt: currentStep.decidedAt.toISOString(),
+        },
+      }).catch((e) => console.warn('notifySingleUser (reject) failed:', e.message));
+    } else {
+      console.warn(`rejectExerciseStep: exercise ${exercise._id} has no createdBy — trainer will not be notified.`);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Exercise rejected. The creator has been notified.',
+      data: { approvalWorkflow: wf },
+    });
+  } catch (err) {
+    console.error('rejectExerciseStep error:', err);
+    res.status(500).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/resubmit
+ * Body: { entityType, entityId, tabType, subcategory, exerciseId }
+ * - Only the exercise's creator can resubmit.
+ * - Only works when overallStatus === 'rejected'.
+ * - Rebuilds the workflow at step 1 (all step state cleared, notifiedAt too)
+ *   and fires the step-1 notification honoring `approvalScope`.
+ */
+exports.resubmitExerciseForApproval = async (req, res) => {
+  try {
+    const { entityType, entityId, tabType, subcategory, exerciseId } = req.body;
+    if (!entityType || !entityId || !tabType || !subcategory || !exerciseId) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'entityType, entityId, tabType, subcategory, exerciseId all required' }] });
+    }
+    if (!modelMap[entityType]) {
+      return res.status(400).json({ message: [{ key: 'error', value: `Invalid entityType: ${entityType}` }] });
+    }
+    const { model } = modelMap[entityType];
+    const entity = await model.findById(entityId);
+    if (!entity) {
+      return res.status(404).json({ message: [{ key: 'error', value: `${entityType} not found` }] });
+    }
+    const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+    // ── Resources by Batch ───────────────────────────────────────────────
+    // Locate the exercise BY ID across the shared container and every batch,
+    // rather than assuming the actor's own selected batch. The batch is a
+    // property of the exercise, not of the person acting on it: an approver
+    // works a queue spanning every batch, so scoping to whatever their
+    // Resources page happened to have selected would look in the wrong
+    // container and report the exercise as missing.
+    const located = locateExerciseContainer(entity, tabKey, subcategory, exerciseId);
+    if (!located) {
+      return res.status(404).json({ message: [{ key: 'error', value: 'Exercise not found' }] });
+    }
+    const { container: pedagogyRoot, basePath: pedagogyPath, exercises, index: idx, exercise } = located;
+    const wf = exercise.approvalWorkflow;
+    // Resubmit is valid when the workflow itself was rejected OR when the
+    // workflow is still open but an approver rejected individual questions
+    // (per-question rejects don't flip overallStatus).
+    const hasRejectedQuestion = Array.isArray(exercise.questions) &&
+      exercise.questions.some((q) => q?.approval?.status === 'rejected');
+    if (!wf || (wf.overallStatus !== 'rejected' && !hasRejectedQuestion)) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'Only rejected exercises (or exercises with rejected questions) can be resubmitted.' }] });
+    }
+
+    // Creator gate — matches the same rule used elsewhere: createdBy is the
+    // trainer's email as of exercise creation.
+    const callerEmail = req.user?.email || null;
+    if (!callerEmail || callerEmail !== exercise.createdBy) {
+      return res.status(403).json({ message: [{ key: 'error', value: 'Only the exercise creator can resubmit for approval.' }] });
+    }
+
+    // Reset every step so the chain runs fresh; step 1 = pending, rest = waiting.
+    (wf.steps || []).forEach((s, i) => {
+      s.status = i === 0 ? 'pending' : 'waiting';
+      s.decidedBy = null;
+      s.decidedAt = null;
+      s.comment = '';
+      s.notifiedAt = null;
+    });
+    wf.currentStep = 1;
+    wf.overallStatus = 'in_progress';
+    wf.studentVisible = false;
+    wf.completedAt = null;
+    wf.initiatedAt = new Date();
+    // Fresh workflow → clear the "was edited since reject" marker so future
+    // reject → edit → resubmit cycles start from a clean state.
+    wf.editedSinceReject = false;
+    // Mark this run as a re-request so approver UIs can badge it.
+    wf.resubmissionCount = (wf.resubmissionCount || 0) + 1;
+    wf.lastResubmittedAt = new Date();
+
+    // Reset per-question approvals when scope is settings_and_questions so
+    // approvers re-check each question against the updated exercise.
+    const scope = exercise.availabilityPeriod?.approvalScope || 'settings';
+    if (scope === 'settings_and_questions' && Array.isArray(exercise.questions)) {
+      exercise.questions.forEach((q) => {
+        if (!q.approval) q.approval = {};
+        q.approval.status = 'pending';
+        q.approval.currentStepOrder = 1;
+        q.approval.decidedBy = null;
+        q.approval.decidedAt = null;
+        q.approval.queries = [];
+      });
+    }
+
+    // Stamp notifiedAt on step 1 iff the gate says fire — same idempotent
+    // pattern as the create/update paths.
+    const willNotifyStep1 = shouldFireStep1Notification(exercise);
+    if (willNotifyStep1) {
+      wf.steps[0].notifiedAt = new Date();
+    }
+
+    exercise.approvalWorkflow = wf;
+    exercises[idx] = exercise;
+    pedagogyRoot[tabKey].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabKey}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${idx}.approvalWorkflow`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    if (willNotifyStep1) {
+      const courseIdForNotify = resolveCourseId(entity);
+      const courseDoc = courseIdForNotify
+        ? await CourseStructure.findById(courseIdForNotify).select('courseName').lean()
+        : null;
+      notifyApproversForStep({
+        courseId: courseIdForNotify,
+        courseName: courseDoc?.courseName,
+        step: wf.steps[0],
+        exerciseName: exercise.exerciseInformation?.exerciseName,
+        exerciseId: exercise._id,
+        isResubmit: true,
+      }).catch((e) => console.warn('notifyApproversForStep (resubmit) failed:', e.message));
+    }
+
+    res.status(200).json({
+      success: true,
+      message: willNotifyStep1
+        ? 'Resubmitted. Step-1 approver notified.'
+        : 'Resubmitted. Approver will be notified once the assessment is fully configured.',
+      data: { approvalWorkflow: wf },
+    });
+  } catch (err) {
+    console.error('resubmitExerciseForApproval error:', err);
+    res.status(500).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+// ============================================================================
+// Per-question approval helpers
+// ============================================================================
+
+// Walks to the question subdoc by IDs, runs `mutate(question, exercise, wf)`,
+// then persists. Common boilerplate for the three endpoints below.
+const _withQuestion = async (req, res, mutate) => {
+  // IMPORTANT: every early-error path must `return null` AFTER sending the
+  // response — res.json() returns the res object (truthy), so `return res...`
+  // would defeat the callers' `if (!result) return;` guard and make them
+  // respond a second time (ERR_HTTP_HEADERS_SENT → unhandled rejection).
+  const { entityType, entityId, tabType, subcategory, exerciseId, questionId } = req.body;
+  if (!entityType || !entityId || !tabType || !subcategory || !exerciseId || !questionId) {
+    res.status(400).json({ message: [{ key: 'error', value: 'entityType, entityId, tabType, subcategory, exerciseId, questionId all required' }] });
+    return null;
+  }
+  if (!modelMap[entityType]) {
+    res.status(400).json({ message: [{ key: 'error', value: `Invalid entityType: ${entityType}` }] });
+    return null;
+  }
+  const { model } = modelMap[entityType];
+  const entity = await model.findById(entityId);
+  if (!entity) {
+    res.status(404).json({ message: [{ key: 'error', value: `${entityType} not found` }] });
+    return null;
+  }
+  const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+  // ── Resources by Batch ───────────────────────────────────────────────
+  // Locate the exercise BY ID across the shared container and every batch,
+  // rather than assuming the actor's own selected batch. The batch is a
+  // property of the exercise, not of the person acting on it: an approver
+  // works a queue spanning every batch, so scoping to whatever their
+  // Resources page happened to have selected would look in the wrong
+  // container and report the exercise as missing.
+  const located = locateExerciseContainer(entity, tabKey, subcategory, exerciseId);
+  if (!located) {
+    res.status(404).json({ message: [{ key: 'error', value: 'Exercise not found' }] });
+    return null;
+  }
+  const { container: pedagogyRoot, basePath: pedagogyPath, exercises, index: exIdx, exercise } = located;
+  const wf = exercise.approvalWorkflow;
+  // Per-question actions are valid whenever the workflow is still live —
+  // i.e. not finally approved. That includes 'rejected' state (approver
+  // can still touch questions on an assessment they previously rejected,
+  // e.g. to reject specific questions after the trainer's edits).
+  if (!wf || wf.overallStatus === 'approved') {
+    res.status(400).json({ message: [{ key: 'error', value: 'No active approval workflow' }] });
+    return null;
+  }
+  const scope = exercise.availabilityPeriod?.approvalScope || 'settings';
+  if (scope !== 'settings_and_questions') {
+    res.status(400).json({ message: [{ key: 'error', value: 'This exercise does not require per-question approval.' }] });
+    return null;
+  }
+  const questions = Array.isArray(exercise.questions) ? exercise.questions : [];
+  const qIdx = questions.findIndex(q => String(q._id) === String(questionId));
+  if (qIdx === -1) {
+    res.status(404).json({ message: [{ key: 'error', value: 'Question not found' }] });
+    return null;
+  }
+  const question = questions[qIdx];
+  if (!question.approval) question.approval = { status: 'pending', queries: [] };
+
+  await mutate({ question, exercise, exercises, exIdx, qIdx, wf, entity, tabKey, subcategory, courseInfo: { courseId: resolveCourseId(entity) } });
+
+  // Persist
+  exercises[exIdx] = exercise;
+  pedagogyRoot[tabKey].set(subcategory, exercises);
+  entity.markModified(`${pedagogyPath}.${tabKey}`);
+  entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}`);
+  entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${exIdx}`);
+  entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${exIdx}.questions`);
+  entity.updatedBy = req.user?.email || 'system';
+  entity.updatedAt = new Date();
+  await entity.save();
+  return { exercise, question, wf, entity };
+};
+
+/**
+ * POST /exercise/question/approve
+ * Approver marks a question approved. Only allowed when caller's role matches
+ * the workflow's current step.
+ */
+exports.approveQuestion = async (req, res) => {
+  try {
+    let approvedQuestion = null;
+    let theWf = null;
+    const result = await _withQuestion(req, res, async (ctx) => {
+      const { question, wf } = ctx;
+      const stepIdx = (wf.currentStep || 1) - 1;
+      const step = wf.steps?.[stepIdx];
+      // Per-question approval is valid while the step is still open —
+      // 'pending' (normal) or 'rejected' (approver already rejected the
+      // assessment step but is still walking questions before the trainer
+      // resubmits). Blocks only 'approved' / 'waiting'.
+      if (!step || (step.status !== 'pending' && step.status !== 'rejected')) {
+        throw Object.assign(new Error('No pending step'), { statusCode: 400 });
+      }
+      const callerUserId = req.user?._id || req.user?.id;
+      const callerRoleId = req.user?.role?._id || req.user?.role;
+      const gate = await canUserActOnStep(step, callerUserId, callerRoleId);
+      if (!gate.ok) {
+        throw Object.assign(new Error(gate.reason), { statusCode: 403 });
+      }
+      if (question.approval.status === 'queried') {
+        throw Object.assign(new Error('This question has an open query. Wait for the trainer to address it before approving.'), { statusCode: 400 });
+      }
+      // A rejected question can only be approved AFTER the trainer's edit —
+      // enforced by `editedSinceReject`. Without an edit, the approver is
+      // essentially reversing their own decision on unchanged content, so
+      // block it.
+      if (question.approval.status === 'rejected' && !question.approval.editedSinceReject) {
+        throw Object.assign(new Error('This question is rejected. Wait for the trainer to edit it before approving.'), { statusCode: 400 });
+      }
+      question.approval.status = 'approved';
+      question.approval.currentStepOrder = step.order;
+      question.approval.decidedBy = req.user._id || req.user.id;
+      question.approval.decidedAt = new Date();
+      // Clear the reject state once approved — the row can move on to the
+      // next step's clean slate (approveExerciseStep will reset per-question
+      // state anyway, but this keeps the current record tidy).
+      question.approval.rejectionMessage = '';
+      question.approval.editedSinceReject = false;
+      approvedQuestion = question;
+      theWf = wf;
+    });
+    if (!result) return; // _withQuestion already wrote a response
+    res.status(200).json({
+      success: true,
+      message: 'Question approved.',
+      data: { approval: approvedQuestion.approval, workflow: theWf },
+    });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('approveQuestion error:', err);
+    res.status(status).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/question/approve-all
+ * Bulk companion to approveQuestion — backs the common "Approve all pending"
+ * button under the approver's question list. Approves every question whose
+ * approval status is 'pending'. Queried and rejected questions are skipped:
+ * those states carry a conversation with the trainer and must be decided
+ * one by one. Same role/scope gates as the per-question endpoints.
+ */
+exports.approveAllQuestions = async (req, res) => {
+  try {
+    const { entityType, entityId, tabType, subcategory, exerciseId } = req.body;
+    if (!entityType || !entityId || !tabType || !subcategory || !exerciseId) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'entityType, entityId, tabType, subcategory, exerciseId all required' }] });
+    }
+    if (!modelMap[entityType]) {
+      return res.status(400).json({ message: [{ key: 'error', value: `Invalid entityType: ${entityType}` }] });
+    }
+    const { model } = modelMap[entityType];
+    const entity = await model.findById(entityId);
+    if (!entity) {
+      return res.status(404).json({ message: [{ key: 'error', value: `${entityType} not found` }] });
+    }
+    const tabKey = tabType === 'I_Do' ? 'I_Do' : tabType === 'We_Do' ? 'We_Do' : 'You_Do';
+    const located = locateExerciseContainer(entity, tabKey, subcategory, exerciseId);
+    if (!located) {
+      return res.status(404).json({ message: [{ key: 'error', value: 'Exercise not found' }] });
+    }
+    const { container: pedagogyRoot, basePath: pedagogyPath, exercises, index: exIdx, exercise } = located;
+    const wf = exercise.approvalWorkflow;
+    if (!wf || wf.overallStatus === 'approved') {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No active approval workflow' }] });
+    }
+    const scope = exercise.availabilityPeriod?.approvalScope || 'settings';
+    if (scope !== 'settings_and_questions') {
+      return res.status(400).json({ message: [{ key: 'error', value: 'This exercise does not require per-question approval.' }] });
+    }
+    const stepIdx = (wf.currentStep || 1) - 1;
+    const step = wf.steps?.[stepIdx];
+    if (!step || (step.status !== 'pending' && step.status !== 'rejected')) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No pending step' }] });
+    }
+    const callerUserId = req.user?._id || req.user?.id;
+    const callerRoleId = req.user?.role?._id || req.user?.role;
+    const gate = await canUserActOnStep(step, callerUserId, callerRoleId);
+    if (!gate.ok) {
+      return res.status(403).json({ message: [{ key: 'error', value: gate.reason }] });
+    }
+
+    const questions = Array.isArray(exercise.questions) ? exercise.questions : [];
+    let approvedCount = 0;
+    let skippedQueried = 0;
+    let skippedRejected = 0;
+    questions.forEach((q) => {
+      if (!q.approval) q.approval = { status: 'pending', queries: [] };
+      const st = q.approval.status || 'pending';
+      if (st === 'pending') {
+        q.approval.status = 'approved';
+        q.approval.currentStepOrder = step.order;
+        q.approval.decidedBy = req.user._id || req.user.id;
+        q.approval.decidedAt = new Date();
+        q.approval.rejectionMessage = '';
+        q.approval.editedSinceReject = false;
+        approvedCount += 1;
+      } else if (st === 'queried') {
+        skippedQueried += 1;
+      } else if (st === 'rejected') {
+        skippedRejected += 1;
+      }
+    });
+    if (approvedCount === 0) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'No pending questions to approve. Queried or rejected questions must be handled individually.' }] });
+    }
+
+    exercises[exIdx] = exercise;
+    pedagogyRoot[tabKey].set(subcategory, exercises);
+    entity.markModified(`${pedagogyPath}.${tabKey}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${exIdx}`);
+    entity.markModified(`${pedagogyPath}.${tabKey}.${subcategory}.${exIdx}.questions`);
+    entity.updatedBy = req.user?.email || 'system';
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    const skippedNote =
+      skippedQueried + skippedRejected > 0
+        ? ` ${skippedQueried} queried and ${skippedRejected} rejected question(s) still need individual handling.`
+        : '';
+    res.status(200).json({
+      success: true,
+      message: `${approvedCount} question(s) approved.${skippedNote}`,
+      data: { approvedCount, skippedQueried, skippedRejected },
+    });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('approveAllQuestions error:', err);
+    res.status(status).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/question/reject
+ * Approver rejects a question with a required message. The question's status
+ * flips to 'rejected' and its creator is notified. Trainer-side edits on a
+ * rejected question flip `approval.editedSinceReject = true` — that's what
+ * re-opens the Approve/Reject buttons on the approver's UI.
+ *
+ * Semantically distinct from raiseQuestionQuery (which stays as-is for the
+ * lighter "clarify" flow) — this one is a hard "fix this before we can
+ * approve" and blocks the assessment-level approve until fixed.
+ */
+exports.rejectQuestion = async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'A rejection message is required.' }] });
+    }
+    let target = null;
+    const courseInfo = { courseId: null, courseName: null };
+    const exerciseName = { name: '' };
+    const result = await _withQuestion(req, res, async (ctx) => {
+      const { question, wf, exercise } = ctx;
+      const stepIdx = (wf.currentStep || 1) - 1;
+      const step = wf.steps?.[stepIdx];
+      // Accept pending OR rejected step — see comment in approveQuestion.
+      if (!step || (step.status !== 'pending' && step.status !== 'rejected')) {
+        throw Object.assign(new Error('No pending step'), { statusCode: 400 });
+      }
+      const callerUserId = req.user?._id || req.user?.id;
+      const callerRoleId = req.user?.role?._id || req.user?.role;
+      const gate = await canUserActOnStep(step, callerUserId, callerRoleId);
+      if (!gate.ok) {
+        throw Object.assign(new Error(gate.reason), { statusCode: 403 });
+      }
+      // Allow rejecting again (with a new comment) if the trainer already
+      // re-edited a previously-rejected question — the approver may still
+      // find issues. Fresh reject clears the "edited since reject" marker.
+      if (question.approval.status === 'approved') {
+        throw Object.assign(new Error('This question is already approved. Reject the assessment step instead if needed.'), { statusCode: 400 });
+      }
+      question.approval.status = 'rejected';
+      question.approval.currentStepOrder = step.order;
+      question.approval.decidedBy = req.user._id || req.user.id;
+      question.approval.decidedAt = new Date();
+      question.approval.rejectionMessage = text.trim();
+      question.approval.editedSinceReject = false;
+
+      // Recipient resolution copy of raiseQuestionQuery logic — see comment there.
+      const raiserId = (req.user._id || req.user.id || '').toString();
+      const raiserEmail = (req.user.email || '').toString();
+      const qCreatorId = question.createdBy ? question.createdBy.toString() : '';
+      const qCreatorEmail = (question.createdByEmail || '').toString();
+      const sameAsRaiser =
+        (qCreatorId && qCreatorId === raiserId) ||
+        (qCreatorEmail && qCreatorEmail === raiserEmail);
+      target = sameAsRaiser
+        ? { creatorId: null, creatorEmail: exercise.createdBy || null }
+        : { creatorId: question.createdBy || null, creatorEmail: question.createdByEmail || exercise.createdBy || null };
+
+      exerciseName.name = exercise.exerciseInformation?.exerciseName || '';
+      courseInfo.courseId = ctx.courseInfo.courseId;
+    });
+    if (!result) return;
+
+    // Notify creator (best-effort). Same deep-link structure as the
+    // assessment-level reject so a click drops the trainer on the row.
+    try {
+      const course = courseInfo.courseId
+        ? await CourseStructure.findById(courseInfo.courseId).select('courseName').lean()
+        : null;
+      courseInfo.courseName = course?.courseName || '';
+      const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+      const deepLinkPath = `/lms/pages/courses/uploadcourseresources?courseId=${courseInfo.courseId || ''}&nodeId=${req.body.entityId}&activeTab=${req.body.tabType}&activeSubcategory=${encodeURIComponent(req.body.subcategory)}&highlightExerciseId=${req.body.exerciseId}`;
+      const deepLinkAbs = `${baseUrl}${deepLinkPath}`;
+      notifySingleUser({
+        userId: target?.creatorId,
+        email: target?.creatorEmail,
+        title: 'Question rejected',
+        message: `A question in "${exerciseName.name}" was rejected: ${text.trim()}`,
+        type: 'warning',
+        subject: `Question rejected: ${exerciseName.name || 'a question'} (${courseInfo.courseName || ''})`,
+        body: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color:#dc2626;">A question was rejected</h2>
+            <p>Exercise: <strong>${exerciseName.name || '—'}</strong></p>
+            <blockquote style="border-left:4px solid #dc2626; background:#fef2f2; padding:10px 14px; margin:12px 0;">${text.trim().replace(/</g, '&lt;')}</blockquote>
+            <p>Open the question, address the feedback, and save. Approvers will then re-review.</p>
+            <p style="margin-top:20px;"><a href="${deepLinkAbs}" style="background:#4f46e5;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;">Open assessment</a></p>
+          </div>
+        `,
+        metadata: {
+          kind: 'question_rejected',
+          exerciseId: String(req.body.exerciseId),
+          questionId: String(req.body.questionId),
+          entityType: String(req.body.entityType),
+          entityId: String(req.body.entityId),
+          tabType: String(req.body.tabType),
+          subcategory: String(req.body.subcategory),
+          courseId: courseInfo.courseId ? String(courseInfo.courseId) : '',
+          redirectUrl: deepLinkPath,
+        },
+      }).catch(() => {});
+    } catch (e) { /* swallow */ }
+
+    res.status(200).json({ success: true, message: 'Question rejected. Creator notified.' });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('rejectQuestion error:', err);
+    res.status(status).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/question/query
+ * Approver raises a query on a question. Notifies the question's creator.
+ */
+exports.raiseQuestionQuery = async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ message: [{ key: 'error', value: 'Query text is required.' }] });
+    }
+    let target = null;
+    const courseInfo = { courseId: null, courseName: null };
+    const exerciseName = { name: '' };
+    const result = await _withQuestion(req, res, async (ctx) => {
+      const { question, wf, exercise } = ctx;
+      const stepIdx = (wf.currentStep || 1) - 1;
+      const step = wf.steps?.[stepIdx];
+      if (!step || (step.status !== 'pending' && step.status !== 'rejected')) {
+        throw Object.assign(new Error('No pending step'), { statusCode: 400 });
+      }
+      const callerUserId = req.user?._id || req.user?.id;
+      const callerRoleId = req.user?.role?._id || req.user?.role;
+      const gate = await canUserActOnStep(step, callerUserId, callerRoleId);
+      if (!gate.ok) {
+        throw Object.assign(new Error(gate.reason), { statusCode: 403 });
+      }
+      if (!Array.isArray(question.approval.queries)) question.approval.queries = [];
+      question.approval.queries.push({
+        raisedBy: req.user._id || req.user.id,
+        raisedByName: `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || req.user.email,
+        raisedAt: new Date(),
+        text: text.trim(),
+        resolvedBy: null,
+        resolvedAt: null,
+        resolutionNote: '',
+      });
+      question.approval.status = 'queried';
+      question.approval.currentStepOrder = step.order;
+      // Resolve recipient with fallbacks so old questions (created before the
+      // createdBy stamp was wired) still notify SOMEONE:
+      //   1. question.createdBy (ObjectId) — newest questions
+      //   2. question.createdByEmail (String) — same era
+      //   3. exercise.createdBy (String, email) — the staff who created the
+      //      whole exercise (always populated)
+      //
+      // Skip the per-question creator when it's the same person raising the
+      // query (an approver who also happened to be logged in when the
+      // question was originally added) — fall through to the exercise
+      // creator instead so the notification reaches a different responsible
+      // person, not themselves.
+      const raiserId = (req.user._id || req.user.id || '').toString();
+      const raiserEmail = (req.user.email || '').toString();
+      const qCreatorId = question.createdBy ? question.createdBy.toString() : '';
+      const qCreatorEmail = (question.createdByEmail || '').toString();
+      const sameAsRaiser =
+        (qCreatorId && qCreatorId === raiserId) ||
+        (qCreatorEmail && qCreatorEmail === raiserEmail);
+      if (sameAsRaiser) {
+        target = {
+          creatorId: null,
+          creatorEmail: exercise.createdBy || null,
+        };
+      } else {
+        target = {
+          creatorId: question.createdBy || null,
+          creatorEmail: question.createdByEmail || exercise.createdBy || null,
+        };
+      }
+      exerciseName.name = exercise.exerciseInformation?.exerciseName || '';
+      courseInfo.courseId = ctx.courseInfo.courseId;
+    });
+    if (!result) return;
+
+    // Notify question creator (best-effort)
+    try {
+      const course = courseInfo.courseId
+        ? await CourseStructure.findById(courseInfo.courseId).select('courseName').lean()
+        : null;
+      courseInfo.courseName = course?.courseName || '';
+      notifySingleUser({
+        userId: target?.creatorId,
+        email: target?.creatorEmail,
+        title: 'Query raised on your question',
+        message: `An approver raised a query on a question in "${exerciseName.name}". Open the question to address it.`,
+        type: 'warning',
+        subject: `Query: ${exerciseName.name || 'a question'} (${courseInfo.courseName || ''})`,
+        body: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color:#1f2937;">A query was raised on your question</h2>
+            <p>Exercise: <strong>${exerciseName.name || '—'}</strong></p>
+            <blockquote style="border-left:4px solid #f59e0b; background:#fffbeb; padding:10px 14px; margin:12px 0;">${text}</blockquote>
+            <p>Open the question in the LMS to address the query and click <strong>Approve</strong> when done.</p>
+          </div>
+        `,
+        metadata: { exerciseId: String(req.body.exerciseId), questionId: String(req.body.questionId) },
+      }).catch(() => {});
+    } catch (e) { /* swallow */ }
+
+    res.status(200).json({ success: true, message: 'Query sent to the question creator.' });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('raiseQuestionQuery error:', err);
+    res.status(status).json({ message: [{ key: 'error', value: err.message }] });
+  }
+};
+
+/**
+ * POST /exercise/question/resolve-query
+ * Trainer marks the latest open query as addressed. Notifies the approver who
+ * raised it so they can re-review. Question goes back to "pending".
+ */
+exports.resolveQuestionQuery = async (req, res) => {
+  try {
+    const { note } = req.body;
+    let raiserId = null;
+    let approverEmail = null;
+    const courseInfo = { courseId: null, courseName: null };
+    const exerciseName = { name: '' };
+    const result = await _withQuestion(req, res, async (ctx) => {
+      const { question, exercise } = ctx;
+      if (question.approval.status !== 'queried' || !Array.isArray(question.approval.queries) || question.approval.queries.length === 0) {
+        throw Object.assign(new Error('This question has no open query.'), { statusCode: 400 });
+      }
+      const openIdx = [...question.approval.queries].reverse().findIndex(q => !q.resolvedAt);
+      if (openIdx === -1) {
+        throw Object.assign(new Error('No open query to resolve.'), { statusCode: 400 });
+      }
+      const realIdx = question.approval.queries.length - 1 - openIdx;
+      const q = question.approval.queries[realIdx];
+      q.resolvedBy = req.user._id || req.user.id;
+      q.resolvedByName = `${req.user.firstName || ''} ${req.user.lastName || ''}`.trim() || req.user.email;
+      q.resolvedAt = new Date();
+      q.resolutionNote = typeof note === 'string' ? note : '';
+      raiserId = q.raisedBy;
+      question.approval.status = 'pending';
+      question.approval.decidedBy = null;
+      question.approval.decidedAt = null;
+      exerciseName.name = exercise.exerciseInformation?.exerciseName || '';
+      courseInfo.courseId = ctx.courseInfo.courseId;
+    });
+    if (!result) return;
+
+    // Notify raiser
+    try {
+      if (raiserId) {
+        const raiser = await User.findById(raiserId).select('email firstName lastName').lean();
+        approverEmail = raiser?.email || null;
+      }
+      const course = courseInfo.courseId
+        ? await CourseStructure.findById(courseInfo.courseId).select('courseName').lean()
+        : null;
+      courseInfo.courseName = course?.courseName || '';
+      notifySingleUser({
+        userId: raiserId,
+        email: approverEmail,
+        title: 'Your query has been addressed',
+        message: `The trainer addressed your query on a question in "${exerciseName.name}". Re-review and approve.`,
+        type: 'success',
+        subject: `Query addressed: ${exerciseName.name || 'a question'} (${courseInfo.courseName || ''})`,
+        body: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color:#1f2937;">A trainer addressed your query</h2>
+            <p>Exercise: <strong>${exerciseName.name || '—'}</strong></p>
+            ${note ? `<p>Note from the trainer:</p><blockquote style="border-left:4px solid #10b981; background:#ecfdf5; padding:10px 14px;">${note}</blockquote>` : ''}
+            <p>Open the View Resources page in the LMS to re-review and approve.</p>
+          </div>
+        `,
+        metadata: { exerciseId: String(req.body.exerciseId), questionId: String(req.body.questionId) },
+      }).catch(() => {});
+    } catch (e) { /* swallow */ }
+
+    res.status(200).json({ success: true, message: 'Query marked as addressed.' });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    console.error('resolveQuestionQuery error:', err);
+    res.status(status).json({ message: [{ key: 'error', value: err.message }] });
   }
 };

@@ -15,62 +15,78 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 })
 
-const SOFFICE = 'C:/Program Files/LibreOffice/program/soffice.exe'
+// Where LibreOffice lives differs per machine — a Windows dev box, a Mac, the
+// Linux server — so it is not one hard-coded path (that path failed with
+// ENOENT on any machine where LibreOffice sat elsewhere or was missing).
+// LIBREOFFICE_PATH in .env wins; then the usual install locations; then plain
+// `soffice` on the PATH. Resolved per conversion, not at startup, so
+// installing LibreOffice takes effect without restarting the server.
+const SOFFICE_CANDIDATES = [
+  'C:/Program Files/LibreOffice/program/soffice.exe',
+  'C:/Program Files (x86)/LibreOffice/program/soffice.exe',
+  '/Applications/LibreOffice.app/Contents/MacOS/soffice',
+  '/usr/bin/soffice',
+  '/usr/local/bin/soffice',
+  '/usr/bin/libreoffice',
+  '/opt/libreoffice/program/soffice',
+  '/snap/bin/libreoffice',
+]
 
-async function convertPptToImages(req, res) {
-  // Accept either an uploaded file or a URL (URL used only if server can reach it)
-  const hasUploadedFile = req.files && req.files.file
-  const pptUrl = req.body?.pptUrl
+function resolveSoffice() {
+  if (process.env.LIBREOFFICE_PATH) return process.env.LIBREOFFICE_PATH
+  return SOFFICE_CANDIDATES.find(p => fs.existsSync(p)) || 'soffice'
+}
 
-  if (!hasUploadedFile && !pptUrl) {
-    return res.status(400).json({ success: false, error: 'Either upload a file or provide pptUrl' })
+const LIBREOFFICE_MISSING =
+  'LibreOffice is not installed on the server, so this presentation cannot be ' +
+  'converted for viewing. Install LibreOffice (or set LIBREOFFICE_PATH) and retry.'
+
+// In-flight conversions keyed by cacheKey — prevents duplicate LibreOffice runs
+// and duplicate Cloudinary uploads when the same deck is requested concurrently.
+const inFlightConversions = new Map()
+
+// Core pipeline: buffer → LibreOffice PDF → page images → Cloudinary → PptCache.
+// Returns { slideImages, totalSlides }. Reusable from the route handler and from
+// background upload-time conversion (pedagogyView.js).
+async function convertDocumentToSlides({ buffer, ext, cacheKey }) {
+  if (cacheKey && inFlightConversions.has(cacheKey)) {
+    console.log('⏳ Conversion already in flight — joining existing run')
+    return inFlightConversions.get(cacheKey)
   }
 
-  // Check DB cache first — only possible when a URL is known
-  const cacheKey = pptUrl || null
+  const promise = performConversion({ buffer, ext, cacheKey })
+
   if (cacheKey) {
-    const cached = await PptCache.findOne({ pptUrl: cacheKey })
-    if (cached && cached.slideImages.length > 0) {
-      console.log('✅ Cache hit — returning stored slides')
-      return res.json({ success: true, slideImages: cached.slideImages, totalSlides: cached.totalSlides, fromCache: true })
-    }
+    inFlightConversions.set(cacheKey, promise)
+    promise.catch(() => {}).finally(() => inFlightConversions.delete(cacheKey))
   }
 
-  const tempDir = path.join(os.tmpdir(), `ppt_${Date.now()}`)
+  return promise
+}
+
+async function performConversion({ buffer, ext, cacheKey }) {
+  const tempDir = path.join(os.tmpdir(), `ppt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
 
   try {
     await fs.ensureDir(tempDir)
 
-    // Detect the actual file extension so LibreOffice opens it correctly
-    let ext = 'pptx'
-    if (hasUploadedFile && req.files.file.name) {
-      const m = req.files.file.name.match(/\.([a-zA-Z0-9]+)$/)
-      if (m) ext = m[1].toLowerCase()
-    } else if (pptUrl) {
-      const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
-      if (m) ext = m[1].toLowerCase()
-    }
-
     const inputPath = path.join(tempDir, `presentation.${ext}`)
-
-    if (hasUploadedFile) {
-      // File sent directly from browser — no external download needed
-      console.log(`📁 Using uploaded file (${ext})...`)
-      await fs.writeFile(inputPath, req.files.file.data)
-    } else {
-      // Fallback: download from URL
-      console.log(`⬇️  Downloading file (${ext})...`)
-      const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
-      await fs.writeFile(inputPath, Buffer.from(response.data))
-    }
+    await fs.writeFile(inputPath, buffer)
 
     // 2. Document → PDF via LibreOffice (works for pptx, docx, doc, ppt, odp, odt, etc.)
     console.log('📄 Converting to PDF via LibreOffice...')
-    await execFileAsync(
-      SOFFICE,
-      ['--headless', '--convert-to', 'pdf', '--outdir', tempDir, inputPath],
-      { timeout: 120000 }
-    )
+    try {
+      await execFileAsync(
+        resolveSoffice(),
+        ['--headless', '--convert-to', 'pdf', '--outdir', tempDir, inputPath],
+        { timeout: 120000 }
+      )
+    } catch (err) {
+      // ENOENT = the executable itself was not found. Say that in words the
+      // viewer can show, rather than "spawn …/soffice.exe ENOENT".
+      if (err && err.code === 'ENOENT') throw new Error(LIBREOFFICE_MISSING)
+      throw err
+    }
 
     // LibreOffice names the PDF after the input file stem (presentation.{ext} → presentation.pdf)
     const pdfPath = path.join(tempDir, 'presentation.pdf')
@@ -82,6 +98,15 @@ async function convertPptToImages(req, res) {
     console.log('🖼️  Rendering slides...')
     const { pdf } = await import('pdf-to-img')
     const pdfBuffer = await fs.readFile(pdfPath)
+
+    // Fire-and-forget: the intermediate PDF carries the document's full text
+    // layer — build the glossary word map from it, keyed by the same
+    // cacheKey (the stored file URL) the slide cache uses.
+    if (cacheKey) {
+      const { extractLessonTextFromPdf } = require('../../utils/lessonTextExtract')
+      extractLessonTextFromPdf(Buffer.from(pdfBuffer), cacheKey)
+        .catch(err => console.warn('Lesson text extraction failed:', err.message))
+    }
     const imagePaths = []
     let slideNum = 1
 
@@ -121,14 +146,82 @@ async function convertPptToImages(req, res) {
       ).catch(err => console.warn('Cache save failed:', err.message))
     }
 
-    res.json({ success: true, slideImages, totalSlides: slideImages.length })
+    return { slideImages, totalSlides: slideImages.length }
 
-  } catch (err) {
-    console.error('❌ PPT conversion error:', err.message)
-    res.status(500).json({ success: false, error: err.message })
   } finally {
     await fs.remove(tempDir).catch(() => {})
   }
 }
 
-module.exports = { convertPptToImages }
+// Delete the cached conversion for a document URL and destroy its slide images
+// on Cloudinary. Used when a file is replaced/removed so orphaned slides don't
+// pile up. Safe to fire-and-forget.
+async function cleanupConvertedSlides(pptUrl) {
+  if (!pptUrl) return
+  const cached = await PptCache.findOneAndDelete({ pptUrl })
+  if (!cached || !Array.isArray(cached.slideImages)) return
+  await Promise.all(
+    cached.slideImages.map(imageUrl => {
+      // '.../upload/v17123/ppt-slides/slide_1_999.jpg' → 'ppt-slides/slide_1_999'
+      const afterUpload = imageUrl.split('/upload/')[1]
+      if (!afterUpload) return Promise.resolve()
+      const publicId = afterUpload.replace(/^v\d+\//, '').replace(/\.[a-zA-Z0-9]+$/, '')
+      return cloudinary.uploader.destroy(publicId)
+        .catch(err => console.warn('Cloudinary slide cleanup failed:', err.message))
+    })
+  )
+}
+
+async function convertPptToImages(req, res) {
+  // Accept either an uploaded file or a URL (URL used only if server can reach it)
+  const hasUploadedFile = req.files && req.files.file
+  const pptUrl = req.body?.pptUrl
+
+  if (!hasUploadedFile && !pptUrl) {
+    return res.status(400).json({ success: false, error: 'Either upload a file or provide pptUrl' })
+  }
+
+  // Check DB cache first — only possible when a URL is known
+  const cacheKey = pptUrl || null
+  if (cacheKey) {
+    const cached = await PptCache.findOne({ pptUrl: cacheKey })
+    if (cached && cached.slideImages.length > 0) {
+      console.log('✅ Cache hit — returning stored slides')
+      return res.json({ success: true, slideImages: cached.slideImages, totalSlides: cached.totalSlides, fromCache: true })
+    }
+  }
+
+  try {
+    // Detect the actual file extension so LibreOffice opens it correctly
+    let ext = 'pptx'
+    if (hasUploadedFile && req.files.file.name) {
+      const m = req.files.file.name.match(/\.([a-zA-Z0-9]+)$/)
+      if (m) ext = m[1].toLowerCase()
+    } else if (pptUrl) {
+      const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
+      if (m) ext = m[1].toLowerCase()
+    }
+
+    let buffer
+    if (hasUploadedFile) {
+      // File sent directly from browser — no external download needed
+      console.log(`📁 Using uploaded file (${ext})...`)
+      buffer = req.files.file.data
+    } else {
+      // Fallback: download from URL
+      console.log(`⬇️  Downloading file (${ext})...`)
+      const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
+      buffer = Buffer.from(response.data)
+    }
+
+    const { slideImages, totalSlides } = await convertDocumentToSlides({ buffer, ext, cacheKey })
+
+    res.json({ success: true, slideImages, totalSlides })
+
+  } catch (err) {
+    console.error('❌ PPT conversion error:', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+}
+
+module.exports = { convertPptToImages, convertDocumentToSlides, cleanupConvertedSlides }

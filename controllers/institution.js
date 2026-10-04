@@ -1,4 +1,6 @@
 const Institution = require("../models/InstitutionModal");
+const InstitutionPermission = require("../models/superadmin/InstitutionPermissionModel");
+const ResourceSetting = require("../models/superadmin/ResourceSettingModel");
 // const { createClient } = require("@supabase/supabase-js");
 // const supabaseKey = process.env.SUPABASE_KEY;
 // const supabaseUrl = process.env.SUPABASE_URL;
@@ -116,6 +118,58 @@ exports.getAllInstitution= async (req, res) => {
         console.error("Error updating institution:", error);
         return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
     }
+};
+
+// GET /institution/permissions/:id
+// Self-service, read-only mirror of the Super Admin's institution permission
+// allow-list (superadmin/institutions/:id/permissions). Lets an institution's
+// own logged-in user (e.g. its super_admin) fetch the set of permissions the
+// Super Admin enabled for their institution, so the LMS-side Permission Modal
+// can limit what it offers instead of showing the full catalog. A user may
+// only read their own institution's list — never another tenant's.
+exports.getInstitutionPermissions = async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (String(req.user?.institution) !== String(id)) {
+      return res.status(403).json({ message: [{ key: "error", value: "Not allowed to view this institution's permissions" }] });
+    }
+    const doc = await InstitutionPermission.findOne({ institution: id }).lean();
+    return res.status(200).json({
+      message: [{ key: "success", value: "Institution permissions retrieved" }],
+      permissions: doc?.permissions || [],
+    });
+  } catch (error) {
+    console.error("Error retrieving institution permissions:", error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
+  }
+};
+
+// GET /institution/resource-settings/:id
+// Self-service, read-only mirror of the Super Admin's Resource Management
+// config (superadmin/resources). Lets an institution's own logged-in user
+// read which I Do upload types (ppt/pdf/videos/image/zip/url/notes/ai) and
+// We Do / You Do AI features the Super Admin enabled, so the course-creation
+// "Resource Type" step can show only what's actually available instead of
+// every possible type. A user may only read their own institution's config.
+exports.getInstitutionResourceSettings = async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (String(req.user?.institution) !== String(id)) {
+      return res.status(403).json({ message: [{ key: "error", value: "Not allowed to view this institution's resource settings" }] });
+    }
+    const doc = await ResourceSetting.findOne({ scope: String(id) }).lean();
+    // No doc yet (Super Admin never opened Resource Management for this
+    // institution) → fall back to the schema's defaults, same as what the
+    // Super Admin would see on first load.
+    const resourcePedagogy = doc?.resourcePedagogy || new ResourceSetting({}).toObject().resourcePedagogy;
+    return res.status(200).json({
+      message: [{ key: "success", value: "Resource settings retrieved" }],
+      resourcePedagogy,
+    });
+  } catch (error) {
+    console.error("Error retrieving institution resource settings:", error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal server error" }] });
+  }
 };
 
 // Delete Institution

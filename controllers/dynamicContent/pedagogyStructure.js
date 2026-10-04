@@ -96,10 +96,11 @@ exports.getAllPedagogyStructures = async (req, res) => {
 
     const institutionId = req.user.institution;
 
-    // Find all pedagogy structures for the institution
+    // Find all pedagogy structures for the institution (read-only → lean)
     const structures = await PedagogyStructureDynamic.find({ institution: institutionId })
       .sort({ createdAt: -1 }) // Sort by newest first
-     
+      .lean()
+
 
     res.status(200).json({
       success: true,

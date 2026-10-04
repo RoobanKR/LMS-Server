@@ -129,13 +129,13 @@ exports.getAllGroupsCoursesData = async (req, res) => {
       });
     }
 
-    // Find course with populated singleParticipants
+    // Find course with populated batch participants
     const course = await Course.findOne({
       _id: courseId,
       institution: institution
     })
     .populate({
-      path: "singleParticipants.user",
+      path: "batchAndParticipants.users.user",
       select: "firstName lastName email phone role status profile department degree year semester batch gender createdAt",
       populate: {
         path: "role",
@@ -162,39 +162,40 @@ exports.getAllGroupsCoursesData = async (req, res) => {
       category: course.category,
       serviceType: course.serviceType,
       serviceModal: course.serviceModal,
-      singleParticipants: course?.singleParticipants?.map(enrollment => {
-        const user = enrollment.user || {};
-        const role = user.role || {};
-        
-        return {
-          _id: enrollment._id,
-          user: {
-            _id: user._id,
-            id: user._id,
-            firstName: user.firstName || '',
-            lastName: user.lastName || '',
-            email: user.email || '',
-            phone: user.phone || '',
-            role: role.renameRole || role.name || 'Unknown Role',
-            roleId: role._id,
-            status: user.status || 'active',
-            profile: user.profile || '',
-            department: user.department || '',
-            degree: user.degree || '',
-            year: user.year || '',
-            semester: user.semester || '',
-            batch: user.batch || '',
-            gender: user.gender || '',
-            createdAt: user.createdAt || ''
-          },
-          status: enrollment.status || 'active',
-          enableEnrolmentDates: enrollment.enableEnrolmentDates || false,
-          enrolmentStartsDate: enrollment.enrolmentStartsDate || null,
-          enrolmentEndsDate: enrollment.enrolmentEndsDate || null,
-          createdAt: enrollment.createdAt,
-          updatedAt: enrollment.updatedAt
-        };
-      }),
+      participants: (course?.batchAndParticipants || []).flatMap(batch =>
+        (batch.users || []).map(enrollment => {
+          const user = enrollment.user || {};
+          const role = user.role || {};
+
+          return {
+            _id: enrollment._id,
+            batchId: batch._id,
+            batchName: batch.batchName,
+            user: {
+              _id: user._id,
+              id: user._id,
+              firstName: user.firstName || '',
+              lastName: user.lastName || '',
+              email: user.email || '',
+              phone: user.phone || '',
+              role: role.renameRole || role.name || 'Unknown Role',
+              roleId: role._id,
+              status: user.status || 'active',
+              profile: user.profile || '',
+              department: user.department || '',
+              degree: user.degree || '',
+              year: user.year || '',
+              semester: user.semester || '',
+              batch: user.batch || '',
+              gender: user.gender || '',
+              createdAt: user.createdAt || ''
+            },
+            status: enrollment.status || 'active',
+            joinedAt: enrollment.joinedAt,
+            updatedAt: enrollment.updatedAt
+          };
+        })
+      ),
       createdAt: course.createdAt,
       updatedAt: course.updatedAt
     };

@@ -1,11 +1,144 @@
+const mongoose = require("mongoose");
 const User = require("../models/UserModel");
 
 
 
+/** Escape a user-supplied search term so it is matched literally. */
+const escapeNotifRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * One page of the caller's notifications.
+ *
+ * Notifications are an embedded array on the User document, so the whole array
+ * is read from disk either way — but only a page is walked, shaped and sent.
+ * The list grows for the lifetime of an account and the page rendered EVERY
+ * row, so this is the growth that had no ceiling.
+ *
+ * The filter and search are ports of the page's own `getFilteredNotifications`
+ * (features/notifications/NotificationsPage.tsx), field for field.
+ */
+async function getUserNotificationsPaginated(req, res, userId) {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const filter = String(req.query.filter || 'all');
+  const search = String(req.query.search || '').trim();
+
+  // The page's filter buckets. Anything that is not one of the four reserved
+  // words matches EITHER relatedEntity OR type — that is the page's rule.
+  let match = {};
+  if (filter === 'unread') match = { 'notifications.isRead': { $ne: true } };
+  else if (filter === 'read') match = { 'notifications.isRead': true };
+  else if (filter === 'favorite') match = { 'notifications.isFavorite': true };
+  // L&D buckets, by metadata.kind. Approval requests sent before `kind`
+  // existed are matched by their fixed titles.
+  else if (filter === 'approval') {
+    match = {
+      $or: [
+        { 'notifications.metadata.kind': 'approval_request' },
+        { 'notifications.title': { $in: ['Approval requested', 'Approval re-requested'] } },
+      ],
+    };
+  } else if (filter === 'attendance') match = { 'notifications.metadata.kind': 'attendance_missing' };
+  else if (filter !== 'all') {
+    match = {
+      $or: [
+        { 'notifications.relatedEntity': filter },
+        { 'notifications.type': filter },
+      ],
+    };
+  }
+  if (search) {
+    const rx = new RegExp(escapeNotifRegex(search), 'i');
+    const searchMatch = {
+      $or: [{ 'notifications.title': rx }, { 'notifications.message': rx }],
+    };
+    match = Object.keys(match).length ? { $and: [match, searchMatch] } : searchMatch;
+  }
+
+  // The filter applies to the ROWS and their total, but NOT to `unreadCount`:
+  // that badge counts the caller's whole list, exactly as the legacy path did
+  // (it derived it from every notification, before any filtering). Keeping the
+  // filter out of that branch is the difference between the badge reading 1
+  // and reading 0 while the "read" tab is open — caught by testing each filter.
+  const filtered = Object.keys(match).length ? [{ $match: match }] : [];
+
+  const [out] = await User.aggregate([
+    { $match: { _id: new mongoose.Types.ObjectId(String(userId)) } },
+    { $unwind: '$notifications' },
+    {
+      $facet: {
+        rows: [
+          ...filtered,
+          { $sort: { 'notifications.createdAt': -1, 'notifications._id': -1 } },
+          { $skip: (page - 1) * limit },
+          { $limit: limit },
+          { $replaceRoot: { newRoot: '$notifications' } },
+        ],
+        count: [...filtered, { $count: 'n' }],
+        unread: [
+          { $match: { 'notifications.isRead': { $ne: true } } },
+          { $count: 'n' },
+        ],
+      },
+    },
+  ]);
+
+  const rows = out?.rows || [];
+  const total = out?.count?.[0]?.n || 0;
+
+  // `enrolledBy` is an id here; the legacy path populated it. Resolve only the
+  // ids on THIS page.
+  const enrolledIds = [...new Set(rows.map((r) => r.enrolledBy).filter(Boolean).map(String))];
+  const enrolledDocs = enrolledIds.length
+    ? await User.find({ _id: { $in: enrolledIds } })
+      .select('firstName lastName email').lean()
+    : [];
+  const byId = new Map(enrolledDocs.map((u) => [String(u._id), u]));
+
+  const notifications = rows.map((n) => {
+    // `metadata` is a Map in Mongoose; aggregation returns it as a plain
+    // object already, but a missing value must still serialise as {} exactly
+    // as the legacy path did.
+    const metadata = n.metadata && typeof n.metadata === 'object' ? n.metadata : {};
+    const src = n.enrolledBy ? byId.get(String(n.enrolledBy)) : null;
+    return {
+      ...n,
+      metadata,
+      enrolledByInfo: src
+        ? {
+          id: src._id,
+          name: `${src.firstName || ''} ${src.lastName || ''}`.trim(),
+          email: src.email,
+          isPopulated: true,
+        }
+        : null,
+    };
+  });
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      notifications,
+      unreadCount: out?.unread?.[0]?.n || 0,
+      totalCount: total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    },
+  });
+}
+
 exports.getUserNotifications = async (req, res) => {
   try {
     const userId = req.user.id;
-    
+
+    // ── Paginated mode (opt-in via `page`) ───────────────────────────────────
+    // Without `page` the original response is unchanged, so the notification
+    // bell and any other consumer are untouched.
+    if (req.query.page !== undefined) {
+      return await getUserNotificationsPaginated(req, res, userId);
+    }
+
     // Populate enrolledBy field with user details
     const user = await User.findById(userId)
       .populate({

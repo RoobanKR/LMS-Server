@@ -27,37 +27,99 @@
 
 // module.exports = { sendEmail };
 // utils/sendEmail.js
-const nodemailer = require("nodemailer");
+//
+// ONE mail entry point for the whole server. Every caller — Add User's welcome
+// mail, Bulk Upload, the activate/deactivate notices — calls `sendEmail()` and
+// reads `{ success, error }` back, so the transport lives here alone and no
+// controller has to know what it is.
+//
+// Transport: Resend (https://resend.com), and ONLY Resend. There is no SMTP
+// fallback on purpose — a fallback that silently re-sends from a different
+// address is how a "delivered" log line stops meaning the mail actually left,
+// and the Gmail App Password this used to fall back to had been dead for a
+// while without anybody noticing.
+//
+// SENDER: `from` must be an address on a domain VERIFIED at resend.com/domains
+// (currently smartcliff.in). Resend rejects any other `from` with a 403, which
+// this returns as { success: false } — it never throws at the caller.
 const validator = require("validator");
 require("dotenv").config();
+const { Resend } = require("resend");
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.NODEMAILER_FORM_EMAIL,
-    pass: process.env.NODEMAILER_FORM_EMAIL_PASSWORD,
-  },
-});
+const RESEND_API_KEY = process.env.RESENDMAIL_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM_EMAIL;
+
+// Built once at module load. `null` when no key is configured, which the send
+// path reports as a failure rather than pretending the mail went out.
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
+
+// Both of these are fatal to sending, and both are silent at runtime unless
+// something says so at boot — the whole failure mode is mail that looks fine
+// in the UI and never arrives.
+if (!resend) {
+  console.error(
+    "[mail] RESENDMAIL_API_KEY is not set. No email can be sent; every " +
+    "sendEmail() call will return { success: false }."
+  );
+} else if (!RESEND_FROM) {
+  console.error(
+    "[mail] RESEND_FROM_EMAIL is not set. Resend requires a `from` on a " +
+    "verified domain, so every send will be rejected with a 403. Set it to an " +
+    'address on your verified domain, e.g. "SmartCliff <no-reply@smartcliff.in>".'
+  );
+}
+
+// Resend's API allows 2 requests/second and answers the third with
+// `rate_limit_exceeded`. Bulk Upload sends one mail per user in a tight
+// sequential loop, which walks straight into that and would report a run of
+// perfectly valid addresses as "email failed". Spacing calls out by
+// RESEND_MIN_GAP_MS keeps the whole loop under the limit; single sends (Add
+// User) never wait, because the gate only holds when the PREVIOUS call was
+// less than a gap ago.
+const RESEND_MIN_GAP_MS = 550;
+let lastResendAt = 0;
+const throttleResend = async () => {
+  const wait = lastResendAt + RESEND_MIN_GAP_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastResendAt = Date.now();
+};
+
+// Recipients arrive as a single string from some callers and an array from
+// others; Resend wants a clean, de-duplicated list either way.
+const toList = (value) =>
+  [...new Set(
+    (Array.isArray(value) ? value : [value])
+      .filter(Boolean)
+      .map((v) => String(v).trim())
+      .filter(Boolean)
+  )];
 
 const sendEmail = async (...args) => {
   try {
     let receiverEmails, emailSubject, emailBody, ccEmails;
-    
+
     // Handle both object and parameter formats
     if (args.length === 1 && typeof args[0] === 'object') {
-      // Object format
+      // Object format — Add User, Bulk Upload, approvals, invitations. Extra
+      // keys those callers pass (fromEmail, institutionId, users, sendType)
+      // are accepted and ignored, as they always were.
       const emailData = args[0];
       receiverEmails = emailData.receiverEmails;
       emailSubject = emailData.subject || emailData.emailSubject;
       emailBody = emailData.body || emailData.emailBody;
       ccEmails = emailData.ccEmails || [];
     } else {
-      // Parameter format
+      // Parameter format — (to, subject, html, cc)
       [receiverEmails, emailSubject, emailBody, ccEmails = []] = args;
     }
 
+    if (!resend) {
+      return { success: false, error: "Email is not configured (RESENDMAIL_API_KEY missing)" };
+    }
+
     // Validate receiverEmails
-    if (!receiverEmails) {
+    const to = toList(receiverEmails);
+    if (to.length === 0) {
       console.error("Error: No recipients defined");
       return {
         success: false,
@@ -65,21 +127,29 @@ const sendEmail = async (...args) => {
       };
     }
 
-    const mailOptions = {
-      from: process.env.NODEMAILER_FORM_EMAIL,
-      to: receiverEmails,
-      cc: ccEmails,
+    const cc = toList(ccEmails);
+
+    await throttleResend();
+    const { data, error } = await resend.emails.send({
+      from: RESEND_FROM,
+      to,
+      ...(cc.length ? { cc } : {}),
       subject: emailSubject,
       html: emailBody,
-    };
+    });
 
-    await transporter.sendMail(mailOptions);
-    console.log("Email sent successfully to:", receiverEmails);
+    // The SDK RESOLVES on an API error rather than throwing, so an unchecked
+    // call would report success for a mail Resend never accepted.
+    if (error) {
+      console.error("Resend rejected the email:", error);
+      return {
+        success: false,
+        error: error.message || error.name || "Resend rejected the email",
+      };
+    }
 
-    return {
-      success: true,
-      message: "Email sent successfully"
-    };
+    console.log("Email sent successfully to:", to.join(", "), `(resend id ${data?.id})`);
+    return { success: true, message: "Email sent successfully", id: data?.id };
   } catch (error) {
     console.error("Error sending email:", error);
     return {

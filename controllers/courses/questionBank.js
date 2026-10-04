@@ -1,10 +1,22 @@
 const Question = require('../../models/Courses/QuestionbankModal');
-const { createClient } = require("@supabase/supabase-js");
 const mongoose = require('mongoose');
 
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
+// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
+// resolving { data, error }), so the call sites below are unchanged — see
+// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+const { storage, publicUrlFor } = require("../../utils/storage");
+
+// DO NOT add `.lean()` to the question-bank reads. Measured against live data:
+// hydration materialises 11 schema-defaulted fields that are absent from the
+// stored BSON — hasOtherOption, essayAnswer, problemType, topics, tags,
+// timeComplexity, spaceComplexity, source, outputCode and the two
+// _clonedFromExercise markers — on 31 of this institution's 81 questions.
+// `.lean()` returns raw BSON, so all of them would silently disappear from the
+// response (104,458 -> 97,762 bytes), breaking any consumer that reads
+// `q.topics` / `q.tags` as arrays or branches on `q.source`. The sub-schema's
+// toJSON transform (QuestionbankModal.js) is a second, independent reason the
+// two paths do not serialise identically.
 
 // Helper function to clean empty fields
 const cleanEmptyFields = (obj) => {
@@ -36,7 +48,7 @@ async function uploadImageToSupabase(file, folderPath) {
     const fileName = `${timestamp}_${randomString}_${sanitizedName}`;
     const filePath = `question-bank/${folderPath}/${fileName}`;
 
-    const { data, error } = await supabase.storage
+    const { data, error } = await storage
       .from("smartlms")
       .upload(filePath, file.data || file.buffer, {
         contentType: file.mimetype || 'image/jpeg',
@@ -48,7 +60,7 @@ async function uploadImageToSupabase(file, folderPath) {
       throw new Error(`Supabase upload failed: ${error.message}`);
     }
 
-    const imageUrl = `${process.env.SUPABASE_URL}/storage/v1/object/public/smartlms/${filePath}`;
+    const imageUrl = publicUrlFor(filePath);
     return imageUrl;
   } catch (error) {
     console.error("❌ Image upload failed:", error);
@@ -381,6 +393,10 @@ exports.createQuestionBank = async (req, res) => {
         // Build base MCQ question object
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
+          // Course-scoped bank: when the client sends a courseId (from the
+          // Course Specific tab's Manage view), we pin the question to that
+          // course so the scoped list shows it. Falsy → general bank.
+          ...(question.courseId ? { courseId: String(question.courseId) } : {}),
           questionCategory: question.questionCategory || 'General',
           questionType: 'mcq',
           isActive: question.isActive !== undefined ? question.isActive : true,
@@ -410,6 +426,10 @@ exports.createQuestionBank = async (req, res) => {
 
         if (mcqType === 'short_answer') {
           processedQuestion.shortAnswer = question.shortAnswer || '';
+        }
+
+        if (mcqType === 'essay') {
+          processedQuestion.essayAnswer = question.essayAnswer || '';
         }
 
         if (mcqType === 'matching') {
@@ -486,6 +506,7 @@ exports.createQuestionBank = async (req, res) => {
 
         processedQuestion = {
           _id: new mongoose.Types.ObjectId(),
+          ...(question.courseId ? { courseId: String(question.courseId) } : {}),
           questionCategory: question.questionCategory || 'Programming',
           // Specific sub-type: programming (core) / frontend / database.
           questionType: (question.questionType || 'programming').toLowerCase(),
@@ -502,6 +523,22 @@ exports.createQuestionBank = async (req, res) => {
           hints: hints,
           testCases: testCases,
           solutions: solutions,
+          // Code Setup — Starter shown to students; Solution is author-only.
+          // Programming/SQL: a code string. Frontend: { html, css, javascript }.
+          starterCode: question.starterCode ?? '',
+          solutionCode: question.solutionCode ?? '',
+          codeSetupLanguage: question.codeSetupLanguage || '',
+          // Execution Setup — round-trip so the question editor restores the
+          // same Function/Full Program + Blank/Generated/Custom choice on
+          // reload; schema whitelist was silently dropping these before.
+          executionType: (question.executionType === 'function' || question.executionType === 'fullProgram')
+            ? question.executionType : undefined,
+          functionContract: (question.functionContract && typeof question.functionContract === 'object')
+            ? question.functionContract : undefined,
+          startingExperience: (question.startingExperience === 'blank'
+              || question.startingExperience === 'generated'
+              || question.startingExperience === 'custom')
+            ? question.startingExperience : undefined,
           timeLimit: question.timeLimit || 2000,
           memoryLimit: question.memoryLimit || 256,
           isActive: question.isActive !== undefined ? question.isActive : true,
@@ -510,6 +547,25 @@ exports.createQuestionBank = async (req, res) => {
           createdAt: new Date(),
           updatedAt: new Date()
         };
+      }
+
+      // ── Classification metadata (shared by MCQ + programming) ────────────
+      // problemType / topics / tags / complexity / source from the Create
+      // Question modal. Optional on every path — absent keys stay unset.
+      {
+        const cleanList = (v) => Array.isArray(v)
+          ? v.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim())
+          : [];
+        const metaTopics = cleanList(question.topics);
+        const metaTags = cleanList(question.tags);
+        if (question.problemType) processedQuestion.problemType = String(question.problemType);
+        if (metaTopics.length) processedQuestion.topics = metaTopics;
+        if (metaTags.length) processedQuestion.tags = metaTags;
+        if (question.timeComplexity) processedQuestion.timeComplexity = String(question.timeComplexity);
+        if (question.spaceComplexity) processedQuestion.spaceComplexity = String(question.spaceComplexity);
+        if (question.outputCode) processedQuestion.outputCode = String(question.outputCode);
+        if (question.source) processedQuestion.source = String(question.source);
+        if (question.hasOtherOption !== undefined) processedQuestion.hasOtherOption = question.hasOtherOption === true;
       }
 
       // Remove undefined fields
@@ -588,7 +644,67 @@ exports.createQuestionBank = async (req, res) => {
   }
 };
 
+// ── Question Bank list helpers ───────────────────────────────────────────────
+// Verbatim ports of QuestionBanksPage's own derivations — isMcqType, scoreOf,
+// inMarksRange and the three-field search — so a server-paginated page holds
+// exactly the rows that page's `filteredQuestions` useMemo would have kept.
+// Any drift here shows up as questions silently missing from the table.
+const isMcqType = (questionType) => String(questionType || '').toLowerCase() === 'mcq';
+
+// MCQ score defaults to 10, programming to its own score (the page's `scoreOf`).
+// The MCQ default is load-bearing: drop it and every MCQ falls into the 1-5
+// bucket instead of 6-10.
+const bankScoreOf = (q) => (isMcqType(q.questionType) ? (q.mcqQuestionScore || 10) : (q.score || 0));
+
+const inMarksRange = (score, range) => {
+  if (range === '1-5') return score >= 1 && score <= 5;
+  if (range === '6-10') return score >= 6 && score <= 10;
+  if (range === '11-20') return score >= 11 && score <= 20;
+  if (range === '20+') return score > 20;
+  return true;
+};
+
+// The page reads `q.questionTitle` for MCQ rows and `q.title` otherwise.
+// NOTHING in this collection has a `questionTitle` — the schema calls it
+// `mcqQuestionTitle` — so that branch is dead and an MCQ matches a search only
+// through its description or category. Ported as-is: this change moves the
+// filter to the server, it does not get to change which rows a search returns.
+const bankSearchTitle = (q) => (isMcqType(q.questionType) ? q.questionTitle : q.title);
+
+// In the browser `q.description?.toLowerCase()` yields undefined for a missing
+// or non-string field; here the same expression would throw, so coerce.
+const lcOf = (v) => (typeof v === 'string' ? v.toLowerCase() : '');
+
+// Matches the page's own date comparison. The legacy sort subtracts the Date
+// objects directly, which is the same number; an unparseable date sorts as 0
+// and is excluded by a date filter, exactly as `Boolean(c)` did client-side.
+const bankCreatedMs = (q) => {
+  const t = q.createdAt ? new Date(q.createdAt).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+};
+
 // Get all questions with institution filtering
+//
+// PAGINATION (opt-in via `page`): this response carried the institution's
+// entire embedded questions[] array — 114,576 bytes for 89 questions, ~1,290
+// B/row and growing with the bank — and QuestionBanksPage rendered every row.
+// Passing `page` makes the server run that page's own filter predicate and
+// sort, then return one slice plus the facets the page derives from the full
+// list (its Category and Created By dropdowns, and the four header stat
+// chips). Those are counted over the WHOLE bank, never the visible page, or
+// the filter options would disappear as you filter.
+//
+// Callers that DON'T pass `page` get the original untouched response, so the
+// authoring picker (QuestionBankSelector, which shares this cache entry) keeps
+// working unchanged.
+//
+// Deliberately NOT an aggregation: `$unwind`/`$facet` returns raw BSON, which
+// is precisely what `.lean()` does and carries the defect the note at the top
+// of this file describes — the 11 schema-defaulted fields absent from stored
+// BSON would vanish, and the sub-schema's toJSON transform would stop firing.
+// The bank is a single embedded array, so Mongo reads the document whole
+// either way; what pagination removes is the transfer and the render, the same
+// trade getAllOtherPlatformQuestions below already makes.
 exports.getAllQuestionsbank = async (req, res) => {
   try {
     const {
@@ -596,10 +712,14 @@ exports.getAllQuestionsbank = async (req, res) => {
       category,
       difficulty,
       isActive,
+      page, limit, search, createdBy, marks, createdAfter,
+      // courseId: '' or absent → the General bank (no course pinned)
+      // courseId: '<id>'       → only questions pinned to that course
+      courseId,
     } = req.query;
 
     const institutionId = req.user?.institution?._id || req.user?.institution;
-    
+
     if (!institutionId) {
       return res.status(400).json({
         success: false,
@@ -607,17 +727,39 @@ exports.getAllQuestionsbank = async (req, res) => {
       });
     }
 
-    const query = { institution: institutionId };
-    
-    if (questionType) query['questions.questionType'] = questionType;
-    if (category) query['questions.questionCategory'] = category;
-    if (difficulty) query['questions.mcqQuestionDifficulty'] = difficulty;
-    if (isActive !== undefined) query['questions.isActive'] = isActive === 'true';
-
-    const questionBank = await Question.findOne({ institution: institutionId })
-      .populate('institution', 'inst_name inst_id');
+    // NOTE: a `query` object mirroring these filters used to be built here and
+    // then never passed to anything — the filters have always been applied to
+    // the embedded array in JS below, because one document holds every
+    // question. Dropped rather than wired up: matching a document on
+    // `questions.questionType` would return the whole bank whenever ANY
+    // question matched, which is not what the JS filtering does.
+    //
+    // The previous `.populate('institution', 'inst_name inst_id')` was a
+    // second DB round trip whose result was thrown away — the response echoes
+    // `institutionId` from the token, never the populated document.
+    const questionBank = await Question.findOne({ institution: institutionId });
 
     if (!questionBank) {
+      // The paginated shape still has to carry its extra keys, or a page
+      // pointed at an institution with no bank reads `undefined` for its
+      // facets and renders no stat chips at all.
+      if (page !== undefined) {
+        return res.status(200).json({
+          success: true,
+          total: 0,
+          bankTotal: 0,
+          page: 1,
+          limit: Math.min(5000, Math.max(1, parseInt(limit, 10) || 25)),
+          totalPages: 1,
+          institution: institutionId,
+          questions: [],
+          facets: {
+            categories: [],
+            createdBy: [],
+            stats: { total: 0, mcq: 0, programming: 0, active: 0 },
+          },
+        });
+      }
       return res.status(200).json({
         success: true,
         total: 0,
@@ -626,33 +768,448 @@ exports.getAllQuestionsbank = async (req, res) => {
       });
     }
 
-    let filteredQuestions = questionBank.questions || [];
-    
-    if (questionType) {
-      filteredQuestions = filteredQuestions.filter(q => q.questionType === questionType);
-    }
-    if (category) {
-      filteredQuestions = filteredQuestions.filter(q => q.questionCategory === category);
-    }
-    if (difficulty) {
-      filteredQuestions = filteredQuestions.filter(q => q.mcqQuestionDifficulty === difficulty);
-    }
-    if (isActive !== undefined) {
-      filteredQuestions = filteredQuestions.filter(q => q.isActive === (isActive === 'true'));
+    // ── Legacy path — byte-identical to the pre-pagination response ──
+    if (page === undefined) {
+      let filteredQuestions = questionBank.questions || [];
+
+      if (questionType) {
+        filteredQuestions = filteredQuestions.filter(q => q.questionType === questionType);
+      }
+      if (category) {
+        filteredQuestions = filteredQuestions.filter(q => q.questionCategory === category);
+      }
+      if (difficulty) {
+        filteredQuestions = filteredQuestions.filter(q => q.mcqQuestionDifficulty === difficulty);
+      }
+      if (isActive !== undefined) {
+        filteredQuestions = filteredQuestions.filter(q => q.isActive === (isActive === 'true'));
+      }
+
+      filteredQuestions.sort((a, b) => b.createdAt - a.createdAt);
+
+      return res.status(200).json({
+        success: true,
+        total: filteredQuestions.length,
+        institution: institutionId,
+        questions: filteredQuestions
+      });
     }
 
-    filteredQuestions.sort((a, b) => b.createdAt - a.createdAt);
+    // ── Paginated path ──
+    const all = questionBank.questions || [];
 
-    res.status(200).json({
+    // Facets first, over the unfiltered bank.
+    const categorySet = new Set();
+    const createdBySet = new Set();
+    let mcqCount = 0;
+    let activeCount = 0;
+    for (const q of all) {
+      if (q.questionCategory) categorySet.add(q.questionCategory);
+      if (q.createdBy) createdBySet.add(q.createdBy);
+      if (isMcqType(q.questionType)) mcqCount += 1;
+      if (q.isActive) activeCount += 1;
+    }
+
+    // The page lower-cases the raw search box value without trimming, and
+    // applies the block on a truthy check — so a search of a single space is a
+    // real filter that matches nothing. Kept.
+    const hasSearch = typeof search === 'string' && search !== '';
+    const term = lcOf(search);
+    const wantedMarks = String(marks || '');
+    // Epoch ms computed in the BROWSER: the presets ("last 7 days", "this
+    // year") are derived from the user's local clock, so the cutoff cannot be
+    // recomputed here without shifting the boundary by the server's offset.
+    const cutoff = Number(createdAfter) > 0 ? Number(createdAfter) : 0;
+
+    const rows = all.filter((q) => {
+      // Course scope: General tab requests without courseId → drop anything
+      // pinned to a course; Course Specific with a courseId → keep only that
+      // course's questions. String coerce to survive legacy string/ObjectId
+      // shapes on either side.
+      if (courseId) {
+        if (String(q.courseId || '') !== String(courseId)) return false;
+      } else {
+        if (q.courseId) return false;
+      }
+      // Same predicates, in the same order, as `filteredQuestions`.
+      if (questionType) {
+        // The dropdown offers the broad buckets MCQ / Programming, and
+        // "Programming" means every non-MCQ sub-type (programming / frontend /
+        // database) — not an equality test against the stored discriminator.
+        if (questionType === 'MCQ' ? !isMcqType(q.questionType) : isMcqType(q.questionType)) return false;
+      }
+      if (category && q.questionCategory !== category) return false;
+      // `q.difficulty` — NOT the legacy path's `mcqQuestionDifficulty`, which
+      // is a different field. The page has always filtered on `difficulty`;
+      // it just never sent the param, so the mismatch never surfaced.
+      if (difficulty && q.difficulty !== difficulty) return false;
+      if (isActive !== undefined && isActive !== '' && q.isActive !== (isActive === 'true')) return false;
+      if (createdBy && q.createdBy !== createdBy) return false;
+      if (wantedMarks && !inMarksRange(bankScoreOf(q), wantedMarks)) return false;
+      if (cutoff) {
+        const c = bankCreatedMs(q);
+        if (!c || c < cutoff) return false;
+      }
+      if (hasSearch) {
+        // Three independent field tests OR'd together — this is how the page
+        // composes it, so a joined haystack would match a term spanning two
+        // fields that the page itself would not.
+        if (
+          !lcOf(bankSearchTitle(q)).includes(term) &&
+          !lcOf(q.description).includes(term) &&
+          !lcOf(q.questionCategory).includes(term)
+        ) return false;
+      }
+      return true;
+    });
+
+    // Newest first, as the legacy path sorted. The `_id` tie-break is what
+    // makes a slice stable: 49 of this bank's 89 rows share a createdAt with
+    // another row, and paging a partial order reshuffles. ASCENDING because
+    // ObjectIds increase with insertion, so a tied group keeps the document
+    // order V8's stable sort already gave it — the visible order is unchanged,
+    // it is merely no longer dependent on the array's physical layout.
+    rows.sort((a, b) => {
+      const d = bankCreatedMs(b) - bankCreatedMs(a);
+      if (d) return d;
+      const ida = String(a._id);
+      const idb = String(b._id);
+      return ida < idb ? -1 : ida > idb ? 1 : 0;
+    });
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    // The cap is generous because "Export all (CSV)" asks for the whole
+    // filtered set in one call — an explicit full read, no larger than the
+    // response this endpoint returned unconditionally before.
+    const perPage = Math.min(5000, Math.max(1, parseInt(limit, 10) || 25));
+    const totalPages = Math.max(1, Math.ceil(rows.length / perPage));
+    const safePage = Math.min(pageNum, totalPages);
+    const start = (safePage - 1) * perPage;
+
+    return res.status(200).json({
       success: true,
-      total: filteredQuestions.length,
+      total: rows.length,
+      bankTotal: all.length,
+      page: safePage,
+      limit: perPage,
+      totalPages,
       institution: institutionId,
-      questions: filteredQuestions
+      questions: rows.slice(start, start + perPage),
+      facets: {
+        categories: Array.from(categorySet).sort(),
+        createdBy: Array.from(createdBySet).sort(),
+        stats: {
+          total: all.length,
+          mcq: mcqCount,
+          programming: all.length - mcqCount,
+          active: activeCount,
+        },
+      },
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: 'Error fetching questions',
+      error: error.message
+    });
+  }
+};
+
+// ── Picker helpers ───────────────────────────────────────────────────────────
+// Ports of the QuestionBankSelector's own derivations, so a server-paginated
+// page contains exactly the rows the client's predicate would have kept. They
+// are deliberately verbatim (same field order, same fallbacks, same HTML
+// stripping) — any drift here shows up as questions missing from a search.
+const stripHtml = (s) => String(s == null ? '' : s).replace(/<[^>]*>/g, '').trim();
+
+const blocksToText = (arr) =>
+  arr
+    .filter((cb) => cb && cb.type === 'text')
+    .map((cb) => stripHtml(cb.value || ''))
+    .filter(Boolean)
+    .join(' ');
+
+const pickerTitle = (q) => {
+  const t = q.mcqQuestionTitle;
+  if (t) {
+    if (Array.isArray(t)) return blocksToText(t);
+    if (typeof t === 'object' && t.text) return stripHtml(t.text);
+    if (typeof t === 'string') return stripHtml(t);
+  }
+  const title = q.questionText || q.title || '';
+  if (Array.isArray(title)) return blocksToText(title);
+  if (typeof title === 'string') return stripHtml(title);
+  return 'Untitled Question';
+};
+
+const pickerDescription = (q) => {
+  if (String(q.questionType || '').toLowerCase() === 'mcq') {
+    const d = q.mcqQuestionDescription;
+    if (d) {
+      if (Array.isArray(d)) return blocksToText(d);
+      if (typeof d === 'object' && d.text) return stripHtml(d.text);
+      if (typeof d === 'string') return stripHtml(d);
+    }
+    return 'Multiple Choice Question';
+  }
+  const d = q.description;
+  if (typeof d === 'string') return stripHtml(d);
+  if (d && typeof d === 'object') {
+    if (Array.isArray(d)) return blocksToText(d);
+    if (d.text) return stripHtml(d.text);
+  }
+  return '';
+};
+
+// `QB-XXXXXX` from the last six characters of the id — the picker lets you
+// search by it, so the server has to be able to match it too.
+const pickerQbId = (q) => `QB-${String(q._id || '').slice(-6).toUpperCase()}`;
+
+const pickerDifficulty = (q) => {
+  const d = String(q.difficulty || q.mcqQuestionDifficulty || 'medium').toLowerCase();
+  return d === 'easy' || d === 'hard' ? d : 'medium';
+};
+
+const asArray = (v) => (Array.isArray(v) ? v : []);
+
+// ── Other Platform bank ──────────────────────────────────────────────────────
+// Top-level `OtherPlatformQuestion` collection — one document per question,
+// replacing the legacy single-doc-with-embedded-array shape that was already
+// at 9.2 MB of Mongo's 16 MB per-document cap. The response payload matches
+// the legacy handler field-for-field so the picker keeps working unchanged.
+//
+// PAGINATION (opt-in via `page`): callers that DON'T pass `page` still get
+// every matching question in the legacy response shape; callers that DO get
+// one page + the picker's filter-rail facets.
+//
+// The `.lean()` prohibition at the top of this file applies here too — a
+// lean read would drop the 11 schema-defaulted fields the picker consumes
+// (topics, tags, source, timeComplexity, …) so the scope fetch runs hydrated.
+exports.getAllOtherPlatformQuestions = async (req, res) => {
+  try {
+    const {
+      questionType, category, difficulty, isActive,
+      page, limit, search, problemTypes, topic, tag, sort,
+    } = req.query;
+
+    // Scope = the type-scoped set facets are counted over. The rail's search
+    // and secondary filters (problemTypes / topic / tag / railDifficulty) are
+    // applied AFTER the facets — same separation the legacy in-memory path
+    // enforced.
+    const scopeQuery = {};
+    if (questionType) scopeQuery.questionType = questionType;
+    if (category) scopeQuery.questionCategory = category;
+    if (difficulty) scopeQuery.mcqQuestionDifficulty = difficulty;
+    if (isActive !== undefined) scopeQuery.isActive = isActive === 'true';
+
+    // Newest-first, with an `_id` tie-break. The tie-break is what makes a
+    // skip/limit slice STABLE: without it two rows sharing a createdAt have no
+    // defined relative order, so the same document can show up on page 2 and
+    // again on page 3. `_id` descends with createdAt (ObjectIds increase with
+    // insertion), so the visible order is unchanged — it is merely no longer
+    // arbitrary. Served by the { createdAt: -1, _id: -1 } index on the model.
+    const NEWEST_FIRST = { createdAt: -1, _id: -1 };
+
+    // Legacy path — unchanged response shape. Still reads the whole scope,
+    // because that IS the response: a caller that passes no `page` is asking
+    // for every matching question.
+    if (page === undefined) {
+      const all = await Question.OtherPlatformQuestion
+        .find(scopeQuery)
+        .sort(NEWEST_FIRST);
+      return res.status(200).json({
+        success: true,
+        total: all.length,
+        institution: null,
+        questions: all
+      });
+    }
+
+    const term = String(search || '').trim().toLowerCase();
+    const wantedPts = String(problemTypes || '')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    const wantedTopic = String(topic || '').trim().toLowerCase();
+    const wantedTag = String(tag || '').trim().toLowerCase();
+    const wantedDiff = String(req.query.railDifficulty || '').trim().toLowerCase();
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const perPage = Math.min(200, Math.max(1, parseInt(limit, 10) || 25));
+    const start = (pageNum - 1) * perPage;
+
+    // ── Which read does this request actually need? ──────────────────────────
+    // Two things used to force reading the ENTIRE type-scoped set on every
+    // paginated request — 5148 hydrated documents, ~9.2 MB — to return ten rows:
+    //
+    //   1. The picker's filter-rail facets are counted over the whole scope.
+    //   2. The rail's own predicates (search / problemTypes / railDifficulty /
+    //      topic / tag) and its title & difficulty sorts run in JS here, over
+    //      DERIVED values — `pickerTitle` flattens block arrays and strips HTML,
+    //      `pickerQbId` is computed from the _id — which no Mongo predicate
+    //      reproduces without drifting from what the picker itself matches.
+    //
+    // Neither applies to the ADMIN listing: it renders none of those facets and
+    // offers none of those rail filters. It says so with `facets=admin`, and a
+    // page then becomes an indexed skip/limit plus a count — the same shape as
+    // the paginated user directory — reading ten documents and no more.
+    //
+    // The picker's own requests are untouched: they don't send the flag, so
+    // they take the scan path below exactly as before.
+    const adminOnlyFacets = String(req.query.facets || '') === 'admin';
+    const needsScopeScan = !adminOnlyFacets
+      || Boolean(term) || wantedPts.length > 0 || Boolean(wantedDiff)
+      || Boolean(wantedTopic) || Boolean(wantedTag)
+      || sort === 'title' || sort === 'difficulty';
+
+    const problemTypeCounts = {};
+    const difficultyCounts = { easy: 0, medium: 0, hard: 0 };
+    const topicSet = new Map();
+    const tagSet = new Map();
+    let pageRows;
+    let total;
+    let scopeTotal;
+
+    if (!needsScopeScan) {
+      // Nothing is filtered or sorted in JS on this path, so Mongo does all of
+      // it. The count and the page don't depend on each other — one round trip.
+      const [count, rows] = await Promise.all([
+        Question.OtherPlatformQuestion.countDocuments(scopeQuery),
+        Question.OtherPlatformQuestion
+          .find(scopeQuery)
+          .sort(NEWEST_FIRST)
+          .skip(start)
+          .limit(perPage),
+      ]);
+      total = count;
+      scopeTotal = count;
+      pageRows = rows;
+    } else {
+      const scope = await Question.OtherPlatformQuestion
+        .find(scopeQuery)
+        .sort(NEWEST_FIRST);
+
+      for (const q of scope) {
+        const pt = q.problemType || '';
+        if (pt) problemTypeCounts[pt] = (problemTypeCounts[pt] || 0) + 1;
+        difficultyCounts[pickerDifficulty(q)] += 1;
+        for (const t of asArray(q.topics)) {
+          const k = String(t || '').trim().toLowerCase();
+          if (k && !topicSet.has(k)) topicSet.set(k, String(t));
+        }
+        for (const t of asArray(q.tags)) {
+          const k = String(t || '').trim().toLowerCase();
+          if (k && !tagSet.has(k)) tagSet.set(k, String(t));
+        }
+      }
+
+      let rows = scope.filter((q) => {
+        if (wantedPts.length > 0 && !wantedPts.includes(q.problemType || '')) return false;
+        if (wantedDiff && pickerDifficulty(q) !== wantedDiff) return false;
+        if (wantedTopic && !asArray(q.topics).some(t => String(t).trim().toLowerCase() === wantedTopic)) return false;
+        if (wantedTag && !asArray(q.tags).some(t => String(t).trim().toLowerCase() === wantedTag)) return false;
+        if (!term) return true;
+        return (
+          pickerTitle(q).toLowerCase().includes(term) ||
+          pickerDescription(q).toLowerCase().includes(term) ||
+          pickerQbId(q).toLowerCase().includes(term) ||
+          String(q.problemType || '').toLowerCase().includes(term) ||
+          asArray(q.topics).some(t => String(t).toLowerCase().includes(term)) ||
+          asArray(q.tags).some(t => String(t).toLowerCase().includes(term))
+        );
+      });
+
+      // 'relevance' keeps the newest-first order established above.
+      if (sort === 'title') {
+        rows = [...rows].sort((a, b) => pickerTitle(a).localeCompare(pickerTitle(b)));
+      } else if (sort === 'difficulty') {
+        const rank = { easy: 0, medium: 1, hard: 2 };
+        rows = [...rows].sort((a, b) => rank[pickerDifficulty(a)] - rank[pickerDifficulty(b)]);
+      }
+
+      scopeTotal = scope.length;
+      total = rows.length;
+      pageRows = rows.slice(start, start + perPage);
+    }
+
+    // Admin-side facets: whole-collection totals, filter-independent, for the
+    // External Question Bank page's header chips and its Category / Created By
+    // dropdowns. Computed here rather than in a second round-trip. The picker
+    // ignores these extra keys.
+    const adminFacets = await Question.OtherPlatformQuestion.aggregate([
+      {
+        $facet: {
+          stats: [
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                mcq: {
+                  $sum: {
+                    $cond: [{ $eq: [{ $toLower: '$questionType' }, 'mcq'] }, 1, 0],
+                  },
+                },
+                programming: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          { $toLower: '$questionType' },
+                          ['programming', 'frontend', 'database'],
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                active: { $sum: { $cond: ['$isActive', 1, 0] } },
+              },
+            },
+          ],
+          categories: [
+            { $match: { questionCategory: { $nin: [null, ''] } } },
+            { $group: { _id: '$questionCategory' } },
+            { $sort: { _id: 1 } },
+          ],
+          createdBy: [
+            { $match: { createdBy: { $nin: [null, ''] } } },
+            { $group: { _id: '$createdBy' } },
+            { $sort: { _id: 1 } },
+          ],
+        },
+      },
+    ]);
+    const admin = adminFacets[0] || { stats: [], categories: [], createdBy: [] };
+    const adminStats = admin.stats[0] || { total: 0, mcq: 0, programming: 0, active: 0 };
+
+    const sortLabel = (s) => String(s || '').trim();
+    return res.status(200).json({
+      success: true,
+      total,
+      scopeTotal,
+      page: pageNum,
+      limit: perPage,
+      institution: null,
+      questions: pageRows,
+      facets: {
+        problemTypeCounts,
+        difficultyCounts,
+        topics: Array.from(topicSet, ([value, label]) => ({ value, label })),
+        tags: Array.from(tagSet, ([value, label]) => ({ value, label })),
+        stats: {
+          total: adminStats.total,
+          mcq: adminStats.mcq,
+          programming: adminStats.programming,
+          active: adminStats.active,
+        },
+        categories: admin.categories.map((c) => c._id).filter(Boolean),
+        createdBy: admin.createdBy.map((c) => c._id).filter(Boolean),
+      },
+      sort: sortLabel(sort),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching other platform questions',
       error: error.message
     });
   }
@@ -965,6 +1522,10 @@ exports.updateQuestionBank = async (req, res) => {
         processedQuestion.shortAnswer = question.shortAnswer || '';
       }
 
+      if (mcqType === 'essay') {
+        processedQuestion.essayAnswer = question.essayAnswer || '';
+      }
+
       if (mcqType === 'matching') {
         processedQuestion.matchingPairs = (question.matchingPairs || []).map(p => ({
           _id: p._id || new mongoose.Types.ObjectId(),
@@ -1034,6 +1595,24 @@ exports.updateQuestionBank = async (req, res) => {
           functionName: (question.solutions || existingQuestion.solutions)?.functionName || '',
           language: (question.solutions || existingQuestion.solutions)?.language || 'javascript'
         } : null,
+        // Code Setup — Starter shown to students; Solution is author-only.
+        starterCode: question.starterCode !== undefined ? question.starterCode : (existingQuestion.starterCode ?? ''),
+        solutionCode: question.solutionCode !== undefined ? question.solutionCode : (existingQuestion.solutionCode ?? ''),
+        codeSetupLanguage: question.codeSetupLanguage !== undefined ? question.codeSetupLanguage : (existingQuestion.codeSetupLanguage || ''),
+        // Execution Setup — round-trip on update the same way as insert, so
+        // editing a question after save preserves the Function/Full Program +
+        // Blank/Generated/Custom selection.
+        executionType: (question.executionType === 'function' || question.executionType === 'fullProgram')
+          ? question.executionType
+          : (existingQuestion.executionType || undefined),
+        functionContract: (question.functionContract !== undefined)
+          ? ((question.functionContract && typeof question.functionContract === 'object') ? question.functionContract : null)
+          : (existingQuestion.functionContract ?? null),
+        startingExperience: (question.startingExperience === 'blank'
+            || question.startingExperience === 'generated'
+            || question.startingExperience === 'custom')
+          ? question.startingExperience
+          : (existingQuestion.startingExperience || undefined),
         timeLimit: question.timeLimit || existingQuestion.timeLimit || 2000,
         memoryLimit: question.memoryLimit || existingQuestion.memoryLimit || 256,
         isActive: question.isActive !== undefined ? question.isActive : existingQuestion.isActive,
@@ -1042,6 +1621,28 @@ exports.updateQuestionBank = async (req, res) => {
         createdAt: existingQuestion.createdAt || new Date(),
         updatedAt: new Date()
       };
+    }
+
+    // ── Classification metadata (shared by MCQ + programming) ──────────────
+    // Preserve existing values when the payload doesn't send a field.
+    {
+      const cleanList = (v) => Array.isArray(v)
+        ? v.filter(t => typeof t === 'string' && t.trim()).map(t => t.trim())
+        : null;
+      const topics = cleanList(question.topics);
+      const tags = cleanList(question.tags);
+      processedQuestion.problemType = question.problemType !== undefined ? (question.problemType || null) : (existingQuestion.problemType || null);
+      processedQuestion.topics = topics !== null ? topics : (existingQuestion.topics || []);
+      processedQuestion.tags = tags !== null ? tags : (existingQuestion.tags || []);
+      processedQuestion.timeComplexity = question.timeComplexity !== undefined ? String(question.timeComplexity || '') : (existingQuestion.timeComplexity || '');
+      processedQuestion.spaceComplexity = question.spaceComplexity !== undefined ? String(question.spaceComplexity || '') : (existingQuestion.spaceComplexity || '');
+      processedQuestion.outputCode = question.outputCode !== undefined ? String(question.outputCode || '') : (existingQuestion.outputCode || '');
+      processedQuestion.hasOtherOption = question.hasOtherOption !== undefined ? question.hasOtherOption === true : (existingQuestion.hasOtherOption === true);
+      processedQuestion.source = question.source || existingQuestion.source || null;
+      // Whole-subdoc rebuild — carry provenance fields forward or they vanish.
+      processedQuestion.createdByEmail = existingQuestion.createdByEmail || undefined;
+      processedQuestion._clonedFromExercise = existingQuestion._clonedFromExercise || undefined;
+      processedQuestion._clonedFromExerciseQuestionId = existingQuestion._clonedFromExerciseQuestionId || undefined;
     }
 
     // Remove undefined fields
@@ -1089,35 +1690,24 @@ exports.deleteQuestionBank = async (req, res) => {
       });
     }
 
-    const questionBank = await Question.findOneAndUpdate(
-      {
-        institution: institutionId
-      },
-      {
-        $pull: {
-          questions: { _id: req.params.id }
-        }
-      },
-      {
-        new: true
-      }
+    // updateOne, not findOneAndUpdate({new:true}): the returned document was
+    // only used to re-scan the whole (now shorter) questions[] array for the
+    // id that was just pulled. `$pull` removes every matching element
+    // atomically, so that scan could never find one — the branch it guarded
+    // was unreachable and the full-array hydration was pure cost.
+    //
+    // Behavior preserved deliberately: deleting an id that isn't in the bank
+    // still reports success (matchedCount is 1, the $pull is simply a no-op),
+    // exactly as before. Only a missing bank 404s.
+    const result = await Question.updateOne(
+      { institution: institutionId },
+      { $pull: { questions: { _id: req.params.id } } }
     );
 
-    if (!questionBank) {
+    if (result.matchedCount === 0) {
       return res.status(404).json({
         success: false,
         message: 'Question bank not found for this institution'
-      });
-    }
-
-    const questionExists = questionBank.questions.some(q => 
-      q._id.toString() === req.params.id
-    );
-
-    if (questionExists) {
-      return res.status(404).json({
-        success: false,
-        message: 'Question not found in the question bank'
       });
     }
 
@@ -1147,22 +1737,31 @@ exports.toggleQuestionStatus = async (req, res) => {
       });
     }
 
-    const questionBank = await Question.findOne(
-      { 'questions._id': questionId },
-      { 'questions.$': 1 }
-    );
-
-    if (!questionBank) {
-      return res.status(404).json({
+    // Institution scoping — without it any authenticated user could flip
+    // questions belonging to another tenant by guessing ids.
+    const institutionId = req.user?.institution?._id || req.user?.institution;
+    if (!institutionId) {
+      return res.status(400).json({
         success: false,
-        message: 'Question not found',
+        message: 'User institution not found',
       });
     }
 
+    // One round trip, not two: this used to run an identical findOne purely to
+    // decide whether to 404, then re-run the same filter as findOneAndUpdate —
+    // which already returns null when nothing matches. Merging them also
+    // closes the gap where a question deleted between the two queries reported
+    // 'Failed to update question status' instead of 'Question not found'.
+    //
+    // The whole questions[] array still comes back because MongoDB rejects a
+    // positional projection together with returning the post-update document
+    // ("cannot use a positional projection and return the new document"), and
+    // the response's `data` must be the UPDATED question — verified against
+    // the live server, not assumed.
     const result = await Question.findOneAndUpdate(
-      { 'questions._id': questionId },
-      { 
-        $set: { 
+      { institution: institutionId, 'questions._id': questionId },
+      {
+        $set: {
           'questions.$.isActive': isActive,
           'questions.$.updatedAt': new Date().toISOString()
         }
@@ -1173,7 +1772,7 @@ exports.toggleQuestionStatus = async (req, res) => {
     if (!result) {
       return res.status(404).json({
         success: false,
-        message: 'Failed to update question status',
+        message: 'Question not found',
       });
     }
 
@@ -1187,6 +1786,121 @@ exports.toggleQuestionStatus = async (req, res) => {
   } catch (error) {
     console.error('Error toggling question status:', error);
     res.status(500).json({
+      success: false,
+      message: 'Server error while updating question status',
+      error: error.message,
+    });
+  }
+};
+
+// ── Other Platform bank — Create / Update / Delete / Toggle ─────────────────
+// The bank is GLOBAL (no institution scope). Role gating on the routes limits
+// writes to admin + super_admin — no exercise-question path uses these.
+
+const stampAuthor = (req) => {
+  const first = req.user?.firstName || '';
+  const last = req.user?.lastName || '';
+  const full = `${first}${last ? ' ' + last : ''}`.trim();
+  return full || req.user?.email || 'admin';
+};
+
+exports.createOtherPlatformQuestion = async (req, res) => {
+  try {
+    const payload = cleanEmptyFields({ ...(req.body || {}) });
+    payload.createdBy = stampAuthor(req);
+    payload.createdByEmail = req.user?.email || '';
+
+    const doc = await Question.OtherPlatformQuestion.create(payload);
+    return res.status(201).json({
+      success: true,
+      message: 'Question created successfully',
+      question: doc,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error creating other-platform question',
+      error: error.message,
+    });
+  }
+};
+
+exports.updateOtherPlatformQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid question id' });
+    }
+    const payload = cleanEmptyFields({ ...(req.body || {}) });
+    payload.updatedBy = stampAuthor(req);
+
+    const doc = await Question.OtherPlatformQuestion.findByIdAndUpdate(
+      id,
+      { $set: payload },
+      { new: true, runValidators: true },
+    );
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Question not found' });
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Question updated successfully',
+      question: doc,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error updating other-platform question',
+      error: error.message,
+    });
+  }
+};
+
+exports.deleteOtherPlatformQuestion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid question id' });
+    }
+    const doc = await Question.OtherPlatformQuestion.findByIdAndDelete(id);
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Question not found' });
+    }
+    return res.status(200).json({ success: true, message: 'Question deleted successfully' });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: 'Error deleting other-platform question',
+      error: error.message,
+    });
+  }
+};
+
+exports.toggleOtherPlatformQuestionStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body || {};
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid question id' });
+    }
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'isActive must be boolean' });
+    }
+    const doc = await Question.OtherPlatformQuestion.findByIdAndUpdate(
+      id,
+      { $set: { isActive, updatedAt: new Date().toISOString() } },
+      { new: true },
+    );
+    if (!doc) {
+      return res.status(404).json({ success: false, message: 'Question not found' });
+    }
+    return res.status(200).json({
+      success: true,
+      message: `Question ${isActive ? 'activated' : 'deactivated'} successfully`,
+      data: doc,
+    });
+  } catch (error) {
+    return res.status(500).json({
       success: false,
       message: 'Server error while updating question status',
       error: error.message,

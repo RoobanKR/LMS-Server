@@ -80,6 +80,76 @@ const fileSchema = new mongoose.Schema({
   timestamps: false
 });
 
+// ─── EVALUATION BREAKDOWN — per-question detail of HOW the score was computed ──
+// Populated by the client at Submit time based on the exercise's
+// `evaluationMethod`:
+//   • 'manual'   → not set. Trainer types the score on Review.
+//   • 'testcase' → { method:'testcase', testcase:{ passed, total } }
+//   • 'ai'       → { method:'ai', ai:{ perCriterionMax, criteria:[...], model, failed } }
+// The Review Submission page reads this to render a breakdown card
+// (Correctness 90% · Code Quality 70% …) and preserves it as history when
+// the trainer overrides the total score.
+const evaluationBreakdownCriterionSchema = new mongoose.Schema({
+  key: { type: String },          // 'correctness' | 'codeQuality' | 'efficiency' | 'readability' | 'edgeCases' | 'bestPractices'
+  percentage: { type: Number },   // 0–100 from Gemini
+  score: { type: Number },        // absolute marks = perCriterionMax × percentage/100
+  comment: { type: String },      // Gemini's 1-sentence rationale, or empty
+}, { _id: false });
+
+// Per-test-case row inside evaluationBreakdown.ai.testCases. Records what the
+// student was judged against + AI's verdict, so the Review page can show
+// "Passed 15/20" with expand-to-see per-case details.
+const evaluationBreakdownAiTestCaseSchema = new mongoose.Schema({
+  index: { type: Number },              // 0-based position in the evaluation
+  source: { type: String, enum: ['question', 'ai'] }, // 'question' = trainer authored, 'ai' = AI-generated
+  input: { type: String, default: '' },
+  expectedOutput: { type: String, default: '' },
+  passed: { type: Boolean, default: false },
+  comment: { type: String, default: '' }, // AI's 1-line reason
+  hidden: { type: Boolean, default: false }, // trainer flagged the source question case isHidden
+}, { _id: false });
+
+// Per-test-case row inside evaluationBreakdown.testcase.cases. Written by the
+// student editors / rerun at scoring time so the Review page can show the
+// trainer WHICH cases failed (input/expected/got), not just "passed 1/2".
+const evaluationBreakdownTestCaseSchema = new mongoose.Schema({
+  index: { type: Number },               // 0-based position in the question's testCases
+  passed: { type: Boolean, default: false },
+  hidden: { type: Boolean, default: false }, // question flagged it isHidden
+  input: { type: String, default: '' },
+  expectedOutput: { type: String, default: '' },
+  actualOutput: { type: String, default: '' }, // what the student's code printed
+}, { _id: false });
+
+const evaluationBreakdownSchema = new mongoose.Schema({
+  method: { type: String, enum: ['manual', 'testcase', 'ai'] },
+  testcase: {
+    passed: { type: Number, default: 0 },
+    total: { type: Number, default: 0 },
+    // Absent on submissions scored before this field existed — Review falls
+    // back to counts-only display.
+    cases: { type: [evaluationBreakdownTestCaseSchema], default: [] },
+  },
+  ai: {
+    perCriterionMax: { type: Number, default: 0 },
+    criteria: { type: [evaluationBreakdownCriterionSchema], default: [] },
+    // ── AI test-case evaluation (new in Phase 2 of this feature) ──────────
+    // AI is asked to judge the student's code against `testCases[]` — a mix
+    // of the question's authored testCases AND the ai.testCasesCount that
+    // Gemini generated. `passedTestCases` / `totalTestCases` are the counts
+    // used for the score. `criteriaPortion` + `testCasePortion` are the two
+    // score halves (score = criteriaPortion + testCasePortion). Stored
+    // separately so Review can show both signals independently.
+    testCases: { type: [evaluationBreakdownAiTestCaseSchema], default: [] },
+    passedTestCases: { type: Number, default: 0 },
+    totalTestCases: { type: Number, default: 0 },
+    criteriaPortion: { type: Number, default: 0 }, // score half from avg(criteria %) × M / 2
+    testCasePortion: { type: Number, default: 0 }, // score half from (passed/total) × M / 2
+    model: { type: String, default: '' },
+    failed: { type: Boolean, default: false }, // Gemini call errored → student's Submit fell through to score:0
+  },
+}, { _id: false });
+
 // Update questionAnswerSchema
 const questionAnswerSchema = new mongoose.Schema({
   questionId: {
@@ -162,6 +232,26 @@ const questionAnswerSchema = new mongoose.Schema({
     enum: ['solved', 'attempted', 'skipped', 'submitted', 'evaluated'],
     default: 'attempted'
   },
+  // Per-question evaluation breakdown — see evaluationBreakdownSchema above.
+  // Null for Manual submissions; populated for Test Case and AI submissions.
+  evaluationBreakdown: { type: evaluationBreakdownSchema, default: null },
+  // Audit trail of past scores for THIS student × question. Pushed to whenever
+  // a Rerun overwrites the stored score. Each entry captures the score value
+  // that WAS live before the rerun, so trainers can see "was 3, now 7 (rerun
+  // on 2026-08-07)". Never truncated by app code; capped only by Mongo
+  // document size in practice.
+  scoreHistory: [{
+    _id: false,
+    previousScore: { type: Number, default: 0 },
+    previousStatus: { type: String, default: '' },
+    previousIsCorrect: { type: Boolean, default: false },
+    at: { type: Date, default: Date.now },
+    source: { type: String, enum: ['rerun', 'manual'], default: 'rerun' },
+    note: { type: String, default: '' },
+  }],
+  // Marks the last time this submission's score was overwritten by a Rerun.
+  // Distinct from `submittedAt` (which is the student's original attempt).
+  lastRerunAt: { type: Date, default: null },
   attempts: {
     type: Number,
     default: 0
@@ -294,21 +384,33 @@ const exerciseProgressSchema = new mongoose.Schema({
 }, {
   timestamps: true
 });
+// File MCQ answer record — one entry per question answered in a file quiz
+const fileMcqAnswerSchema = new mongoose.Schema({
+  pageNumber:     { type: Number },
+  questionId:     { type: mongoose.Schema.Types.ObjectId },
+  questionTitle:  { type: String, default: '' },
+  selectedChoice: { type: String, default: '' },
+  correctChoice:  { type: String, default: '' },
+  isCorrect:      { type: Boolean, default: false },
+  fileName:       { type: String, default: '' },
+  submittedAt:    { type: Date, default: Date.now },
+}, { _id: false });
+
 // Updated Answer Schema with Map structure
 const answerSchema = new mongoose.Schema({
-  I_Do: { 
+  I_Do: {
     type: Map,
-    of: [exerciseProgressSchema],
+    of: mongoose.Schema.Types.Mixed,
     default: new Map()
   },
-  We_Do: { 
+  We_Do: {
     type: Map,
-    of: [exerciseProgressSchema],
+    of: mongoose.Schema.Types.Mixed,
     default: new Map()
   },
-  You_Do: { 
+  You_Do: {
     type: Map,
-    of: [exerciseProgressSchema],
+    of: mongoose.Schema.Types.Mixed,
     default: new Map()
   },
 });
@@ -425,6 +527,18 @@ const noteSchema = new mongoose.Schema({
   lastEdited: {
     type: Date,
     default: Date.now
+  },
+  resourceId: {
+    type: String,
+    index: true
+  },
+  resourceType: {
+    type: String,
+    enum: ['pdf', 'ppt', 'video']
+  },
+  anchor: {
+    page: { type: Number },
+    timestamp: { type: Number }
   }
 }, {
   timestamps: true
@@ -501,7 +615,14 @@ const notificationSchema = new mongoose.Schema({
   },
   relatedEntity: {
     type: String,
-    enum: ['course', 'assignment', 'announcement', 'enrollment', 'system',],
+    // 'exercise' + 'question' were being pushed by other flows without ever
+    // being declared here, so every user.save() on a user whose notifications
+    // array contained one exploded on validation ("`exercise` is not a valid
+    // enum value" from submitMultipleFiles' final user.save). Widening the
+    // enum keeps the historical rows valid and lets future notifications
+    // point at the right entity type instead of getting misfiled as
+    // 'assignment'.
+    enum: ['course', 'assignment', 'exercise', 'question', 'announcement', 'enrollment', 'system'],
     default: 'enrollment'
   },
   relatedEntityId: {
@@ -539,6 +660,14 @@ const userSchema = new mongoose.Schema({
   institution: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "LMS-Institution",
+    // The primary access pattern for user lists (find({ institution })) —
+    // without this every institution-scoped query is a collection scan.
+    index: true,
+  },
+  userId: {
+    type: String,
+    index: true,
+    sparse: true,
   },
   email: {
     type: String,
@@ -587,9 +716,66 @@ const userSchema = new mongoose.Schema({
   semester: {
     type: String,
   },
+  section: {
+    type: String,
+  },
+  // Student roll / register number — optional, entered on Add User.
+  rollNumber: {
+    type: String,
+  },
   batch: {
     type: String,
   },
+  phase: {
+    type: String,
+  },
+  studentType: {
+    type: String,
+  },
+  // The service model chosen in Add/Bulk User — identifies which service mapping
+  // (and hierarchy structure) this user belongs to.
+  serviceModel: {
+    type: String,
+  },
+  // The _id of the exact service mapping chosen. serviceModel is only a name and
+  // a client may run several mappings under the same one (e.g. two "placement
+  // training" services with different courses). Auto-enrolment reads this to
+  // scope a placement user to their OWN service's courses instead of every
+  // placement course the client offers.
+  serviceMappingId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "LMS-ServiceMapping",
+  },
+  clientName: {
+    type: String,
+  },
+  clientId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "LMS-ClientManagement",
+  },
+  // Additional service enrolments beyond the legacy single service above.
+  // The legacy serviceModel/serviceMappingId/clientId/clientName stay the
+  // user's first enrolment; Reassign Users (bulk-add-service) appends here so
+  // a user can belong to several services at once. Readers wanting "all of a
+  // user's services" must union the legacy fields with this array.
+  services: [
+    {
+      serviceMappingId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LMS-ServiceMapping",
+      },
+      serviceModel: {
+        type: String,
+      },
+      clientId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "LMS-ClientManagement",
+      },
+      clientName: {
+        type: String,
+      },
+    },
+  ],
   permissions: [permissionItemSchema],
   status: {
     type: String,
@@ -686,5 +872,41 @@ userSchema.pre('save', function(next) {
   }
   next();
 });
+
+// ── Indexes for the paginated user directory ────────────────────────────────
+// getUserAccess's paginated mode always filters by institution and then sorts.
+// Without a compound index every page is a collection scan plus a blocking
+// in-memory sort — survivable at a few hundred users, not at six figures.
+//
+// The sort keys carry a collation (locale en, strength 2, numericOrdering) to
+// match the page's `toLowerCase() + localeCompare(numeric)`. A collated SORT
+// can only use an index built with the SAME collation, so those are declared
+// with it; the default newest-first index needs none because createdAt/_id are
+// not strings.
+//
+// EVERY key column ends with `createdAt: -1, _id: -1` because that is the
+// controller's tie-break, and an index only serves a sort when it covers the
+// WHOLE sort spec. Leaving those off (the first version of this) still built a
+// usable index for filtering, but each sorted page fell back to a blocking
+// in-memory SORT of the entire institution — verified with explain(), which
+// showed SORT <- FETCH <- IXSCAN and every matching document examined instead
+// of just the page's 25.
+//
+// The directions are the ASCENDING spec; a descending sort is its exact
+// reverse, which MongoDB serves by scanning the same index backwards. The
+// leading `institution` is an equality match, so its direction is irrelevant.
+userSchema.index({ institution: 1, createdAt: -1, _id: -1 });
+userSchema.index(
+  { institution: 1, firstName: 1, lastName: 1, createdAt: -1, _id: -1 },
+  { collation: { locale: "en", strength: 2, numericOrdering: true } }
+);
+userSchema.index(
+  { institution: 1, phone: 1, createdAt: -1, _id: -1 },
+  { collation: { locale: "en", strength: 2, numericOrdering: true } }
+);
+// Serves both the status FILTER and the bucketed status SORT.
+userSchema.index({ institution: 1, status: 1, createdAt: -1, _id: -1 });
+// Serves the role multi-select filter and the bucketed role sort.
+userSchema.index({ institution: 1, role: 1, createdAt: -1, _id: -1 });
 
 module.exports = mongoose.model("LMS-User", userSchema);
