@@ -4616,7 +4616,9 @@ if (updateData.source) {
     try {
       const isProgramming = (updatedQuestion.questionType === 'programming'
         || (updatedQuestion.testCases && updatedQuestion.testCases.length > 0));
-      const SCORING_FIELDS = ['testCases','sampleInput','sampleOutput','expectedOutput','constraints','score'];
+      // Sample Input / Output is info shown with the question, never run or
+      // graded, so editing it does not flag the question for a rerun.
+      const SCORING_FIELDS = ['testCases','expectedOutput','constraints','score'];
       const touchedScoring = SCORING_FIELDS.some(f => Object.prototype.hasOwnProperty.call(updateData, f));
       if (isProgramming && touchedScoring) {
         // Cheap existence check: any User doc with a submission for this
