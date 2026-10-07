@@ -3,6 +3,7 @@ const User = require("../../../models/UserModel");
 const Role = require("../../../models/RoleModel");
 const RetestRequest = require("../../../models/Courses/RetestRequestModel");
 const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
+const { isStaffUser } = require("../../../utils/staffAccess");
 
 // ── Helper: find all coordinator/admin user ids (to notify on new requests) ──
 async function findCoordinatorUserIds() {
@@ -180,6 +181,15 @@ exports.getStudentRetestRequests = async (req, res) => {
 // ── POST /retest/unlock — coordinator resets a student's submission + grants window ──
 exports.unlockAssessment = async (req, res) => {
   try {
+    // Staff only: this resets ANY student's attempt and deletes their exam
+    // session, and targetUserId comes straight from the body.
+    if (!(await isStaffUser(req.user))) {
+      return res.status(403).json({
+        success: false,
+        message: "Only staff can unlock an assessment",
+      });
+    }
+
     const coordinatorId = req.user._id || req.user.id;
     const {
       targetUserId,

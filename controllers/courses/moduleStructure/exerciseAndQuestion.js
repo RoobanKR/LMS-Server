@@ -41,6 +41,7 @@ const {
 } = require("../../../utils/pedagogyScope");
 const { scopeNodePedagogy, resolveViewerBatchId } = require("../../../utils/batchResources");
 const { stripHiddenOnQuestion } = require("../../../services/testCaseVisibility");
+const { isStaffUser } = require("../../../utils/staffAccess");
 
 // Code Setup (Starter/Solution) — Programming and Database questions store a
 // single code string; Frontend stores { html, css, javascript }. Accept
@@ -2813,7 +2814,14 @@ exports.lockExercise = async (req, res) => {
 // 2. Get Exercise Status (Debugged)
 exports.getExerciseStatus = async (req, res) => {
   try {
-    const userId = req.query.targetUserId || req.user._id;
+    // Reading SOMEONE ELSE's status (the grading console fetching a student's
+    // screen recording) is staff-only; a student only ever reads their own.
+    const { targetUserId } = req.query;
+    if (targetUserId && String(targetUserId) !== String(req.user._id) && !(await isStaffUser(req.user))) {
+      return res.status(403).json({ message: [{ key: "error", value: "Not authorized to view another user's status" }] });
+    }
+
+    const userId = targetUserId || req.user._id;
     const { courseId, exerciseId, category = 'We_Do', subcategory } = req.query;
 
     // console.log(`🔍 STATUS REQ: User: ${userId} | Ex: ${exerciseId}`);
