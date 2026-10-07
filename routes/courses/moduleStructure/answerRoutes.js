@@ -15,6 +15,7 @@ const {
   getAttemptState,
   setCurrentQuestion,
   finaliseAttempt,
+  restartMockAttempt,
   requestResume,
   approveResume,
   rejectResume,
@@ -33,6 +34,8 @@ router.post("/courses/attempt/start", userAuth, startAttempt);
 router.get("/courses/attempt/state", userAuth, getAttemptState);
 router.patch("/courses/attempt/current-question", userAuth, setCurrentQuestion);
 router.post("/courses/attempt/submit", userAuth, finaliseAttempt);
+// Mock / practice "Retest" - clears the caller's own finished attempt.
+router.post("/courses/attempt/restart-mock", userAuth, restartMockAttempt);
 // Permission gate — student requests, trainer approves/rejects
 router.post("/courses/attempt/request-resume", userAuth, requestResume);
 router.post("/courses/attempt/approve-resume", userAuth, approveResume);

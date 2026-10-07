@@ -35,6 +35,7 @@ const mongoose = require('mongoose');
 const ExamSession = require('../../../models/Courses/moduleStructure/ExamSessionModel');
 const StudentQuestionActivity = require('../../../models/Courses/moduleStructure/StudentQuestionActivityModel');
 const User = require('../../../models/UserModel');
+const QuestionDraft = require('../../../models/QuestionDraftModel');
 const socketIO = require('../../../utils/socket');
 
 const Module1 = mongoose.model('Module1');
@@ -54,7 +55,11 @@ const MAX_DURATION_MINUTES = 24 * 60;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-async function resolveExerciseDuration({ exerciseId, nodeId, nodeType, subcategory, category }) {
+// The exercise stored on a node — in its shared pedagogy or any batch's
+// bucket — or null. `anyBucket` also searches the category's other buckets
+// when the named one misses: older buckets are keyed by the tab label as
+// typed ("Assesment") while players send the normalised key ("assesment").
+async function findExerciseOnNode({ exerciseId, nodeId, nodeType, subcategory, category, anyBucket = false }) {
   const Model = entityModelByType[nodeType];
   if (!Model || !nodeId || !exerciseId || !subcategory) return null;
   const entity = await Model.findById(nodeId);
@@ -77,13 +82,29 @@ async function resolveExerciseDuration({ exerciseId, nodeId, nodeType, subcatego
     const list = typeof section.get === 'function' ? section.get(subcategory) : section[subcategory];
     if (!Array.isArray(list)) continue;
     const found = list.find((e) => e && String(e._id) === target);
-    if (found) {
-      const raw = found?.exerciseInformation?.totalDuration;
-      const mins = Number(raw);
-      if (Number.isFinite(mins) && mins > 0 && mins <= MAX_DURATION_MINUTES) return mins;
-      return null;
+    if (found) return found;
+  }
+  if (anyBucket) {
+    for (const c of containers) {
+      const section = c?.[cat];
+      if (!section) continue;
+      const lists = typeof section.values === 'function' ? Array.from(section.values()) : Object.values(section);
+      for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        const found = list.find((e) => e && String(e._id) === target);
+        if (found) return found;
+      }
     }
   }
+  return null;
+}
+
+async function resolveExerciseDuration(args) {
+  const found = await findExerciseOnNode(args);
+  if (!found) return null;
+  const raw = found?.exerciseInformation?.totalDuration;
+  const mins = Number(raw);
+  if (Number.isFinite(mins) && mins > 0 && mins <= MAX_DURATION_MINUTES) return mins;
   return null;
 }
 
@@ -467,6 +488,116 @@ exports.finaliseAttempt = async (req, res) => {
   } catch (err) {
     console.error('[attempt.finalise] error:', err);
     return res.status(500).json({ success: false, message: 'Failed to submit attempt' });
+  }
+};
+
+// ─── POST /courses/attempt/restart-mock ────────────────────────────────────
+// Mock (and practice) tests never lock: after an attempt the student can take
+// a fresh one whenever they like ("Retest"). This clears the CALLER's own
+// previous attempt — answers, counters, lock, saved drafts and the exam
+// session — the way a coordinator unlock does (retest.js), except that the
+// retake starts blank and a Final test is refused. The test type is read from
+// the stored exercise, never from the request.
+// Body: { exerciseId, courseId, nodeId, nodeType, subcategory, category?='You_Do' }
+//   nodeId / nodeType — the node the exercise is STORED on.
+exports.restartMockAttempt = async (req, res) => {
+  try {
+    const userId = String(req.user?._id || '');
+    const {
+      exerciseId, courseId, nodeId, nodeType, subcategory, category = 'You_Do',
+    } = req.body || {};
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthenticated' });
+    if (!exerciseId || !courseId || !nodeId || !nodeType || !subcategory) {
+      return res.status(400).json({
+        success: false,
+        message: 'exerciseId, courseId, nodeId, nodeType and subcategory are required',
+      });
+    }
+    if (category !== 'You_Do') {
+      return res.status(400).json({ success: false, message: 'Only You Do tests can be retaken' });
+    }
+
+    const exercise = await findExerciseOnNode({ exerciseId, nodeId, nodeType, subcategory, category, anyBucket: true });
+    if (!exercise) return res.status(404).json({ success: false, message: 'Assessment not found' });
+    const testType = String(exercise?.exerciseInformation?.testType || 'mock').toLowerCase();
+    if (testType === 'final') {
+      return res.status(403).json({ success: false, message: 'A final test cannot be retaken.' });
+    }
+
+    // An attempt still running is resumed, not thrown away.
+    const session = await ExamSession.findOne({ assessmentId: String(exerciseId), studentId: userId });
+    if (session && (session.status || 'active') === 'active') {
+      return res.status(409).json({
+        success: false,
+        code: 'attempt_active',
+        message: 'You have an attempt in progress. Continue it from Start.',
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ success: false, message: 'Student not found' });
+    const courseIndex = (user.courses || []).findIndex(
+      (c) => c.courseId && c.courseId.toString() === String(courseId)
+    );
+    if (courseIndex === -1) {
+      return res.status(404).json({ success: false, message: 'You are not enrolled in this course' });
+    }
+
+    // Reset the bucket that actually holds this exercise (the label and the
+    // key can differ, e.g. "Assesment" / "assesment" — see retest.js).
+    const categoryMap = user.courses[courseIndex]?.answers?.[category];
+    if (categoryMap && typeof categoryMap.entries === 'function') {
+      let best = null;
+      for (const [key, arr] of categoryMap.entries()) {
+        if (!Array.isArray(arr)) continue;
+        const ex = arr.find((e) => e?.exerciseId && e.exerciseId.toString() === String(exerciseId));
+        if (ex && (!best || (ex.questions || []).length > best.count)) {
+          best = { key, count: (ex.questions || []).length };
+        }
+      }
+      if (best) {
+        let list = categoryMap.get(best.key) || [];
+        if (list.toObject) list = list.toObject();
+        const idx = list.findIndex((e) => e?.exerciseId && e.exerciseId.toString() === String(exerciseId));
+        if (idx > -1) {
+          const entry = list[idx];
+          entry.questions = [];
+          entry.testSubmissions = 0;
+          entry.userAttempts = 0;
+          entry.status = 'in-progress';
+          entry.isLocked = false;
+          entry.lastTestSubmittedAt = null;
+          entry.lateSubmission = false;
+          entry.submitType = null;
+          entry.autoSubmitReason = null;
+          categoryMap.set(best.key, list);
+          user.markModified(`courses.${courseIndex}.answers.${category}`);
+          await user.save();
+        }
+      }
+    }
+
+    // The previous attempt's session would refuse every write of the retake
+    // (attempt_terminal); its activity rows would inflate the live dashboard;
+    // its drafts would reopen the old code. All three go.
+    if (session) {
+      try {
+        await StudentQuestionActivity.deleteMany({ examSessionId: session._id });
+        await ExamSession.deleteOne({ _id: session._id });
+      } catch (e) {
+        console.error('[attempt.restartMock] session cleanup failed:', e.message);
+      }
+    }
+    try {
+      await QuestionDraft.deleteMany({ userId: req.user._id, exerciseId: String(exerciseId) });
+    } catch (e) {
+      console.error('[attempt.restartMock] draft cleanup failed:', e.message);
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[attempt.restartMock] error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to restart the test' });
   }
 };
 
