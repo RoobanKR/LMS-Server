@@ -10514,6 +10514,28 @@ exports.getYouDoExercises = async (req, res) => {
         const withParticipants = new Set(
           (await ExamSession.distinct("assessmentId", { assessmentId: { $in: pageIds } })).map(String)
         );
+        // A retest (trainer unlock, Mock-test Retest) deletes the student's
+        // session but keeps their answers entry for the exercise, so an
+        // answers entry also means "a student has taken this test".
+        const missing = pageIds.filter(pid => !withParticipants.has(pid));
+        if (missing.length > 0) {
+          const ids = [
+            ...missing,
+            ...missing.filter(pid => mongoose.Types.ObjectId.isValid(pid)).map(pid => new mongoose.Types.ObjectId(pid)),
+          ];
+          // Answer buckets are keyed by the tab label as typed ("Assesment",
+          // "assessments", ...) — try the spellings of this subcategory.
+          const sub = String(subcategory || '').trim();
+          const isAssessment = /^assess?ments?$/i.test(sub);
+          const cap = (k) => k.charAt(0).toUpperCase() + k.slice(1);
+          const base = isAssessment ? ['assessment', 'assessments', 'assesment', 'assesments'] : (sub ? [sub.toLowerCase()] : []);
+          const keys = [...new Set([sub, ...base, ...base.map(cap)].filter(k => k && !k.includes('.') && !k.startsWith('$')))];
+          for (const key of keys) {
+            const path = `courses.answers.You_Do.${key}.exerciseId`;
+            const found = await User.distinct(path, { [path]: { $in: ids } });
+            found.forEach(v => withParticipants.add(String(v)));
+          }
+        }
         for (const ex of cleanExercises) {
           ex.hasParticipants = withParticipants.has(String(ex._id || ex.id || ""));
         }
