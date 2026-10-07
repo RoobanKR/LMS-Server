@@ -41,6 +41,21 @@ const shouldServerJudge = (evaluationMethod, category) => {
   return String(category) === 'You_Do';
 };
 
+// Earliest valid start time among the given values (Date / ISO string), or null.
+// Falsy, unparsable and future values are ignored, so a question's `startedAt`
+// (first opened in the editor) only ever moves earlier, never forward.
+function earliestStart(...values) {
+  const now = Date.now();
+  let best = null;
+  for (const v of values) {
+    if (!v) continue;
+    const t = new Date(v).getTime();
+    if (!Number.isFinite(t) || t > now) continue;
+    if (best === null || t < best) best = t;
+  }
+  return best === null ? null : new Date(best);
+}
+
 // ── We Do / You Do duration tracking (assignments & assessments) ───────────────
 // Start = first answer interaction (a non-test save opens an 'exercise_start' log).
 // End   = test submit (closes the open log with duration = submit − start).
@@ -359,6 +374,7 @@ exports.submitAnswer = async (req, res) => {
       // time based on the exercise's evaluationMethod. See UserModel.js.
       // Not set for 'manual' submissions.
       evaluationBreakdown: rawEvaluationBreakdown,
+      questionStartedAt, // ISO time the student first opened this question (editor-stamped)
     } = req.body;
 
     // Parse isTestSubmission properly from FormData string
@@ -651,6 +667,7 @@ exports.submitAnswer = async (req, res) => {
       }
     }
 
+    const startedAt = earliestStart(questionStartedAt);
     const questionAnswer = {
       questionId: new mongoose.Types.ObjectId(questionId),
       codeAnswer: code,
@@ -660,6 +677,7 @@ exports.submitAnswer = async (req, res) => {
       isCorrect: status === 'solved' || score >= 70,
       attempts: 1,
       submittedAt: new Date(),
+      ...(startedAt ? { startedAt } : {}),
       createdAt: new Date(),
       updatedAt: new Date(),
       ...(othersFiles.length > 0 ? { othersFiles } : {}),
@@ -719,8 +737,11 @@ exports.submitAnswer = async (req, res) => {
         const preservedStatus = isNavSave && existingQuestion.status === 'solved'
           ? 'solved'
           : status;
+        // Keep the earliest open time — a later session never moves the start forward.
+        const qStart = earliestStart(existingQuestion.startedAt, startedAt);
         existingExercise.questions[existingQuestionIndex] = {
           ...questionAnswer,
+          ...(qStart ? { startedAt: qStart } : {}),
           score: preservedScore,
           status: preservedStatus,
           isCorrect: preservedStatus === 'solved' || preservedScore >= 70,
@@ -1771,6 +1792,9 @@ exports.getAnswerByQuestionId = async (req, res) => {
         language: questionAnswer.language,
         status: questionAnswer.status,
         score: questionAnswer.score,
+        // Last submission's per-case / AI breakdown, so the editor can rebuild
+        // the Test Result when the student revisits a submitted question.
+        evaluationBreakdown: questionAnswer.evaluationBreakdown || null,
         attempts: questionAnswer.attempts || 0
       });
     }
@@ -1819,6 +1843,7 @@ exports.submitMultipleFiles = async (req, res) => {
       // Per-question breakdown (Test Case / AI). Sent as an object here (JSON
       // payload, not multipart), so no JSON.parse needed — sanitise only.
       evaluationBreakdown: rawEvaluationBreakdown,
+      questionStartedAt, // ISO time the student first opened this question (editor-stamped)
     } = req.body;
 
     // Sanitise breakdown the same way submitAnswer does, so the multi-file
@@ -2061,6 +2086,7 @@ exports.submitMultipleFiles = async (req, res) => {
     }));
  
     // Prepare question answer with folder structure
+    const startedAt = earliestStart(questionStartedAt);
     const questionAnswer = {
       questionId: new mongoose.Types.ObjectId(questionId),
       questionTitle: req.body.questionTitle || `Question ${questionId}`,
@@ -2100,6 +2126,7 @@ exports.submitMultipleFiles = async (req, res) => {
       isCorrect: status === 'solved' || status === 'evaluated' || score >= 70,
       attempts: 1,
       submittedAt: new Date(),
+      ...(startedAt ? { startedAt } : {}),
       fileStructure: {
         totalFiles: processedFiles.length,
         htmlFiles: processedFiles.filter(f => f.language === 'html').length,
@@ -2246,9 +2273,12 @@ exports.submitMultipleFiles = async (req, res) => {
       if (questionIndex === -1) {
         existingExercise.questions.push(questionAnswer);
       } else {
+        // Keep the earliest open time — a later session never moves the start forward.
+        const qStart = earliestStart(existingExercise.questions[questionIndex].startedAt, startedAt);
         existingExercise.questions[questionIndex] = {
           ...existingExercise.questions[questionIndex],
           ...questionAnswer,
+          ...(qStart ? { startedAt: qStart } : {}),
           attempts: (existingExercise.questions[questionIndex].attempts || 0) + 1,
           updatedAt: new Date()
         };

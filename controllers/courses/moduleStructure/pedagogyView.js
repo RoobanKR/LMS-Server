@@ -1925,7 +1925,10 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
         path: 'batchAndParticipants.users.user',
         select: 'firstName lastName email phone department role status'
       })
-      .select('batchAndParticipants')
+      // The batch fields are what the Resources-by-Batch rules read
+      // (scopeCourseTreePedagogy below) — the caller's batch and which
+      // sections are batch-wise. Only `participants` leaves the server.
+      .select('batchAndParticipants batchResources batch skillingBatches batches')
       .lean()
       .exec();
     // If a query below throws first, this pending promise must not surface
@@ -1978,7 +1981,8 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     // Skipped in light mode: the scrub only filters exercises INSIDE each
     // node's pedagogy/batchPedagogy (never whole nodes, so no stat changes),
     // and light responses don't ship pedagogy at all.
-    if (!light && await isStudentRequester(req.user)) {
+    const studentCaller = !light && await isStudentRequester(req.user);
+    if (studentCaller) {
       const scrubSection = (section) => {
         if (!section || typeof section !== 'object') return;
         for (const key of Object.keys(section)) {
@@ -2022,6 +2026,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     // Organize data by course for faster access
     const modulesByCourse = {};
     const participantsByCourse = {};
+    const batchCourseById = {};
 
     // Organize modules by course
     allModules.forEach(module => {
@@ -2045,6 +2050,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     allParticipants.forEach(course => {
       participantsByCourse[course._id.toString()] = (course.batchAndParticipants || [])
         .flatMap(batch => batch.users || []);
+      batchCourseById[course._id.toString()] = course;
     });
 
     // Process each course. Membership tests use Sets — with the old
@@ -2120,7 +2126,7 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
             ...topic,
             subTopics: courseSubTopics.filter(
               st => st.topicId && st.topicId.toString() === topic._id.toString()
-            )
+            ).map(st => ({ ...st }))
           }));
 
           return {
@@ -2138,10 +2144,22 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
             ...topic,
             subTopics: courseSubTopics.filter(
               st => st.topicId && st.topicId.toString() === topic._id.toString()
-            )
+            ).map(st => ({ ...st }))
           }))
         };
       });
+
+      // Resources by Batch — a student's dashboard counts THEIR batch's
+      // material. Batch-wise We Do / You Do live under batchPedagogy.<batchId>,
+      // which the client never walks, so new batch-wise assignments were
+      // missing from every count. Same scoping the course view applies; it
+      // also drops other batches' material from the response.
+      if (studentCaller || mine) {
+        const batchCourse = batchCourseById[courseIdStr];
+        if (batchCourse) {
+          scopeCourseTreePedagogy({ modules: structuredModules }, batchCourse, getUserBatchId(batchCourse, req.user._id));
+        }
+      }
 
       return {
         ...course,
