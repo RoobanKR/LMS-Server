@@ -2,8 +2,9 @@
 //
 // Every day at ATTENDANCE_CHECK_CRON (default 18:00) in ATTENDANCE_TZ (default
 // Asia/Kolkata), each batch that had a training day TODAY but has no attendance
-// marked for it raises one in-app notification to every active L&D Head / Sub
-// Head of that course's institution.
+// marked for it raises one in-app notification to the batch's own trainers
+// (the staff enrolled in that batch — they are the ones who mark it) and to
+// every active L&D Head / Sub Head of that course's institution.
 //
 // "A training day" is exactly what the marking gate and the attendance
 // overview use (controllers/courses/attendance.js): inside the batch's Program
@@ -131,62 +132,79 @@ const findMissingBatches = async (institution, dayKey) => {
         clientName: c.clientName || "",
         batchId,
         batchName: b.batchName || "Batch",
+        // The batch's staff (every enrolled non-student) — its trainers.
+        trainerIds: [...new Set((b.users || [])
+          .filter((u) => (!u?.status || u.status === "active"))
+          .map((u) => String(u?.user?._id || u?.user || ""))
+          .filter((id) => id && isStudent.has(id) && !isStudent.get(id)))],
       });
     }
   }
   return missing;
 };
 
+/** One user's notifications for `items` (missing batches), deduped per day. */
+const notifyMissing = async (userId, items, dayKey, { fromLdc }) => {
+  const user = await User.findById(userId);
+  if (!user || user.status === "inactive" || typeof user.addNotification !== "function") return;
+  // Idempotent per (day, course, batch).
+  const sent = new Set((user.notifications || [])
+    .map((n) => (n.metadata && (n.metadata.get ? n.metadata.get("dedupeKey") : n.metadata.dedupeKey)) || "")
+    .filter((k) => k.startsWith(`${KIND}:${dayKey}:`)));
+  for (const m of items) {
+    const dedupeKey = `${KIND}:${dayKey}:${m.courseId}:${m.batchId}`;
+    if (sent.has(dedupeKey)) continue;
+    try {
+      await user.addNotification({
+        title: "Attendance not marked",
+        message: `${m.batchName} of ${m.courseName}${m.clientName ? ` (${m.clientName})` : ""} has no attendance marked for ${dayKey}.`,
+        type: "warning",
+        relatedEntity: "course",
+        relatedEntityId: m.courseId,
+        metadata: new Map([
+          ["kind", KIND],
+          ["dedupeKey", dedupeKey],
+          ["courseId", m.courseId],
+          ["batchId", m.batchId],
+          ["date", dayKey],
+          ["redirectUrl", `/lms/pages/attendancemanagement?courseId=${m.courseId}&date=${dayKey}${fromLdc ? "&from=ldc" : ""}`],
+        ]),
+      });
+    } catch (err) {
+      console.warn("attendanceMissingNotify: notify failed for", String(userId), err.message);
+    }
+  }
+};
+
 /**
  * Run the check for one day. `dryRun` returns what would be sent without
- * writing anything. Returns [{ institution, recipients, missing[] }].
+ * writing anything. Returns [{ institution, recipients, trainers, missing[] }].
  */
 const runAttendanceMissingCheck = async ({ dayKey = todayKey(), dryRun = false } = {}) => {
-  const managerRoles = await Role.find({ roleValue: { $in: ["ldhead", "subhead"] } }).select("_id institution").lean();
-  const institutions = [...new Set(managerRoles.map((r) => String(r.institution)).filter(Boolean))];
+  // Every institution that has courses: a batch's trainers are told even where
+  // no L&D Head exists.
+  const institutions = (await CourseStructure.distinct("institution")).map(String).filter(Boolean);
   const report = [];
 
   for (const institution of institutions) {
     const roleIds = await roleIdsByValue(institution, ["ldhead", "subhead"]);
-    const recipients = await User.find({ institution, role: { $in: roleIds }, status: { $ne: "inactive" } })
-      .select("_id email")
-      .lean();
-    if (!recipients.length) continue;
+    const recipients = roleIds.length
+      ? await User.find({ institution, role: { $in: roleIds }, status: { $ne: "inactive" } }).select("_id email").lean()
+      : [];
     const missing = await findMissingBatches(new mongoose.Types.ObjectId(institution), dayKey);
-    report.push({ institution, recipients: recipients.map((r) => r.email), missing });
-    if (dryRun || !missing.length) continue;
-
-    for (const r of recipients) {
-      const user = await User.findById(r._id);
-      if (!user || typeof user.addNotification !== "function") continue;
-      // Idempotent per (day, course, batch).
-      const sent = new Set((user.notifications || [])
-        .map((n) => (n.metadata && (n.metadata.get ? n.metadata.get("dedupeKey") : n.metadata.dedupeKey)) || "")
-        .filter((k) => k.startsWith(`${KIND}:${dayKey}:`)));
-      for (const m of missing) {
-        const dedupeKey = `${KIND}:${dayKey}:${m.courseId}:${m.batchId}`;
-        if (sent.has(dedupeKey)) continue;
-        try {
-          await user.addNotification({
-            title: "Attendance not marked",
-            message: `${m.batchName} of ${m.courseName}${m.clientName ? ` (${m.clientName})` : ""} has no attendance marked for ${dayKey}.`,
-            type: "warning",
-            relatedEntity: "course",
-            relatedEntityId: m.courseId,
-            metadata: new Map([
-              ["kind", KIND],
-              ["dedupeKey", dedupeKey],
-              ["courseId", m.courseId],
-              ["batchId", m.batchId],
-              ["date", dayKey],
-              ["redirectUrl", `/lms/pages/attendancemanagement?courseId=${m.courseId}&date=${dayKey}&from=ldc`],
-            ]),
-          });
-        } catch (err) {
-          console.warn("attendanceMissingNotify: notify failed for", String(r._id), err.message);
-        }
+    const byTrainer = new Map();
+    for (const m of missing) {
+      for (const id of m.trainerIds || []) {
+        if (!byTrainer.has(id)) byTrainer.set(id, []);
+        byTrainer.get(id).push(m);
       }
     }
+    report.push({ institution, recipients: recipients.map((r) => r.email), trainers: byTrainer.size, missing });
+    if (dryRun || !missing.length) continue;
+
+    // L&D: every missing batch of the institution. Trainers: their own only.
+    for (const r of recipients) await notifyMissing(r._id, missing, dayKey, { fromLdc: true });
+    for (const [trainerId, items] of byTrainer) await notifyMissing(trainerId, items, dayKey, { fromLdc: false });
   }
   return report;
 };
@@ -196,7 +214,7 @@ const startAttendanceMissingCron = () => {
     try {
       const report = await runAttendanceMissingCheck();
       const total = report.reduce((n, r) => n + r.missing.length, 0);
-      if (total) console.log(`📋 Missing attendance: ${total} batch(es) reported to L&D`);
+      if (total) console.log(`📋 Missing attendance: ${total} batch(es) reported to trainers and L&D`);
     } catch (error) {
       console.error("❌ Missing-attendance check failed:", error);
     }

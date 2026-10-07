@@ -4,32 +4,8 @@ const Role = require("../../../models/RoleModel");
 const RetestRequest = require("../../../models/Courses/RetestRequestModel");
 const ExamSession = require("../../../models/Courses/moduleStructure/ExamSessionModel");
 const { isStaffUser } = require("../../../utils/staffAccess");
+const { trainersForStudent } = require("../../../utils/notificationRouting");
 
-// ── Helper: find all coordinator/admin user ids (to notify on new requests) ──
-async function findCoordinatorUserIds() {
-  try {
-    const roles = await Role.find({
-      $or: [
-        { originalRole: { $regex: /admin|coordinator/i } },
-        { roleValue: { $regex: /admin|coordinator/i } },
-        { renameRole: { $regex: /admin|coordinator/i } },
-      ],
-    })
-      .select("_id")
-      .lean();
-
-    const roleIds = roles.map((r) => r._id);
-    if (!roleIds.length) return [];
-
-    const users = await User.find({ role: { $in: roleIds } })
-      .select("_id")
-      .lean();
-    return users.map((u) => u._id);
-  } catch (e) {
-    console.error("findCoordinatorUserIds error:", e.message);
-    return [];
-  }
-}
 
 // ── POST /retest/request — student submits a retest request ──────────────────
 exports.createRetestRequest = async (req, res) => {
@@ -89,12 +65,17 @@ exports.createRetestRequest = async (req, res) => {
       status: "Pending",
     });
 
-    // Notify all coordinator/admin users (best-effort — never fails the request)
-    const coordinatorIds = await findCoordinatorUserIds();
+    // Notify the student's trainers — the staff of the student's batch in this
+    // course (see utils/notificationRouting.js) — not every admin. Best-effort:
+    // never fails the request.
+    const { recipients: trainers } = await trainersForStudent({ courseId, studentId }).catch((e) => {
+      console.error("retest recipients failed:", e.message);
+      return { recipients: [] };
+    });
     await Promise.all(
-      coordinatorIds.map(async (cid) => {
+      trainers.map(async (t) => {
         try {
-          const coord = await User.findById(cid);
+          const coord = await User.findById(t._id);
           if (!coord || typeof coord.addNotification !== "function") return;
           await coord.addNotification({
             title: "New Retest Request",

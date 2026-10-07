@@ -1,4 +1,4 @@
-// ─── "Assignment available" — the student notification ──────────────────────
+// ─── "Assignment / assessment available" — the student notification ─────────
 //
 // The Notifications step of the We Do assignment editor has Notify Student
 // (ON/OFF) and Notify via (Dashboard / Gmail / WhatsApp). Until now those were
@@ -34,9 +34,24 @@
 
 const { isExerciseFullyConfigured } = require("./exerciseReadiness");
 
-// Only We Do holds typed exercise sub-documents; You Do is `Mixed` and keeps
-// its own approval-time notification.
-const TAB = "We_Do";
+// We Do assignments and You Do assessments alike. You Do used to be announced
+// only on its final approval, to every student of the course whatever its
+// Notify Student setting or batch, and never at all without an approval
+// step; it now goes through this same rule. Its exercises are `Mixed`, so the
+// stamp below is a plain property plus markModified — that already works.
+const SECTIONS = ["We_Do", "You_Do"];
+
+// Assessments created (or given final approval) before this moment were
+// already announced the old way, or deliberately not — the hook must not
+// re-announce them the first time their topic is saved after the deploy.
+const YOU_DO_SINCE = Date.parse(process.env.YOU_DO_NOTIFY_SINCE || "2026-10-08T00:00:00+05:30");
+const coveredByHook = (section, ex) => {
+  if (section !== "You_Do") return true;
+  const at = (v) => (v ? new Date(v).getTime() : NaN);
+  return at(ex?.createdAt) >= YOU_DO_SINCE || at(ex?.approvalWorkflow?.completedAt) >= YOU_DO_SINCE;
+};
+
+const nounOf = (section) => (section === "You_Do" ? "assessment" : "assignment");
 
 /** The student channels actually ticked, or null when none is. */
 const studentChannels = (ex) => {
@@ -107,8 +122,9 @@ const clientBaseUrl = () => {
 };
 
 /** Everything a student is told, for one batch. */
-const buildDetails = ({ exercise, courseName, batchName, courseId }) => ({
-  assignmentName: exercise.exerciseInformation?.exerciseName || "Assignment",
+const buildDetails = ({ exercise, courseName, batchName, courseId, section = "We_Do" }) => ({
+  noun: nounOf(section),
+  assignmentName: exercise.exerciseInformation?.exerciseName || (section === "You_Do" ? "Assessment" : "Assignment"),
   courseName: courseName || "your course",
   batchName: batchName || "—",
   start: formatWhen(exercise.availabilityPeriod?.startDate),
@@ -134,7 +150,7 @@ const emailHtml = (d) => {
   return `
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;color:#0f172a">
       <h2 style="margin:0 0 4px">${escapeHtml(d.assignmentName)} is now available</h2>
-      <p style="margin:0 0 16px;color:#475569">A new assignment has been published for your batch.</p>
+      <p style="margin:0 0 16px;color:#475569">A new ${d.noun} has been published for your batch.</p>
       <table style="border-collapse:collapse;font-size:14px">
         ${row("Course", d.courseName)}
         ${row("Batch", d.batchName)}
@@ -207,7 +223,7 @@ async function resolveRecipients(courseId, batchId) {
  * every ticked channel. Never throws to the caller — it runs after the save
  * has already succeeded, so a failure here is logged, not surfaced.
  */
-async function sendAssignmentAvailable({ courseId, entityType, entityId, subcategory, batchId, exercise }) {
+async function sendAssignmentAvailable({ courseId, entityType, entityId, subcategory, batchId, exercise, section = "We_Do" }) {
   const ExerciseNotificationLog = require("../models/Courses/ExerciseNotificationLogModel");
   const channels = studentChannels(exercise);
   if (!courseId || !channels) return;
@@ -238,7 +254,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
   }
 
   for (const [bId, { batchName, users }] of byBatch) {
-    const d = buildDetails({ exercise, courseName, batchName, courseId });
+    const d = buildDetails({ exercise, courseName, batchName, courseId, section });
     const title = `${d.assignmentName} is now available`;
     const lines = detailLines(d);
 
@@ -253,7 +269,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
         relatedEntityId: exercise._id,
         isRead: false,
         metadata: {
-          kind: "assignment_available",
+          kind: section === "You_Do" ? "assessment_available" : "assignment_available",
           courseId: String(courseId),
           exerciseId: String(exercise._id),
           batchId: bId,
@@ -266,7 +282,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
       // One write for the whole batch, newest first — as addNotification does.
       const res = await User.updateMany(
         { _id: { $in: users.map((u) => u._id) } },
-        { $push: { notifications: { $each: [notification], $position: 0 } } }
+        { $push: { notifications: { $each: [notification], $position: 0 } }, $inc: { unreadNotificationCount: 1 } }
       );
       delivered.dashboard += res.modifiedCount || 0;
     }
@@ -315,30 +331,33 @@ function assignmentNotifyPlugin(schema, { entityType }) {
   schema.pre("save", function (next) {
     try {
       const due = [];
-      const visit = (weDo, batchId, basePath) => {
-        if (!weDo || typeof weDo.forEach !== "function") return;
-        weDo.forEach((list, subcategory) => {
+      const visit = (tab, section, batchId, basePath) => {
+        if (!tab || typeof tab.forEach !== "function") return;
+        tab.forEach((list, subcategory) => {
           if (!Array.isArray(list)) return;
           let stamped = false;
           for (const ex of list) {
             if (!ex) continue;
             const sent = typeof ex.get === "function" ? ex.get("studentNotification") : ex.studentNotification;
             if (sent?.sentAt) continue;
+            if (!coveredByHook(section, ex)) continue;
             if (assignmentNotifyBlocker(ex)) continue;
             const stamp = { sentAt: new Date(), batchId };
             if (typeof ex.set === "function") ex.set("studentNotification", stamp);
             else ex.studentNotification = stamp;
             stamped = true;
-            due.push({ exercise: typeof ex.toObject === "function" ? ex.toObject() : ex, subcategory, batchId });
+            due.push({ exercise: typeof ex.toObject === "function" ? ex.toObject() : ex, subcategory, batchId, section });
           }
           // Change tracking inside a Map of arrays is unreliable (the
           // controllers markModified these paths by hand too).
-          if (stamped) this.markModified(`${basePath}.${TAB}.${subcategory}`);
+          if (stamped) this.markModified(`${basePath}.${section}.${subcategory}`);
         });
       };
-      visit(this.pedagogy?.[TAB], "", "pedagogy");
-      if (this.batchPedagogy && typeof this.batchPedagogy.forEach === "function") {
-        this.batchPedagogy.forEach((bp, bId) => visit(bp?.[TAB], String(bId), `batchPedagogy.${bId}`));
+      for (const section of SECTIONS) {
+        visit(this.pedagogy?.[section], section, "", "pedagogy");
+        if (this.batchPedagogy && typeof this.batchPedagogy.forEach === "function") {
+          this.batchPedagogy.forEach((bp, bId) => visit(bp?.[section], section, String(bId), `batchPedagogy.${bId}`));
+        }
       }
       this.$locals.assignmentNotifications = due;
     } catch (err) {

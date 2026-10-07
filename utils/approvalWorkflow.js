@@ -363,70 +363,6 @@ const notifyApproversForStep = async ({ courseId, courseName, step, exerciseName
 };
 
 /**
- * Notify all enrolled students once an exercise becomes available
- * (last step approved).
- */
-const notifyStudentsExerciseAvailable = async ({ courseId, courseName, exerciseName, exerciseId }) => {
-  const course = await CourseStructure.findById(courseId)
-    .select("batchAndParticipants")
-    .populate({
-      path: "batchAndParticipants.users.user",
-      select: "_id email firstName role",
-      populate: { path: "role", select: "renameRole originalRole" },
-    })
-    .lean();
-  const participants = (course?.batchAndParticipants || []).flatMap(
-    (batch) => batch.users || []
-  );
-  const allStudents = participants
-    .map((p) => p?.user)
-    .filter((u) => {
-      const rn = u?.role?.renameRole || u?.role?.originalRole || "";
-      return rn.toLowerCase() === "student";
-    });
-  // A user may sit in several batches — notify them once only.
-  const uniqueStudents = new Map(allStudents.map((u) => [u._id.toString(), u]));
-  const students = Array.from(uniqueStudents.values());
-  if (students.length === 0) return;
-
-  const subject = `New exercise available: ${exerciseName || "Exercise"} (${courseName || "Course"})`;
-  const emailBody = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color:#1f2937;">A new exercise is available</h2>
-      <p>The exercise <strong>${exerciseName || "an exercise"}</strong> in <strong>${courseName || "your course"}</strong> has been approved and is now visible in your dashboard.</p>
-      <p>Sign in to attempt it before the deadline.</p>
-    </div>
-  `;
-
-  await Promise.all(
-    students.map(async (s) => {
-      try {
-        const userDoc = await User.findById(s._id);
-        if (userDoc && typeof userDoc.addNotification === "function") {
-          await userDoc.addNotification({
-            title: "New exercise available",
-            message: `${exerciseName || "An exercise"} in ${courseName || "your course"} is now available.`,
-            type: "success",
-            relatedEntity: "course",
-            relatedEntityId: courseId,
-            metadata: new Map([["exerciseId", String(exerciseId || "")]]),
-          });
-        }
-        if (s.email) {
-          await emailUtil.sendEmail({
-            receiverEmails: s.email,
-            subject,
-            body: emailBody,
-          });
-        }
-      } catch (err) {
-        console.warn("notifyStudentsExerciseAvailable failed for", s._id?.toString(), err.message);
-      }
-    })
-  );
-};
-
-/**
  * Notify a single user — used for per-question query/resolve threads.
  */
 const notifySingleUser = async ({ userId, email, title, message, type = "info", subject, body, metadata }) => {
@@ -501,6 +437,5 @@ module.exports = {
   isStudentRequester,
   isExerciseStudentVisible,
   notifyApproversForStep,
-  notifyStudentsExerciseAvailable,
   notifySingleUser,
 };

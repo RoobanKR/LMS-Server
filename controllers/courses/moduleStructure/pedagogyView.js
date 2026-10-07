@@ -733,13 +733,22 @@ exports.getAllCoursesData = async (req, res) => {
       return res.status(200).json({ success: true, data: rosterCourse });
     }
 
-    const course = await CourseStructure.findById(courseId).lean().populate({
-      path: "batchAndParticipants.users.user",
-      populate: {
-        path: "role", // Then populate role inside user
-        model: "Role" // Make sure to specify the model name if different
-      }
-    });
+    // ?pedagogyOnly=1 → the course tree as ONE batch sees it (pass batchId),
+    // without the roster. The Course Report reads each batch's exercises this
+    // way after one full fetch, rather than pulling every enrolled user's
+    // document once per batch. Opt-in like ?roster=1: a server without it
+    // returns the full payload, a superset.
+    const pedagogyOnly = req.query.pedagogyOnly === '1' || req.query.pedagogyOnly === 'true';
+
+    const course = pedagogyOnly
+      ? await CourseStructure.findById(courseId).lean()
+      : await CourseStructure.findById(courseId).lean().populate({
+          path: "batchAndParticipants.users.user",
+          populate: {
+            path: "role", // Then populate role inside user
+            model: "Role" // Make sure to specify the model name if different
+          }
+        });
 
     if (!course) {
       return res.status(404).json({
@@ -886,6 +895,11 @@ exports.getAllCoursesData = async (req, res) => {
     // Blank hidden testCases before returning the full course tree.
     // Author-like roles see the real inputs; students get blanks.
     stripHiddenForStudentDeep(structuredCourse, req.user);
+
+    if (pedagogyOnly) {
+      delete structuredCourse.batchAndParticipants;
+      return res.status(200).json({ success: true, data: structuredCourse });
+    }
 
     // Per-node topic completion for the sidebar's green tick. Runs after
     // approval + batch scoping so the counts include only what the caller

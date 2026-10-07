@@ -210,6 +210,31 @@ const countExercisesInPedagogy = (pedagogy) => {
   return count;
 };
 
+// The exercises the Course Report lists for one node: We Do and You Do only
+// (I Do keeps no student answers), named, with at least one question — and as
+// EVERY batch sees them, since a batch-wise course keeps a batch's own
+// exercises in `batchPedagogy`, not in the shared `pedagogy`. Ids go into
+// `into`, so an exercise every batch shares is counted once.
+const { listCourseBatches, scopeNodePedagogy, isStudentUser } = require("../../utils/batchResources");
+const addReportExercises = (node, course, into) => {
+  const batchIds = listCourseBatches(course).map((b) => b.id).filter(Boolean);
+  for (const batchId of batchIds.length ? batchIds : [""]) {
+    const view = scopeNodePedagogy({ pedagogy: node.pedagogy, batchPedagogy: node.batchPedagogy }, course, batchId);
+    for (const section of ["We_Do", "You_Do"]) {
+      const tab = view.pedagogy?.[section];
+      if (!tab || typeof tab !== "object") continue;
+      for (const list of Object.values(tab)) {
+        if (!Array.isArray(list)) continue;
+        for (const ex of list) {
+          const name = ex?.exerciseInformation?.exerciseName;
+          const hasName = typeof name === "string" ? name.trim() !== "" : Boolean(name);
+          if (ex?._id && hasName && Array.isArray(ex.questions) && ex.questions.length) into.add(String(ex._id));
+        }
+      }
+    }
+  }
+};
+
 
 exports.createCourseStructure = async (req, res) => {
   try {
@@ -1438,6 +1463,9 @@ exports.getCourseStructure = async (req, res) => {
             "serviceType serviceModal category courseLevel courseDuration " +
             "status createdAt updatedAt institution approvalHierarchy " +
             "batchAndParticipants.users.user" +
+            // What batch-wise resources resolve against (reportExerciseCount).
+            " batchAndParticipants._id batchAndParticipants.batchName batchAndParticipants.section " +
+            "batchAndParticipants.archivedBySync batchResources" +
             (withEnrollment
               ? " batchAndParticipants.users.status batch degree studentType " +
                 "skillingBatches departmentSections clientConfigurations"
@@ -1502,10 +1530,10 @@ exports.getCourseStructure = async (req, res) => {
         { $group: { _id: "$courses", total: { $sum: "$t" } } },
       ]),
       Promise.all([
-        Module1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
-        SubModule1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
-        Topic1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
-        SubTopic1.find({ courses: { $in: courseIds } }).select("courses pedagogy").lean(),
+        Module1.find({ courses: { $in: courseIds } }).select("courses pedagogy batchPedagogy").lean(),
+        SubModule1.find({ courses: { $in: courseIds } }).select("courses pedagogy batchPedagogy").lean(),
+        Topic1.find({ courses: { $in: courseIds } }).select("courses pedagogy batchPedagogy").lean(),
+        SubTopic1.find({ courses: { $in: courseIds } }).select("courses pedagogy batchPedagogy").lean(),
       ]).then((sets) => sets.flat()),
       ProgramCalendar.find({ courseId: { $in: courseIds } }).select("courseId").lean(),
       findDefaultApproverRole(req.user.institution).catch(() => null),
@@ -1572,6 +1600,18 @@ exports.getCourseStructure = async (req, res) => {
         exerciseCountByCourse.set(id, (exerciseCountByCourse.get(id) || 0) + nodeCount);
       });
     });
+    const courseById = new Map(courseStructures.map((c) => [String(c._id), c]));
+    const reportExercisesByCourse = new Map();
+    exerciseNodes.forEach((node) => {
+      const nodeCourses = Array.isArray(node.courses) ? node.courses : [node.courses];
+      nodeCourses.forEach((courseId) => {
+        const id = String(courseId || "");
+        const course = courseById.get(id);
+        if (!course) return;
+        if (!reportExercisesByCourse.has(id)) reportExercisesByCourse.set(id, new Set());
+        addReportExercises(node, course, reportExercisesByCourse.get(id));
+      });
+    });
 
     // Summary mode skips populate, so a roster entry pointing at a DELETED
     // user still carries its raw ObjectId — the populated path nulls those
@@ -1579,6 +1619,9 @@ exports.getCourseStructure = async (req, res) => {
     // participantCount semantics identical (verified live: without this the
     // counts differ on courses with dangling refs).
     let existingUserIds = null;
+    // Students among them — the Reports list's Students column. A batch's
+    // users[] also holds the trainers who serve it.
+    let studentUserIds = null;
     if (summary) {
       const allIds = new Set();
       courseStructures.forEach((c) =>
@@ -1590,9 +1633,13 @@ exports.getCourseStructure = async (req, res) => {
         )
       );
       const found = allIds.size
-        ? await User.find({ _id: { $in: [...allIds] } }).select("_id").lean()
+        ? await User.find({ _id: { $in: [...allIds] } })
+            .select("_id role")
+            .populate({ path: "role", model: "Role", select: "originalRole renameRole roleName roleValue" })
+            .lean()
         : [];
       existingUserIds = new Set(found.map((u) => String(u._id)));
+      studentUserIds = new Set(found.filter(isStudentUser).map((u) => String(u._id)));
     }
 
     // clientName is stored as the readable company name; clientId references
@@ -1604,6 +1651,7 @@ exports.getCourseStructure = async (req, res) => {
     const populatedCourses = courseStructures.map((course) => {
       const moduleCount = moduleCountByCourse.get(course._id.toString()) || 0;
       const seen = new Set();
+      const students = new Set();
       (course.batchAndParticipants || []).forEach((b) => {
         (b.users || []).forEach((u) => {
           const id = u && u.user && (u.user._id || u.user);
@@ -1611,6 +1659,7 @@ exports.getCourseStructure = async (req, res) => {
           const idStr = String(id);
           if (existingUserIds && !existingUserIds.has(idStr)) return;
           seen.add(idStr);
+          if (studentUserIds ? studentUserIds.has(idStr) : isStudentUser(u.user)) students.add(idStr);
         });
       });
       // Summary rows drop the roster array once it has been counted —
@@ -1629,6 +1678,10 @@ exports.getCourseStructure = async (req, res) => {
         moduleCount,
         exerciseCount: exerciseCountByCourse.get(course._id.toString()) || 0,
         participantCount: seen.size,
+        // The Reports list's two counts, read the way the Course Report reads
+        // the course, so the list and the report agree.
+        reportExerciseCount: reportExercisesByCourse.get(course._id.toString())?.size || 0,
+        studentCount: students.size,
         defaultApproverRole: defaultApprover ? defaultApprover.roleName : null,
         // The Program Calendar's gate: at least one module AND hours entered.
         hasModuleHours:
@@ -2315,13 +2368,23 @@ exports.batchAddParticipants = async (req, res) => {
           ["enrolledAt", new Date().toISOString()],
         ]),
       };
+      // Upload Resources is a staff screen; a student is sent to the course
+      // itself.
+      const studentNotification = {
+        ...notification,
+        metadata: new Map([
+          ...notification.metadata,
+          ["redirectUrl", `/lms/pages/courses/coursesdetailedview/${String(courseId)}`],
+        ]),
+      };
 
       await Promise.all(
         usersToAdd.map(async (u) => {
           try {
-            const userDoc = await User.findById(u.user);
+            const userDoc = await User.findById(u.user)
+              .populate({ path: "role", select: "originalRole renameRole roleName roleValue" });
             if (userDoc && typeof userDoc.addNotification === "function") {
-              await userDoc.addNotification(notification);
+              await userDoc.addNotification(isStudentUser(userDoc) ? studentNotification : notification);
             } else {
               await User.findByIdAndUpdate(u.user, {
                 $push: {

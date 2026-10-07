@@ -10,6 +10,7 @@ const ExamSession = require('../../../models/Courses/moduleStructure/ExamSession
 // exercise is visible at all. `mergeSectionAcrossBatches` walks the shared
 // container AND every batch's, which a plain `doc.pedagogy[category]` cannot.
 const { mergeSectionAcrossBatches, locateExerciseContainer } = require('../../../utils/pedagogyScope');
+const { notifyGradersOfSubmission } = require('../../../utils/submissionNotify');
 // Server-authoritative code judge. When a programming submission arrives, the
 // server re-runs the student's code against the trainer's stored testCases
 // (including hidden ones) and computes score + breakdown here — the client
@@ -693,8 +694,13 @@ exports.submitAnswer = async (req, res) => {
       ? await isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId })
       : false;
 
+    // Set when this request counts as a final Submit Test (not a double-click
+    // inside the 10 s guard) — the graders' notification keys off it.
+    let testSubmitCounted = false;
+
     if (exerciseIndex === -1) {
       // ── Create new exercise entry ──
+      testSubmitCounted = isTestSubmit;
       const newExercise = {
         exerciseId: new mongoose.Types.ObjectId(exerciseId),
         questions: [questionAnswer],
@@ -774,6 +780,7 @@ exports.submitAnswer = async (req, res) => {
           ? new Date(existingExercise.lastTestSubmittedAt).getTime()
           : 0;
         if (now - lastAt > 10000) {
+          testSubmitCounted = true;
           existingExercise.userAttempts = (existingExercise.userAttempts || 0) + 1;
           existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
           existingExercise.lastTestSubmittedAt = new Date();
@@ -856,6 +863,15 @@ exports.submitAnswer = async (req, res) => {
         }
       }
     });
+
+    // Tell the student's trainers, per the exercise's grader settings.
+    // After the response on purpose: it never delays or fails the submit.
+    if (testSubmitCounted) {
+      notifyGradersOfSubmission({
+        courseId, exerciseId, category, subcategory, nodeId, nodeType,
+        student: user, isLate, submitType: finalSubmitType,
+      });
+    }
 
   } catch (error) {
     console.error("❌ Submit answer error:", error);
@@ -1621,33 +1637,8 @@ exports.evaluateStudentAnswer = async (req, res) => {
       });
     }
 
-    // Also send notification to instructor's own record
-    const instructorNotification = {
-      title: "Evaluation Completed",
-      message: `You evaluated ${student.firstName}'s answer for "${questionDisplayTitle}" in ${exerciseDisplayName}. Score: ${scoreDisplay}`,
-      type: 'info',
-      relatedEntity: 'assignment',
-      relatedEntityId: questionId,
-      isRead: false,
-      metadata: {
-        studentId: student._id,
-        studentName: `${student.firstName} ${student.lastName || ''}`,
-        studentEmail: student.email,
-        courseId: courseId,
-        courseName: courseName || '',
-        exerciseId: exerciseId,
-        exerciseName: exerciseName || '',
-        questionId: questionId,
-        questionTitle: questionTitle || '',
-        score: score,
-        totalScore: totalScore || 0, // Include totalScore in instructor notification
-        feedback: feedback || '',
-        evaluatedAt: new Date().toISOString()
-      }
-    };
-
-    await instructor.addNotification(instructorNotification);
-    await instructor.save();
+    // The evaluator is not notified of their own evaluation — a receipt of
+    // what they just did is noise in their notifications.
 
     res.status(200).json({
       success: true,
@@ -2239,7 +2230,9 @@ exports.submitMultipleFiles = async (req, res) => {
       ? await isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId })
       : false;
 
+    let testSubmitCounted = false;
     if (exerciseIndex === -1) {
+      testSubmitCounted = isTestSubmit;
       exerciseArray.push({
         exerciseId: new mongoose.Types.ObjectId(exerciseId),
         exerciseName: req.body.exerciseName || `Exercise ${exerciseId}`,
@@ -2297,6 +2290,7 @@ exports.submitMultipleFiles = async (req, res) => {
           ? new Date(existingExercise.lastTestSubmittedAt).getTime()
           : 0;
         if (now - lastAt > 10000) {
+          testSubmitCounted = true;
           existingExercise.userAttempts = (existingExercise.userAttempts || 0) + 1;
           existingExercise.testSubmissions = (existingExercise.testSubmissions || 0) + 1;
           existingExercise.lastTestSubmittedAt = new Date();
@@ -2355,6 +2349,13 @@ exports.submitMultipleFiles = async (req, res) => {
         evaluationBreakdown,
       }
     });
+
+    if (testSubmitCounted) {
+      notifyGradersOfSubmission({
+        courseId, exerciseId, category, subcategory, nodeId, nodeType,
+        student: user, isLate, submitType: finalSubmitType,
+      });
+    }
 
   } catch (error) {
     console.error("Submit multi-files error:", error);

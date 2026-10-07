@@ -21,7 +21,6 @@ const {
   isStudentRequester,
   isExerciseStudentVisible,
   notifyApproversForStep,
-  notifyStudentsExerciseAvailable,
   notifySingleUser,
 } = require("../../../utils/approvalWorkflow");
 // Resources by Batch. We Do assignments and You Do assessments live in the
@@ -11020,19 +11019,13 @@ exports.approveExerciseStep = async (req, res) => {
         exerciseName: exercise.exerciseInformation?.exerciseName,
         exerciseId: exercise._id,
       }).catch((e) => console.warn('notifyApproversForStep failed:', e.message));
-    } else if (tabKey !== 'We_Do') {
-      // We Do assignments are announced by the node model's save hook
-      // (utils/assignmentStudentNotify.js) — the save just above flipped the
-      // workflow to approved, so it has already fired, scoped to the
-      // assignment's batch and honouring Notify Student + its channels.
-      // Calling this too would re-announce it to every batch of the course.
-      notifyStudentsExerciseAvailable({
-        courseId: courseIdForNotify,
-        courseName: courseDoc?.courseName,
-        exerciseName: exercise.exerciseInformation?.exerciseName,
-        exerciseId: exercise._id,
-      }).catch((e) => console.warn('notifyStudentsExerciseAvailable failed:', e.message));
     }
+    // On final approval the students are told by the node model's save hook
+    // (utils/assignmentStudentNotify.js) — We Do and You Do alike: the save
+    // just above flipped the workflow to approved, so it has already fired,
+    // scoped to the exercise's batch and honouring Notify Student + its
+    // channels. (You Do used to be announced here to every student of the
+    // course, whatever its settings.)
 
     res.status(200).json({
       success: true,
