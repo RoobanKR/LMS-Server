@@ -135,17 +135,16 @@ async function detachUsersFromMapping(mappingId) {
   return (res.modifiedCount || 0) + (resArr.modifiedCount || 0);
 }
 
-// Best-effort course-image cleanup, mirroring deleteCourseStructure's own
-// rules (skip defaults, never fail the delete over a storage error). Images go
-// to Cloudinary now; one uploaded before that move is left in place rather than
-// chased into a service this deployment no longer talks to.
+// Best-effort cleanup for course images stored on this VPS. Legacy remote
+// URLs stay untouched until their files have been migrated.
 async function deleteCourseImages(courseDocs) {
   try {
-    const { storage, isLegacySupabaseUrl } = require("./storage");
+    const { storage, storagePathFromUrl } = require("./storage");
     const paths = courseDocs
-      .filter((c) => !isLegacySupabaseUrl(c.courseImage))
-      .filter((c) => c.courseImage && !c.courseImage.includes("default_profile_image"))
-      .map((c) => `course/image/${c.courseImage.split("/").pop()}`);
+      .map((c) => c.courseImage)
+      .filter((url) => typeof url === "string" && url.includes("/uploads/storage/") && !url.includes("default_profile_image"))
+      .map(storagePathFromUrl)
+      .filter(Boolean);
     if (paths.length) {
       // Bounded. This cleanup is best-effort, but a storage call that never
       // answers (network, firewall) used to hold the whole delete open — and

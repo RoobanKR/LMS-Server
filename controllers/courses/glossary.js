@@ -6,7 +6,7 @@
 // step (text extraction / OCR) ran once at lesson preparation.
 
 const mongoose = require("mongoose");
-// Which URLs are ours to fetch — Cloudinary, plus pre-migration Supabase ones.
+// Only fetch VPS storage and the configured legacy storage URLs.
 const { isManagedUrl } = require("../../utils/storage");
 const Glossary = require("../../models/Courses/GlossaryModel");
 const LessonTextMap = require("../../models/Courses/LessonTextMapModel");
@@ -115,10 +115,7 @@ exports.extractLesson = async (req, res) => {
   try {
     const { fileUrl, force } = req.body || {};
     if (!fileUrl || !/^https?:\/\//.test(fileUrl)) return err(res, 400, "fileUrl is required");
-    // Only files this deployment actually stores — not arbitrary URLs. Files
-    // live on Cloudinary now, and on Supabase if they were uploaded before that
-    // move, so the test has to accept both: against the Supabase base alone,
-    // every newly uploaded lesson would be rejected as foreign.
+    // Only fetch files belonging to this deployment, not arbitrary URLs.
     if (!isManagedUrl(fileUrl)) {
       return err(res, 400, "fileUrl must be a stored lesson file");
     }

@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const path = require("path");
-const cloudinary = require("cloudinary").v2;
-const streamifier = require("streamifier");
+const crypto = require("crypto");
+const { storage, publicUrlFor } = require("../utils/storage");
 const ClientManagement = require("../models/ClientManagementModel");
 const {
   nextClientCode,
@@ -14,18 +14,6 @@ const {
   countClientFootprint,
   purgeClientFootprint,
 } = require("../services/clientCascadeDelete");
-
-// Cloudinary — client logos are stored under the "lms/client-logos/<institution>"
-// folder so each tenant's assets are grouped, and a delete-old cleanup can
-// filter by that prefix later. The config is read at module load; if the env
-// vars are missing, upload calls fail with a clear "not configured" error
-// instead of silently going nowhere.
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
-});
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -1115,19 +1103,13 @@ const clientManagementController = {
   },
 
   // Upload a client logo. Accepts a single image file (jpg, png or webp)
-  // under the field name `logo`, streams the buffer to Cloudinary under
-  // `lms/client-logos/<institution>/`, and returns Cloudinary's public
-  // https URL. That URL is what the frontend saves on the client record;
+  // under the field name `logo`, saves it under the institution's VPS folder,
+  // and returns its public API URL. That URL is what the frontend saves;
   // every render site (`ClientAvatar`, cards, details drawer/page) reads
   // the same URL regardless of where the bits actually live.
   //
-  // Migrated from local disk (Server/uploads/client-logos) to Cloudinary
-  // so multiple instances (dev/staging/prod) all see the same asset — the
-  // old local URL was tied to the request's host and broke as soon as a
-  // record moved between environments. Existing records with old
-  // `/uploads/client-logos/...` URLs keep working exactly as before; new
-  // uploads land on Cloudinary, old ones stay on disk until they're
-  // replaced or removed.
+  // Files persist outside the release checkout when STORAGE_DIR is configured.
+  // Existing older URLs remain untouched until their assets are migrated.
   //
   // Deliberately does NOT mutate any client record: the ADD flow uploads
   // BEFORE the client exists (there's no id yet), and the edit flow
@@ -1140,17 +1122,6 @@ const clientManagementController = {
         return res.status(400).json({
           success: false,
           message: "No logo file uploaded (expected multipart field 'logo')",
-        });
-      }
-
-      // Cloudinary must be configured at boot. If the env is missing
-      // there's no point sending anything upstream — fail fast so the
-      // frontend gets a clear error instead of an opaque 500 from the
-      // SDK later.
-      if (!process.env.CLOUDINARY_CLOUD_NAME || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
-        return res.status(500).json({
-          success: false,
-          message: "Cloudinary is not configured on the server",
         });
       }
 
@@ -1189,51 +1160,17 @@ const clientManagementController = {
         ? String(req.user.institution)
         : "shared";
 
-      // Folder per institution so tenant assets are grouped and a future
-      // cleanup can be filtered by the folder prefix. `unique_filename`
-      // + `use_filename: false` lets Cloudinary pick a fresh id every time
-      // — we don't reuse the client-supplied filename (path separators,
-      // duplicates), and we don't need our own timestamp/random because
-      // Cloudinary already generates a unique public_id.
-      const folder = `lms/client-logos/${institutionId}`;
-
-      // Buffer path — express-fileupload with useTempFiles: false gives
-      // us `file.data` as a Buffer. Stream it into Cloudinary's
-      // `upload_stream` via streamifier so nothing touches the disk.
-      const uploadFromBuffer = () => new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          {
-            folder,
-            resource_type: "image",
-            // Restrict server-side too — Cloudinary honours the allowed
-            // formats list, so a spoofed mimetype gets caught here as well.
-            allowed_formats: ["jpg", "jpeg", "png", "webp"],
-            unique_filename: true,
-            use_filename: false,
-            overwrite: false,
-          },
-          (err, result) => {
-            if (err) return reject(err);
-            if (!result || !result.secure_url) {
-              return reject(new Error("Cloudinary did not return a URL"));
-            }
-            resolve(result);
-          }
-        );
-        streamifier.createReadStream(file.data).pipe(stream);
-      });
-
-      const result = await uploadFromBuffer();
+      const filename = `${Date.now()}_${crypto.randomUUID()}${ext}`;
+      const objectPath = `client-logos/${institutionId}/${filename}`;
+      const { error } = await storage.from("smartlms").upload(objectPath, file.data);
+      if (error) throw error;
 
       res.status(201).json({
         success: true,
         message: "Client logo uploaded",
         data: {
-          // The secure https URL is what the record stores. `public_id`
-          // is returned as well so future flows (delete, re-crop) can
-          // address the same asset without having to parse the URL.
-          url: result.secure_url,
-          publicId: result.public_id,
+          url: publicUrlFor(objectPath),
+          publicId: objectPath,
         },
       });
     } catch (error) {

@@ -387,20 +387,8 @@ const path = require('path');
 const fs = require('fs');
 
 
-const cloudinary = require('cloudinary').v2;
-const stream = require('stream');
-
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// File storage uses the VPS filesystem through this compatibility interface.
 const { storage, publicUrlFor } = require("../../../utils/storage");
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
 
 
 
@@ -2697,58 +2685,25 @@ exports.lockExercise = async (req, res) => {
       try {
         const screenRecordingFile = req.files.screenRecording;
 
-        // Upload to Cloudinary from buffer
-        const uploadResult = await new Promise((resolve, reject) => {
-          // Create upload stream to Cloudinary
-          const uploadStream = cloudinary.uploader.upload_stream(
-            {
-              resource_type: 'video',
-              folder: `lms/pedagogy/${category}/${subcategory}/screen-recordings`,
-              overwrite: true,
-              chunk_size: 6000000, // 6MB chunks
-              eager: [
-                { width: 640, height: 480, crop: "scale" }
-              ]
-            },
-            (error, result) => {
-              if (error) {
-                console.error('❌ Cloudinary upload error:', error);
-                reject(error);
-              } else {
-                resolve(result);
-              }
-            }
-          );
-
-          // Create readable stream from buffer
-          const bufferStream = new stream.PassThrough();
-          bufferStream.end(screenRecordingFile.data);
-
-          // Pipe buffer to Cloudinary upload stream
-          bufferStream.pipe(uploadStream);
-        });
-
-        screenRecordingUrl = uploadResult.secure_url;
+        const recordingPath = `pedagogy/${category}/${subcategory}/screen-recordings/recording_${Date.now()}.webm`;
+        const { error } = await storage.from("smartlms").upload(recordingPath, screenRecordingFile.data);
+        if (error) throw error;
+        screenRecordingUrl = publicUrlFor(recordingPath);
       } catch (uploadError) {
-        console.error("❌ Error uploading screen recording to Cloudinary:", uploadError);
+        console.error("❌ Error saving screen recording to VPS storage:", uploadError);
         // Continue without failing the entire operation
       }
     }
     // Also check if screenRecording was sent as Base64 in body (for backward compatibility)
     else if (req.body.screenRecording && req.body.screenRecording.startsWith('data:video/')) {
       try {
-        const base64Data = req.body.screenRecording;
-
-        const uploadResult = await cloudinary.uploader.upload(base64Data, {
-          resource_type: 'video',
-          folder: `lms/pedagogy/${category}/${subcategory}/screen-recordings`,
-          overwrite: true,
-          chunk_size: 6000000
-        });
-
-        screenRecordingUrl = uploadResult.secure_url;
+        const [, encoded] = req.body.screenRecording.split(",", 2);
+        const recordingPath = `pedagogy/${category}/${subcategory}/screen-recordings/recording_${Date.now()}.webm`;
+        const { error } = await storage.from("smartlms").upload(recordingPath, Buffer.from(encoded, "base64"));
+        if (error) throw error;
+        screenRecordingUrl = publicUrlFor(recordingPath);
       } catch (uploadError) {
-        console.error("❌ Error uploading Base64 screen recording:", uploadError);
+        console.error("❌ Error saving Base64 screen recording:", uploadError);
       }
     }
 
@@ -2877,7 +2832,7 @@ exports.getExerciseStatus = async (req, res) => {
 
 
 // ── Save Assessment Screen Recording URL (from proctoring hook) ───────────────
-// Called after the client uploads to Cloudinary and gets a URL back.
+// Called after the client uploads to VPS storage and gets a URL back.
 // Saves the URL to the student's exercise record so getExerciseStatus can return it.
 exports.saveAssessmentRecording = async (req, res) => {
   try {

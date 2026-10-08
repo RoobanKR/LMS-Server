@@ -24,10 +24,8 @@ const InstitutionModal = require("../models/InstitutionModal");
 const { getSuperAdminPermissions, isSuperAdminRoleName } = require("../utils/superAdminPermissions");
 const roleModel = require("../models/RoleModel");
 
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// Files go to persistent VPS storage through utils/storage.js. Its
+// Supabase-shaped interface keeps existing upload and delete call sites small.
 const { storage, publicUrlFor } = require("../utils/storage");
 const { getDefaultProfileImageUrl } = require("../utils/profileImageStorage");
 
@@ -208,7 +206,7 @@ exports.Addusers = async (req, res) => {
         .upload(`users/profile/${uniqueFileName}`, imageFile.data);
 
       if (error) {
-        console.error("Error uploading profile image to Cloudinary:", error);
+        console.error("Error saving profile image to VPS storage:", error);
         return res.status(500).json({
           message: [
             { key: "error", value: "Error uploading profile image" },

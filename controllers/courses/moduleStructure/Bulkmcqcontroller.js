@@ -9,10 +9,7 @@
 const mongoose = require("mongoose");
 const Papa = require("papaparse"); // npm i papaparse
 
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// Files go to persistent VPS storage through the established storage adapter.
 const { storage, publicUrlFor } = require("../../../utils/storage");
 
 const { resolvePedagogyScope } = require("../../../utils/pedagogyScope");

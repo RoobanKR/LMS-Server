@@ -18,18 +18,20 @@ function load(file, dependencies, extras = {}) {
 
 function setup({ seedFails = false, uploadFails = false, duplicate = false, duplicateRace = false } = {}) {
   const calls = { seeds: 0, uploads: 0, copies: 0, users: [] };
-  const defaultUrl = 'https://res.cloudinary.com/test/image/upload/lms/users/profile/default_profile_image.png';
+  const defaultUrl = 'https://api.example.test/uploads/storage/users/profile/default_profile_image.svg';
   const profiles = load('../utils/profileImageStorage.js', {
-    cloudinary: { v2: {
-      config() {},
-      uploader: { async upload(source) {
+    path,
+    './storage': { diskPathFor: (file) => path.join(__dirname, file), publicUrlFor: () => defaultUrl },
+    'fs-extra': {
+      async pathExists() { return false; },
+      async ensureDir() {},
+      async writeFile(_target, source) {
         calls.seeds++;
-        assert.match(source, /^data:image\/svg\+xml;base64,/);
+        assert.match(source, /^<svg /);
         if (seedFails) throw new Error('Storage unavailable');
-        return { secure_url: defaultUrl };
-      } },
-    } },
-  }, { process: { env: { CLOUDINARY_CLOUD_NAME: 'test' } } });
+      },
+    },
+  }, { process: { env: {} } });
   const controller = load('userAuth.js', {
     config: { get: () => 'test' },
     '../models/UserModel': {

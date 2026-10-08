@@ -19,10 +19,7 @@ const { stripHiddenForStudent, stripHiddenForStudentDeep } = require('../../../s
 const { roleNamesOf, normalizeRoleName } = require('../../../utils/pocScope');
 
 
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// Files go to persistent VPS storage through the established storage adapter.
 const { storage, publicUrlFor, storagePathFromUrl, isLegacySupabaseUrl } = require("../../../utils/storage");
 
 const ffmpeg = require('fluent-ffmpeg');
@@ -3717,15 +3714,11 @@ const uploadToResolutionFolder = async (fileBuffer, fileName, resolution, type, 
 // Delete from Resolution Folder
 const deleteFromResolutionFolder = async (fileUrl, type, section, name, pathParts) => {
   try {
-    // Stored URLs are a mix: Cloudinary for anything uploaded since the move
-    // off Supabase, and Supabase for everything before it. storagePathFromUrl
-    // reads both, so an older file is still recognised rather than silently
-    // skipped here.
+    // Delete only files on this VPS. Existing remote URLs remain readable and
+    // are left alone until their assets are migrated.
     const storagePath = storagePathFromUrl(fileUrl);
-    if (isLegacySupabaseUrl(fileUrl)) {
-      // Deleting it would mean calling the service this deployment moved off.
-      // Say so and leave the object where it is — the Mongo record still goes.
-      console.warn(`Skipping storage delete for a pre-Cloudinary file: ${fileUrl}`);
+    if (!String(fileUrl || "").includes("/uploads/storage/")) {
+      console.warn(`Skipping remote legacy file during VPS storage cleanup: ${fileUrl}`);
       return;
     }
 
@@ -4118,7 +4111,7 @@ if (isUpdate === 'true' && updateFileId) {
         }
 
         // Fire-and-forget: drop the OLD file's cached slides (PptCache doc +
-        // Cloudinary images) so orphaned conversions don't pile up.
+        // local slide images) so orphaned conversions don't pile up.
         if (file.fileUrl instanceof Map) {
           for (const oldFileUrl of file.fileUrl.values()) {
             cleanupConvertedSlides(oldFileUrl)

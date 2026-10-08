@@ -16,6 +16,7 @@ const JWT_TOKEN_KEY = config.get('JWT_TOKEN_KEY');
 
 const fileUpload = require("express-fileupload");
 const userAuth = require("./routes/userAuth");
+const storageRoutes = require("./routes/storageRoutes");
 const institutionRoutes = require("./routes/institutionRoutes");
 const reportSettingsRoutes = require("./routes/reportSettingsRoutes");
 const dynamicContentRoutes = require("./routes/dynamicContent/courseStructureDynamicRoutes");
@@ -77,13 +78,20 @@ const glossaryRoutes = require("./routes/courses/glossaryRoutes");
 connectDB();
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
 
-// Public static assets uploaded through the API (currently just client
-// logos — see /client-management/upload-logo). Files are written under
-// Server/uploads/... and read back at http[s]://<host>/uploads/... so the
-// URL saved on the record works for anyone whose browser can reach this
-// server. Kept small on purpose: image logos only. The subdirectory is
-// created on demand by the upload handler; static() itself does not
-// require it to exist upfront.
+// User content lives at STORAGE_DIR, which can be mounted outside the deployed
+// app folder so a code release cannot erase files. The same public URL prefix
+// is used by utils/storage.js when saving database links.
+app.use('/uploads/storage', express.static(require('./utils/storage').STORAGE_DIR, {
+  fallthrough: false,
+  dotfiles: 'deny',
+  index: false,
+  maxAge: 0,
+  setHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+  },
+}));
+// Legacy client-logo uploads remain under Server/uploads/client-logos.
 app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
 
 // Init Middleware
@@ -111,6 +119,7 @@ app.use(express.json({ extended: false }));
 const CORS_ORIGINS = [
   "https://lms-client-five-theta.vercel.app",
   "http://187.126.118.102",
+  "https://lms-smartcliff-71ug4ew5q-muthurajanparthsarathys-projects.vercel.app",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
@@ -250,6 +259,7 @@ app.use("/", institutionRoutes);
 app.use("/", reportSettingsRoutes);
 app.use('/', backupRoutes);
 app.use("/", userAuth);
+app.use("/", storageRoutes);
 app.use("/", dynamicContentRoutes);
 app.use("/", clientManagementRoutes);
 app.use("/", serviceMappingRoutes);

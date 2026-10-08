@@ -1,10 +1,7 @@
 const Question = require('../../models/Courses/QuestionbankModal');
 const mongoose = require('mongoose');
 
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// Files go to persistent VPS storage through the established storage adapter.
 const { storage, publicUrlFor } = require("../../utils/storage");
 
 // DO NOT add `.lean()` to the question-bank reads. Measured against live data:

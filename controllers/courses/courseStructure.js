@@ -20,10 +20,8 @@ const {
   usesSectionGroups,
 } = require("../../utils/courseGroups");
 
-// Files go to CLOUDINARY, not Supabase Storage. `storage` keeps the shape the
-// Supabase client had (.from(bucket).upload/remove/getPublicUrl/copy, each
-// resolving { data, error }), so the call sites below are unchanged — see
-// utils/storage.js. `publicUrlFor` replaces the hand-built public URL.
+// Files go to persistent VPS storage. `storage` keeps the established
+// .from(bucket).upload/remove/getPublicUrl/copy call shape; see utils/storage.js.
 const { storage, publicUrlFor } = require("../../utils/storage");
 const User = require("../../models/UserModel");
 // (Role is required further down, by the approval-hierarchy section — a

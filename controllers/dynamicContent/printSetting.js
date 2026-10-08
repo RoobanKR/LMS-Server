@@ -14,8 +14,7 @@
 //   1. Every query is now filtered by req.user.institution. It previously had
 //      none, so one tenant's layouts were visible to every other tenant, and
 //      getAll was not even authenticated.
-//   2. Images go to CLOUDINARY (utils/printAssetStorage.js) instead of the
-//      Supabase bucket, which was out of space and refusing TLS connections.
+//   2. Images go to persistent VPS storage (utils/printAssetStorage.js).
 
 const mongoose = require("mongoose");
 const PrintSetting = require("../../models/dynamicContent/PrintSettingModels");

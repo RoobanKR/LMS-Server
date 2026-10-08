@@ -1,19 +1,13 @@
 const path = require('path')
 const fs = require('fs-extra')
 const axios = require('axios')
-const cloudinary = require('cloudinary').v2
 const { execFile } = require('child_process')
 const { promisify } = require('util')
 const os = require('os')
 const PptCache = require('../../models/Courses/PptCacheModel')
+const { storage, publicUrlFor, storagePathFromUrl } = require('../../utils/storage')
 
 const execFileAsync = promisify(execFile)
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-})
 
 // Where LibreOffice lives differs per machine — a Windows dev box, a Mac, the
 // Linux server — so it is not one hard-coded path (that path failed with
@@ -42,10 +36,10 @@ const LIBREOFFICE_MISSING =
   'converted for viewing. Install LibreOffice (or set LIBREOFFICE_PATH) and retry.'
 
 // In-flight conversions keyed by cacheKey — prevents duplicate LibreOffice runs
-// and duplicate Cloudinary uploads when the same deck is requested concurrently.
+// and duplicate slide writes when the same deck is requested concurrently.
 const inFlightConversions = new Map()
 
-// Core pipeline: buffer → LibreOffice PDF → page images → Cloudinary → PptCache.
+// Core pipeline: buffer → LibreOffice PDF → page images → VPS storage → PptCache.
 // Returns { slideImages, totalSlides }. Reusable from the route handler and from
 // background upload-time conversion (pedagogyView.js).
 async function convertDocumentToSlides({ buffer, ext, cacheKey }) {
@@ -119,22 +113,16 @@ async function performConversion({ buffer, ext, cacheKey }) {
 
     if (imagePaths.length === 0) throw new Error('No slides rendered')
 
-    // 4. Upload to Cloudinary
-    console.log(`☁️  Uploading ${imagePaths.length} slides...`)
+    // 4. Save slides to local persistent storage
+    console.log(`💾 Saving ${imagePaths.length} slides to VPS storage...`)
     const stamp = Date.now()
-    const uploads = await Promise.all(
-      imagePaths.map((imgPath, idx) =>
-        cloudinary.uploader.upload(imgPath, {
-          folder: 'ppt-slides',
-          public_id: `slide_${idx + 1}_${stamp}`,
-          resource_type: 'image',
-          format: 'jpg',
-          transformation: [{ quality: 'auto:good' }],
-        })
-      )
-    )
-
-    const slideImages = uploads.map(r => r.secure_url)
+    const slidePaths = imagePaths.map((_, idx) => `ppt-slides/slide_${idx + 1}_${stamp}.png`)
+    const uploads = await Promise.all(imagePaths.map(async (imgPath, idx) => {
+      const { error } = await storage.from('smartlms').upload(slidePaths[idx], await fs.readFile(imgPath))
+      if (error) throw error
+      return publicUrlFor(slidePaths[idx])
+    }))
+    const slideImages = uploads
     console.log(`✅ ${slideImages.length} slides ready`)
 
     // Persist to DB cache so future requests skip conversion entirely
@@ -153,21 +141,18 @@ async function performConversion({ buffer, ext, cacheKey }) {
   }
 }
 
-// Delete the cached conversion for a document URL and destroy its slide images
-// on Cloudinary. Used when a file is replaced/removed so orphaned slides don't
+// Delete the cached conversion and its locally stored slide images. Used when a file is replaced/removed so orphaned slides don't
 // pile up. Safe to fire-and-forget.
 async function cleanupConvertedSlides(pptUrl) {
   if (!pptUrl) return
   const cached = await PptCache.findOneAndDelete({ pptUrl })
   if (!cached || !Array.isArray(cached.slideImages)) return
   await Promise.all(
-    cached.slideImages.map(imageUrl => {
-      // '.../upload/v17123/ppt-slides/slide_1_999.jpg' → 'ppt-slides/slide_1_999'
-      const afterUpload = imageUrl.split('/upload/')[1]
-      if (!afterUpload) return Promise.resolve()
-      const publicId = afterUpload.replace(/^v\d+\//, '').replace(/\.[a-zA-Z0-9]+$/, '')
-      return cloudinary.uploader.destroy(publicId)
-        .catch(err => console.warn('Cloudinary slide cleanup failed:', err.message))
+    cached.slideImages.map(async imageUrl => {
+      const objectPath = storagePathFromUrl(imageUrl)
+      if (!objectPath || !String(imageUrl).includes('/uploads/storage/')) return
+      const { error } = await storage.from('smartlms').remove([objectPath])
+      if (error) console.warn('VPS slide cleanup failed:', error.message)
     })
   )
 }

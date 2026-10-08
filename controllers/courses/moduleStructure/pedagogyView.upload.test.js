@@ -26,7 +26,7 @@ async function upload({ failure = false, nested = false } = {}) {
         assert.equal(bytes.toString(), 'Lesson content');
         return { error: failure ? new Error('Storage unavailable') : null };
       } }) },
-      publicUrlFor: (filePath) => `https://res.cloudinary.com/test/raw/upload/${filePath}`,
+      publicUrlFor: (filePath) => `https://api.example.test/uploads/storage/${filePath}`,
     },
   };
   const controller = {};
@@ -49,12 +49,12 @@ async function upload({ failure = false, nested = false } = {}) {
 }
 
 for (const nested of [false, true]) {
-  test(`uploads a resource ${nested ? 'inside a folder' : 'at root'} and saves its Cloudinary URL`, async () => {
+  test(`uploads a resource ${nested ? 'inside a folder' : 'at root'} and saves its VPS URL`, async () => {
     const result = await upload({ nested });
     assert.equal(result.res.code, 200, JSON.stringify(result.res.body));
     assert.equal(result.saved, true);
     assert.equal(result.files.length, 1);
-    assert.match(result.files[0].fileUrl.get('base'), /^https:\/\/res\.cloudinary\.com\//);
+    assert.match(result.files[0].fileUrl.get('base'), /^https:\/\/api\.example\.test\/uploads\/storage\//);
     assert.ok(result.uploadPath.includes(nested ? '/Documents/' : '/root/'));
   });
 }

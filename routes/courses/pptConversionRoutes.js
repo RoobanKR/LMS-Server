@@ -3,7 +3,7 @@ const router = express.Router()
 const { convertPptToImages } = require('../../controllers/courses/pptConversionController')
 
 // POST /api/ppt/convert
-// Body: { pptUrl: "https://cloudinary.com/..." }
+// Body: { pptUrl: "https://..." }
 // Returns: { success: true, slideImages: [...], totalSlides: N }
 router.post('/api/ppt/convert', convertPptToImages)
 
