@@ -155,9 +155,11 @@ exports.saveProgramCalendar = async (req, res) => {
         message: "This group no longer has its own Program Calendar. Reload the page and pick a group again.",
       });
     }
-    // A degree group's own calendar is a second calendar for the same course
-    // and phase, which the older one-per-course indexes would reject.
-    if (key) await ProgramCalendar.ensureGroupIndexes();
+    // A second phase's calendar, or a degree group's own one, is a second
+    // calendar for the same course, which the older one-per-course unique
+    // indexes reject (E11000 on courseId_1). Drop them before any save — this
+    // runs once per process. Phases used to skip it, so Phase II never saved.
+    await ProgramCalendar.ensureGroupIndexes();
 
     const phaseName = typeof phase === "string" ? phase.trim() : "";
     let existing = await ProgramCalendar.findOne(scopeQuery(courseId, phaseName, key));
