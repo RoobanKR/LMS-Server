@@ -37,6 +37,20 @@ ffmpeg.setFfprobePath(ffprobePath);
 // by the public URL so the first student view is a cache hit.
 const { convertDocumentToSlides, cleanupConvertedSlides } = require('../pptConversionController');
 const { extractLessonTextFromPdf } = require('../../../utils/lessonTextExtract');
+
+// The name a resource is listed under: the uploaded name as the user gave it
+// (spaces, Tamil etc. kept) with the corrected extension. The storage path
+// keeps using the sanitised name; only the display name changes.
+const displayFileName = (originalName, correctExt) => {
+  const name = String(originalName || '').trim() || 'upload';
+  const dot = name.lastIndexOf('.');
+  let stem = dot > 0 ? name.slice(0, dot) : name;
+  // "deck.pptx.pptx" → "deck.pptx", not a doubled extension.
+  if (correctExt && stem.toLowerCase().endsWith(correctExt.toLowerCase())) {
+    stem = stem.slice(0, -correctExt.length);
+  }
+  return (stem.trim().slice(0, 200) || 'upload') + (correctExt || '');
+};
 // Resources by Batch — which container a write lands in and which slice of it
 // a reader may see. The pure rules live in utils/batchResources.js; the
 // request→container bridge in utils/pedagogyScope.js is SHARED with
@@ -4132,7 +4146,7 @@ if (isUpdate === 'true' && updateFileId) {
 
         const updatedFile = {
           _id: file._id,
-          fileName: cleanUpdName,
+          fileName: displayFileName(fileToUpdate.name, correctUpdExt),
           fileType: fileToUpdate.mimetype,
           fileUrl: fileUrlMap,
           size: fileToUpdate.size.toString(),
@@ -4710,7 +4724,7 @@ if (action === 'updateFolder' && folderName) {
 
           const newFile = {
             _id: new mongoose.Types.ObjectId(),
-            fileName: cleanName,          // use the sanitised name with correct extension
+            fileName: displayFileName(file.name, correctExt),
             fileType: file.mimetype,
             fileUrl: fileUrlMap,
             size: file.size.toString(),

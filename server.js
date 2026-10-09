@@ -142,8 +142,15 @@ app.use(fileUpload({
   abortOnLimit: true,
   createParentPath: true,
   useTempFiles: false,
-  safeFileNames: true,
-  preserveExtension: true,
+  // Browsers send file names as UTF-8; busboy otherwise reads them as latin1.
+  defParamCharset: "utf8",
+  // Strip only what is unsafe in a file name (path separators, reserved and
+  // control characters). `true` also stripped spaces, dots and every
+  // non-English letter, so "பாடம் 1.pptx" was saved as "1p.pptx".
+  safeFileNames: /[\\/:*?"<>|\u0000-\u001f]/g,
+  // `true` keeps only 3 extension characters: .pptx became .ptx and .webm
+  // became .ebm (which the recording upload then rejected).
+  preserveExtension: 10,
 }));
 app.use(express.urlencoded({ extended: true }));
 
