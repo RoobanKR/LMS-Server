@@ -10,7 +10,7 @@ const ExamSession = require("../../../models/Courses/moduleStructure/ExamSession
 const ActivityLog = require("../../../models/ActivityLog");
 const StudentQuestionActivity = require("../../../models/Courses/moduleStructure/StudentQuestionActivityModel");
 const ProctorMessage = require("../../../models/Courses/moduleStructure/ProctorMessageModel");
-const { pocCourseFilter } = require("../../../utils/pocScope");
+const { pocCourseFilter, roleNamesOf, normalizeRoleName } = require("../../../utils/pocScope");
 const { isStudentUser } = require("../../../utils/batchResources");
 const assignmentPresence = require("../../../utils/assignmentPresence");
 
@@ -316,7 +316,24 @@ exports.getLiveDashboard = async (req, res) => {
       })
       .lean();
 
-    const flatUsers = (course?.batchAndParticipants || [])
+    // A TRAINER sees the students of the batches they teach — the batches
+    // that list them — the same rule Manage Users applies (pedagogyView). Done
+    // here so other batches' names and progress never reach that trainer.
+    // A trainer in no batch (or a course without batches) keeps the whole
+    // roster, as does every other role (admin, L&D head, POC…).
+    const allBatches = course?.batchAndParticipants || [];
+    const viewerId = String(req.user?._id || "");
+    const isTrainerViewer = (await roleNamesOf(req.user))
+      .map(normalizeRoleName)
+      .some((name) => name.includes("trainer"));
+    const trainerBatches = isTrainerViewer && viewerId
+      ? allBatches.filter((batch) =>
+          (batch.users || []).some((entry) => String(entry?.user?._id || entry?.user || "") === viewerId))
+      : [];
+    const batchScoped = trainerBatches.length > 0;
+    const visibleBatches = batchScoped ? trainerBatches : allBatches;
+
+    const flatUsers = visibleBatches
       .flatMap((batch) => batch.users || [])
       .map((p) => p.user)
       .filter((u) => u && u._id)
@@ -523,6 +540,12 @@ exports.getLiveDashboard = async (req, res) => {
       endDate,
       totalStudents: students.length,
       students,
+      // True when the list is narrowed to this trainer's batches — the page
+      // then ignores live "joined" events for learners outside the list.
+      batchScoped,
+      batches: batchScoped
+        ? trainerBatches.map((b) => String(b?.batchName || "").trim()).filter(Boolean)
+        : [],
     });
   } catch (err) {
     console.error("getLiveDashboard error:", err);
