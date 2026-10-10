@@ -56,6 +56,24 @@ const isManagedUrl = (url) => {
   return value.startsWith(`${base}/uploads/storage/`) || value.startsWith("/uploads/storage/");
 };
 
+const isLocalStorageUrl = (url) => {
+  const value = String(url || "");
+  if (value.startsWith("/uploads/storage/")) return true;
+  try { return new URL(value).pathname.startsWith("/uploads/storage/"); }
+  catch { return false; }
+};
+
+// Reads a stored file straight from STORAGE_DIR when the URL's path is
+// /uploads/storage/..., whatever origin it was saved with (links saved before
+// STORAGE_PUBLIC_BASE_URL was set still name a file here). Nothing is fetched,
+// so a foreign host in the URL is harmless. Returns null for remote URLs.
+const readStoredFile = async (url) => {
+  if (!isLocalStorageUrl(url)) return null;
+  const objectPath = storagePathFromUrl(url);
+  if (!objectPath) return null;
+  return fs.readFile(diskPathFor(objectPath));
+};
+
 const storagePathFromUrl = (url) => {
   const value = String(url || "");
   if (isLegacySupabaseUrl(value)) {
@@ -156,6 +174,8 @@ module.exports = {
   isLegacySupabaseUrl,
   isLegacyCloudinaryUrl,
   isManagedUrl,
+  isLocalStorageUrl,
+  readStoredFile,
   sanitizePath,
   diskPathFor,
   STORAGE_DIR,

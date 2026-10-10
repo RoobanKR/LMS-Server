@@ -5,7 +5,7 @@ const { execFile } = require('child_process')
 const { promisify } = require('util')
 const os = require('os')
 const PptCache = require('../../models/Courses/PptCacheModel')
-const { storage, publicUrlFor, storagePathFromUrl } = require('../../utils/storage')
+const { storage, publicUrlFor, storagePathFromUrl, readStoredFile } = require('../../utils/storage')
 
 const execFileAsync = promisify(execFile)
 
@@ -193,10 +193,13 @@ async function convertPptToImages(req, res) {
       console.log(`📁 Using uploaded file (${ext})...`)
       buffer = req.files.file.data
     } else {
-      // Fallback: download from URL
-      console.log(`⬇️  Downloading file (${ext})...`)
-      const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
-      buffer = Buffer.from(response.data)
+      // Fallback: our own stored file is read from disk; anything else is downloaded
+      buffer = await readStoredFile(pptUrl).catch(() => null)
+      if (!buffer) {
+        console.log(`⬇️  Downloading file (${ext})...`)
+        const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
+        buffer = Buffer.from(response.data)
+      }
     }
 
     const { slideImages, totalSlides } = await convertDocumentToSlides({ buffer, ext, cacheKey })

@@ -7,7 +7,7 @@
 
 const mongoose = require("mongoose");
 // Only fetch VPS storage and the configured legacy storage URLs.
-const { isManagedUrl } = require("../../utils/storage");
+const { isManagedUrl, readStoredFile } = require("../../utils/storage");
 const Glossary = require("../../models/Courses/GlossaryModel");
 const LessonTextMap = require("../../models/Courses/LessonTextMapModel");
 const CourseStructure = require("../../models/Courses/courseStructureModal");
@@ -115,14 +115,17 @@ exports.extractLesson = async (req, res) => {
   try {
     const { fileUrl, force } = req.body || {};
     if (!fileUrl || !/^https?:\/\//.test(fileUrl)) return err(res, 400, "fileUrl is required");
-    // Only fetch files belonging to this deployment, not arbitrary URLs.
-    if (!isManagedUrl(fileUrl)) {
-      return err(res, 400, "fileUrl must be a stored lesson file");
+    // Files in this server's storage are read from disk; otherwise only
+    // fetch legacy files belonging to this deployment, not arbitrary URLs.
+    let buffer = await readStoredFile(fileUrl).catch(() => null);
+    if (!buffer) {
+      if (!isManagedUrl(fileUrl)) {
+        return err(res, 400, "fileUrl must be a stored lesson file");
+      }
+      const resp = await fetch(fileUrl);
+      if (!resp.ok) return err(res, 400, `Could not download file (${resp.status})`);
+      buffer = Buffer.from(await resp.arrayBuffer());
     }
-
-    const resp = await fetch(fileUrl);
-    if (!resp.ok) return err(res, 400, `Could not download file (${resp.status})`);
-    const buffer = Buffer.from(await resp.arrayBuffer());
 
     const result = await extractLessonTextFromPdf(buffer, fileUrl, { force: force === true });
     return res.status(200).json({

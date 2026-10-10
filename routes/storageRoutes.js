@@ -13,7 +13,9 @@ router.post("/storage/upload-recording", userAuth, async (req, res) => {
   try {
     const file = req.files?.file;
     if (!file) return res.status(400).json({ success: false, message: "Recording file is required" });
-    const mime = String(file.mimetype || "").toLowerCase();
+    // MediaRecorder blobs carry codec parameters ("video/webm;codecs=vp9,opus");
+    // only the base type is checked.
+    const mime = String(file.mimetype || "").toLowerCase().split(";")[0].trim();
     const ext = path.extname(String(file.name || "")).toLowerCase();
     const allowed = new Set(["video/webm", "video/mp4", "video/quicktime"]);
     if (!allowed.has(mime) || !new Set([".webm", ".mp4", ".mov"]).has(ext)) {
