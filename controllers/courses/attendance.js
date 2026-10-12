@@ -136,7 +136,7 @@ const isStudentUser = async (user) => {
 // the pedagogy hours and the holiday module, the same derivation the calendar
 // page performs, so the two can never disagree.
 const ProgramCalendar = require("../../models/Courses/ProgramCalendarModel");
-const { calendarKeysFor, pickCalendar } = require("../../utils/calendarGroups");
+const { calendarKeysFor } = require("../../utils/calendarGroups");
 const PedagogyView = require("../../models/Courses/moduleStructure/pedagogyViewModal");
 const InstituteHolidayCalendar = require("../../models/InstituteHolidayCalendarModel");
 
@@ -207,6 +207,42 @@ const computeWindow = (calendar, totalHours, holidayDuration) => {
   };
 };
 
+// A phased course keeps one Program Calendar PER PHASE under the same group
+// key (ProgramCalendar.phase), so a group can have several. Attendance
+// follows the whole training — every phase calendar of the group that has a
+// start date; a phase never saved with one doesn't hide the others. Keys are
+// tried most specific first (calendarKeysFor order, ending with "" — the
+// common calendar), and a group whose own calendars carry no start date
+// follows the next key, as a group with no calendar yet already does.
+const calendarsForKeys = (calendars, keys) => {
+  for (const key of keys) {
+    const hits = (calendars || []).filter(
+      (cal) => cal && String(cal.groupKey || "") === key && cal.startDate
+    );
+    if (hits.length) return hits;
+  }
+  return [];
+};
+
+// One training window from several phase windows: the earliest start through
+// the latest end. A phase without a computable end leaves the window
+// open-ended (only the start bound applies), as a single calendar without one
+// already does.
+const combineWindows = (windows) => {
+  const ws = (windows || []).filter((w) => w && w.exists);
+  if (ws.length === 0) return { exists: false };
+  if (ws.length === 1) return ws[0];
+  return {
+    exists: true,
+    startDate: ws.map((w) => w.startDate).sort()[0],
+    endFor: (batchId) => {
+      const ends = ws.map((w) => w.endFor(batchId));
+      if (ends.some((e) => !e)) return null;
+      return ends.sort()[ends.length - 1];
+    },
+  };
+};
+
 // Merge holiday docs into a date → duration map. Client entries override the
 // institute's on the same date, so the (longer-keyed) client doc applies last.
 const holidayMapOf = (holidayDocs) => {
@@ -243,11 +279,9 @@ const pedagogyDurationsOf = (field) => ({
 // and gets the same one it always did.
 const resolveTrainingWindow = async (courseId, course, batchId) => {
   const calendars = await ProgramCalendar.find({ courseId }).lean();
-  const groupKeys = calendarKeysFor(course, batchId).filter(Boolean);
-  const calendar = pickCalendar(calendars, groupKeys)
-    || calendars.find((cal) => !cal.groupKey)
-    || null;
-  if (!calendar || !calendar.startDate) return { exists: false };
+  // Every phase calendar of the batch's group (else the common one's).
+  const chosen = calendarsForKeys(calendars, [...calendarKeysFor(course, batchId).filter(Boolean), ""]);
+  if (chosen.length === 0) return { exists: false };
 
   const hourAgg = await PedagogyView.aggregate([
     { $match: { courses: course._id } },
@@ -274,7 +308,8 @@ const resolveTrainingWindow = async (courseId, course, batchId) => {
     ? await InstituteHolidayCalendar.find({ instituteId: { $in: scopeIds } }).lean()
     : [];
 
-  return computeWindow(calendar, totalHours, holidayMapOf(holidayDocs));
+  const holidays = holidayMapOf(holidayDocs);
+  return combineWindows(chosen.map((cal) => computeWindow(cal, totalHours, holidays)));
 };
 
 // ── GET ─────────────────────────────────────────────────────────────────────
@@ -1007,22 +1042,22 @@ exports.getAttendanceOverview = async (req, res) => {
       if (clientScope && holidayDocsByScope.has(clientScope))
         scopeDocs.push(holidayDocsByScope.get(clientScope));
       const courseCalendars = calendarsByCourse.get(String(c._id)) || [];
-      // The common calendar — the one this listing has always read for the
-      // course (the last saved, as the old per-course map kept).
-      const commonCalendar = [...courseCalendars].reverse().find((cal) => !cal.groupKey) || null;
       const hours = hoursTotalByCourse.get(String(c._id)) || 0;
       const holidays = holidayMapOf(scopeDocs);
-      // One window per calendar, however many batches follow it.
+      // One window per set of calendars (a group's phase calendars), however
+      // many batches follow it — the SAME selection resolveTrainingWindow
+      // makes for the marking screen, so the list and the lock agree.
       const windows = new Map();
-      const windowOf = (cal) => {
-        const k = cal ? String(cal._id) : "";
-        if (!windows.has(k)) windows.set(k, computeWindow(cal, hours, holidays));
+      const windowOf = (cals) => {
+        const k = cals.map((cal) => String(cal._id)).sort().join(",");
+        if (!windows.has(k)) windows.set(k, combineWindows(cals.map((cal) => computeWindow(cal, hours, holidays))));
         return windows.get(k);
       };
-      const w = windowOf(commonCalendar);
-      // A batch's own training window: its group's calendar when it has one.
+      // The common calendars — every phase's.
+      const w = windowOf(calendarsForKeys(courseCalendars, [""]));
+      // A batch's own training window: its group's calendars when it has them.
       const windowForBatch = (batchId) =>
-        windowOf(pickCalendar(courseCalendars, calendarKeysFor(c, batchId).filter(Boolean)) || commonCalendar);
+        windowOf(calendarsForKeys(courseCalendars, [...calendarKeysFor(c, batchId).filter(Boolean), ""]));
 
       let batches = (c.batchAndParticipants || []).map((b) => {
         const bw = windowForBatch(String(b._id));
@@ -1107,4 +1142,4 @@ exports.getAttendanceOverview = async (req, res) => {
 // The window helpers, shared with the daily missing-attendance check
 // (cron/attendanceMissingNotify.js) so "a training day" means the same thing
 // there as it does to the marking gate and this overview.
-exports._windowHelpers = { computeWindow, holidayMapOf, pedagogyDurationsOf, isoDay, dayUtc };
+exports._windowHelpers = { computeWindow, holidayMapOf, pedagogyDurationsOf, isoDay, dayUtc, calendarsForKeys, combineWindows };
