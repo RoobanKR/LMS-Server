@@ -2949,12 +2949,16 @@ exports.submitMultipleFiles = async (req, res) => {
 // evaluationMethod is 'ai' and no cached cases exist on the question yet.
 // Every subsequent student reuses these cached cases (same 20 for every
 // student). If the cache was populated in the meantime by a concurrent request,
-// this call is idempotent — we DO NOT overwrite existing cases, ever.
+// this call is idempotent — we DO NOT overwrite a current set. The one
+// exception: the client sends the `version` of the generation rules it used,
+// and a cached set whose model stamp lacks that version was made under older
+// rules (e.g. before generated cases followed the question's constraints) —
+// that set is replaced once, and the new set is then kept like any other.
 exports.persistAiTestCases = async (req, res) => {
   try {
     const {
       exerciseId, questionId, nodeId, nodeType, category, subcategory,
-      testCases, model,
+      testCases, model, version,
     } = req.body;
 
     if (!exerciseId || !questionId || !nodeId || !nodeType || !category || !subcategory) {
@@ -3009,7 +3013,10 @@ exports.persistAiTestCases = async (req, res) => {
     // Idempotency — a concurrent first-student race could try to write twice.
     // Whoever gets there second is a no-op; the "same 20 for every student"
     // guarantee holds because the FIRST winning write is what everyone reads.
-    if (Array.isArray(question.aiGeneratedTestCases) && question.aiGeneratedTestCases.length > 0) {
+    const ruleVersion = typeof version === 'string' ? version.slice(0, 40) : '';
+    const cachedIsCurrent = !ruleVersion
+      || String(question.aiGeneratedTestCasesModel || '').includes(ruleVersion);
+    if (Array.isArray(question.aiGeneratedTestCases) && question.aiGeneratedTestCases.length > 0 && cachedIsCurrent) {
       return res.status(200).json({ success: true, alreadyCached: true, count: question.aiGeneratedTestCases.length });
     }
 
