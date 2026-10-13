@@ -347,6 +347,65 @@ async function isLateSubmissionForExercise({ nodeId, nodeType, category, subcate
   }
 }
 
+// ── Attempt limit (server-authoritative) ────────────────────────────────────
+// The exercise doc behind a submission, read from its node so the browser
+// can't fake its settings. Same lookup as isLateSubmissionForExercise: the
+// whole pedagogy.<category> subtree (every batch's too), requested
+// subcategory first. null when it can't be found.
+async function findExerciseForSubmit({ nodeId, nodeType, category, subcategory, exerciseId }) {
+  if (!nodeId || !nodeType || !category || !exerciseId) return null;
+  const modelMap = { module: Module1, submodule: SubModule1, topic: Topic1, subtopic: SubTopic1 };
+  const Model = modelMap[String(nodeType).toLowerCase()];
+  if (!Model) return null;
+  const doc = await Model.findById(nodeId).select(`pedagogy.${category} batchPedagogy`).lean();
+  const categoryEntries = mergeSectionAcrossBatches(doc, category);
+  const exerciseIdStr = String(exerciseId);
+  const findInArray = (arr) =>
+    Array.isArray(arr) ? arr.find(ex => ex && String(ex._id) === exerciseIdStr) : null;
+  if (subcategory) {
+    for (const [k, v] of categoryEntries) {
+      if (k !== subcategory) continue;
+      const found = findInArray(v);
+      if (found) return found;
+    }
+  }
+  for (const [, v] of categoryEntries) {
+    const found = findInArray(v);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Final submissions (Finish) an exercise allows: Attempt limit ON → its
+// "Attempts allowed"; OFF → once, as Exercise Settings says. You Do Mock
+// tests are retaken fresh, so they have no cap. Fails open (no cap) when the
+// exercise can't be read — a lookup miss must never block a student.
+function attemptsAllowedFor(exercise, category) {
+  if (!exercise) return Infinity;
+  const testType = (exercise.exerciseInformation && exercise.exerciseInformation.testType) || 'mock';
+  if (category === 'You_Do' && testType === 'mock') return Infinity;
+  const qc = exercise.questionConfiguration || {};
+  const cfg = qc.programmingQuestionConfiguration || qc.mcqQuestionConfiguration || qc.othersQuestionConfiguration || {};
+  if (!cfg.attemptLimitEnabled) return 1;
+  const n = Math.floor(Number(cfg.submissionAttempts));
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
+// { used, allowed } when this Finish would go past the allowed attempts, else
+// null. A repeat within 10 s is the same submission (the double-click guard
+// below doesn't count it either), so it is never refused.
+async function attemptLimitExceeded(entry, lookup, category) {
+  if (!entry) return null;
+  const used = entry.testSubmissions || 0;
+  if (used < 1) return null;
+  const lastAt = entry.lastTestSubmittedAt ? new Date(entry.lastTestSubmittedAt).getTime() : 0;
+  if (Date.now() - lastAt <= 10000) return null;
+  let exercise = null;
+  try { exercise = await findExerciseForSubmit(lookup); } catch (e) { console.warn('[attemptLimit] lookup failed:', e && e.message); }
+  const allowed = attemptsAllowedFor(exercise, category);
+  return used >= allowed ? { used, allowed } : null;
+}
+
 
 exports.submitAnswer = async (req, res) => {
   try {
@@ -478,18 +537,19 @@ exports.submitAnswer = async (req, res) => {
       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
     );
 
-    // ── Attempt limit check — only on full test submission ──
-    const limitEnabled = attemptLimitEnabled === 'true' || attemptLimitEnabled === true;
-    const maxAtt = parseInt(maxAttempts) || 1;
-
-    if (limitEnabled && isTestSubmit && exerciseIndex !== -1) {
-      const currentUserAttempts = exerciseArray[exerciseIndex].userAttempts || 0;
-      if (currentUserAttempts >= maxAtt) {
+    // ── Attempt limit — only on a full test submission (Finish). Read from
+    // the exercise itself (see attemptsAllowedFor), never from values the
+    // browser sends.
+    if (isTestSubmit && exerciseIndex !== -1) {
+      const over = await attemptLimitExceeded(
+        exerciseArray[exerciseIndex], { nodeId, nodeType, category, subcategory, exerciseId }, category,
+      );
+      if (over) {
         return res.status(403).json({
           success: false,
-          message: [{ 
-            key: 'error', 
-            value: `Maximum attempts reached (${currentUserAttempts}/${maxAtt}). You cannot submit again.` 
+          message: [{
+            key: 'error',
+            value: `Maximum attempts reached (${over.used}/${over.allowed}). You cannot submit again.`
           }]
         });
       }
@@ -2227,6 +2287,21 @@ exports.submitMultipleFiles = async (req, res) => {
       ex => ex.exerciseId && ex.exerciseId.toString() === exerciseId
     );
  
+    // ── Attempt limit — a Finish beyond the exercise's allowed attempts is
+    // refused (see attemptsAllowedFor). Plain-string message: the multi-file
+    // editor shows it as the failed submission's detail.
+    if (isTestSubmit && exerciseIndex !== -1) {
+      const over = await attemptLimitExceeded(
+        exerciseArray[exerciseIndex], { nodeId, nodeType, category, subcategory, exerciseId }, category,
+      );
+      if (over) {
+        return res.status(403).json({
+          success: false,
+          message: `Maximum attempts reached (${over.used}/${over.allowed}). You cannot submit again.`,
+        });
+      }
+    }
+
     // ── Late submission detection (server-authoritative) ──
     const isLate = isTestSubmit
       ? await isLateSubmissionForExercise({ nodeId, nodeType, category, subcategory, exerciseId })
