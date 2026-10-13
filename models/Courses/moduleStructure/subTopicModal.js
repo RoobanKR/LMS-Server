@@ -614,6 +614,9 @@ const programmingQuestionConfigSchema = new mongoose.Schema(
 const programmingSettingsSchema = new mongoose.Schema({
   selectedModule: { type: String },
   selectedLanguages: [{ type: String }],
+  // Piston version per language picked in Exercise Settings, e.g.
+  // { java: '21.0.12', python: '3.12.0' }. Missing language = default version.
+  languageVersions: { type: mongoose.Schema.Types.Mixed, default: undefined },
 });
 
 // ─── EXERCISE INFORMATION SCHEMA ──────────────────────────────────────────────

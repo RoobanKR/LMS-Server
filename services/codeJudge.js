@@ -32,11 +32,14 @@
 const { compare } = require('./compare');
 const { decide } = require('./driverInjector');
 
+// Default runtime per language — the versions every Piston install has.
 // Match pistonClient.ts's pinned runtime versions so a submission judged on
 // the server behaves identically to what the "Run" button did previously.
+// An exercise can pick another installed version per language in Exercise
+// Settings (programmingSettings.languageVersions); see `versionFor`.
 const PISTON_RUNTIMES = {
-  python:     { language: 'python',     version: '3.11.0' },
-  javascript: { language: 'javascript', version: '20.11.1' },
+  python:     { language: 'python',     version: '3.10.0' },
+  javascript: { language: 'javascript', version: '18.15.0' },
   typescript: { language: 'typescript', version: '5.0.3' },
   java:       { language: 'java',       version: '15.0.2' },
   cpp:        { language: 'cpp',        version: '10.2.0' },
@@ -49,6 +52,81 @@ const PISTON_URL =
   process.env.PISTON_INTERNAL_URL
     ? `${process.env.PISTON_INTERNAL_URL.replace(/\/$/, '')}/api/v2/execute`
     : 'http://localhost:2000/api/v2/execute';
+const PISTON_RUNTIMES_URL = PISTON_URL.replace(/\/execute$/, '/runtimes');
+
+// LMS language names ("Python", "C++", "C#", "cpp", …) → PISTON_RUNTIMES keys.
+const LANGUAGE_KEYS = {
+  python: 'python', py: 'python', python3: 'python',
+  javascript: 'javascript', js: 'javascript', node: 'javascript', nodejs: 'javascript',
+  typescript: 'typescript', ts: 'typescript',
+  java: 'java',
+  cpp: 'cpp', 'c++': 'cpp', cplusplus: 'cpp',
+  c: 'c',
+  go: 'go', golang: 'go',
+  csharp: 'csharp', 'c#': 'csharp', cs: 'csharp',
+};
+function normalizeLanguage(language) {
+  const k = String(language || '').trim().toLowerCase();
+  return LANGUAGE_KEYS[k] || k;
+}
+
+// A Piston version string ("21.0.12"), or null for anything else.
+function cleanVersion(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return /^\d+(\.\d+){0,3}$/.test(s) ? s : null;
+}
+
+// The version an exercise picked for `language`, or null for the default.
+function versionFor(languageVersions, language) {
+  if (!languageVersions || typeof languageVersions !== 'object') return null;
+  const key = normalizeLanguage(language);
+  const v = languageVersions instanceof Map ? languageVersions.get(key) : languageVersions[key];
+  return cleanVersion(v);
+}
+
+// Exercise Settings payload → { java: '21.0.12', … } with only known
+// languages and well-formed versions; undefined when nothing is picked.
+function cleanLanguageVersions(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const out = {};
+  for (const [lang, ver] of Object.entries(raw)) {
+    const key = normalizeLanguage(lang);
+    const v = cleanVersion(ver);
+    if (PISTON_RUNTIMES[key] && v) out[key] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+const compareVersionsDesc = (a, b) => {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pb[i] || 0) - (pa[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+};
+
+// Installed versions per LMS language, newest first, plus the defaults —
+// what the Exercise Settings version pickers list. Cached for a minute.
+let runtimesCache = { at: 0, data: null };
+async function listInstalledRuntimes() {
+  if (runtimesCache.data && Date.now() - runtimesCache.at < 60_000) return runtimesCache.data;
+  const res = await fetch(PISTON_RUNTIMES_URL);
+  if (!res.ok) throw new Error(`Piston HTTP ${res.status}`);
+  const list = await res.json();
+  const versions = {};
+  for (const r of Array.isArray(list) ? list : []) {
+    const key = normalizeLanguage(r && r.language);
+    if (!PISTON_RUNTIMES[key] || !cleanVersion(String(r.version))) continue;
+    (versions[key] = versions[key] || new Set()).add(String(r.version));
+  }
+  const data = {
+    versions: Object.fromEntries(Object.entries(versions).map(([k, set]) => [k, [...set].sort(compareVersionsDesc)])),
+    defaults: Object.fromEntries(Object.entries(PISTON_RUNTIMES).map(([k, rt]) => [k, rt.version])),
+  };
+  runtimesCache = { at: Date.now(), data };
+  return data;
+}
 
 // Language filename hint. Java is the exception because Piston insists the
 // filename match the public class — we peek at the source for the class name.
@@ -89,11 +167,12 @@ function pickEntryIndex(files, language) {
   return 0;
 }
 
-async function callPiston({ language, files, stdin, runTimeoutMs = 5000 }) {
-  const rt = PISTON_RUNTIMES[(language || '').toLowerCase()] || PISTON_RUNTIMES.python;
+async function callPiston({ language, files, stdin, runTimeoutMs = 5000, version = null }) {
+  const rt = PISTON_RUNTIMES[normalizeLanguage(language)] || PISTON_RUNTIMES.python;
+  const picked = cleanVersion(version);
   const body = {
     language: rt.language,
-    version: rt.version,
+    version: picked || rt.version,
     files: files.map((f) => ({ name: f.name, content: f.content })),
     stdin: stdin || '',
     args: [],
@@ -115,6 +194,12 @@ async function callPiston({ language, files, stdin, runTimeoutMs = 5000 }) {
   }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
+    // The exercise's version was uninstalled since it was picked — run on
+    // the default rather than failing every submission.
+    if (picked && picked !== rt.version && res.status === 400 && /runtime is unknown/i.test(text)) {
+      console.warn(`[codeJudge] ${rt.language} ${picked} is not installed in Piston; using ${rt.version}`);
+      return callPiston({ language, files, stdin, runTimeoutMs });
+    }
     return { httpError: `Piston HTTP ${res.status}: ${text.slice(0, 300)}`, timeMs: Date.now() - t0 };
   }
   const data = await res.json();
@@ -140,6 +225,7 @@ async function callPiston({ language, files, stdin, runTimeoutMs = 5000 }) {
  * @param {number} [opts.maxMarks=10]      question's total marks
  * @param {string} [opts.functionName]     explicit function name (from solutions.functionName)
  * @param {number} [opts.runTimeoutMs=5000]
+ * @param {string} [opts.version]          Piston version the exercise picked (default when omitted)
  *
  * @returns {object} {
  *   passed, total, score, maxMarks, status,           ← headline numbers
@@ -159,6 +245,7 @@ async function judge(opts) {
     // (~1.5s typical, up to ~5s under Piston queue contention), and still
     // leaves an intentionally-tight bound to catch student infinite loops.
     runTimeoutMs = 10000,
+    version = null,
   } = opts || {};
 
   const log = [];
@@ -210,13 +297,13 @@ async function judge(opts) {
     const stdin = String(tc.input ?? '');
     const expected = String(tc.expectedOutput ?? '');
 
-    let r = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs });
+    let r = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
     // Piston queue-under-load can SIGKILL a Java/JVM process that would
     // normally finish in ~1s. Retry ONCE on TLE with a fresh call — if the
     // student's code really is looping, the second attempt SIGKILLs too and
     // the verdict stays TLE, so an infinite loop still fails cleanly.
     if (r.signal === 'SIGKILL' && !r.stdout) {
-      const retry = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs });
+      const retry = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
       if (retry.signal !== 'SIGKILL' || retry.stdout) r = retry;
     }
 
@@ -320,4 +407,7 @@ async function judge(opts) {
   };
 }
 
-module.exports = { judge, callPiston, pickEntryIndex, pistonFilename, PISTON_URL };
+module.exports = {
+  judge, callPiston, pickEntryIndex, pistonFilename, PISTON_URL,
+  normalizeLanguage, versionFor, cleanLanguageVersions, listInstalledRuntimes,
+};

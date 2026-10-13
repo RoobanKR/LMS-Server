@@ -17,7 +17,7 @@
 
 const express = require('express');
 const { userAuth } = require('../middlewares/userAuth');
-const { callPiston, judge } = require('../services/codeJudge');
+const { callPiston, judge, listInstalledRuntimes } = require('../services/codeJudge');
 
 const router = express.Router();
 
@@ -63,6 +63,7 @@ router.post('/run/piston', userAuth, async (req, res) => {
       files = [],
       stdin = '',
       run_timeout,           // client may pass; capped below
+      version,               // the exercise's Piston version for this language, if it picked one
     } = req.body || {};
 
     if (!language || !Array.isArray(files) || files.length === 0) {
@@ -84,7 +85,7 @@ router.post('/run/piston', userAuth, async (req, res) => {
     // callPiston normalises the Piston response into a flat shape; convert
     // back into what the pre-migration Piston endpoint returned so
     // client/src/lib/pistonClient.ts keeps parsing it unchanged.
-    const r = await callPiston({ language, files, stdin, runTimeoutMs });
+    const r = await callPiston({ language, files, stdin, runTimeoutMs, version });
     if (r.networkError) return res.status(502).json({ error: r.networkError });
     if (r.httpError)    return res.status(502).json({ error: r.httpError });
 
@@ -141,6 +142,7 @@ router.post('/run/judge', userAuth, async (req, res) => {
       functionName = null,
       maxMarks = 10,
       run_timeout,
+      version,
     } = req.body || {};
 
     if (!language || !Array.isArray(files) || files.length === 0) {
@@ -161,12 +163,26 @@ router.post('/run/judge', userAuth, async (req, res) => {
       maxMarks: Number(maxMarks) || 10,
       functionName,
       runTimeoutMs,
+      version,
     });
     return res.json(result);
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Judge error.' });
   } finally {
     release(userId);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /run/runtimes — the language versions installed in Piston, for the
+// version pickers in Exercise Settings: { versions: { java: ['25.0.4', …] },
+// defaults: { java: '15.0.2', … } }.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/run/runtimes', userAuth, async (req, res) => {
+  try {
+    return res.json(await listInstalledRuntimes());
+  } catch (e) {
+    return res.status(502).json({ error: e?.message || 'Piston is unreachable.' });
   }
 });
 

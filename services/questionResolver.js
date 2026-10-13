@@ -91,6 +91,8 @@ async function loadForJudge(args) {
     // are computed client-side and must not be overwritten. See
     // `shouldServerJudge` in controllers/courses/moduleStructure/answer.js.
     evaluationMethod: (exercise && exercise.evaluationMethod) || null,
+    // Per-language Piston version picked in Exercise Settings ({ java: '21.0.12' }).
+    languageVersions: (exercise && exercise.programmingSettings && exercise.programmingSettings.languageVersions) || null,
     raw: q,
   };
 }

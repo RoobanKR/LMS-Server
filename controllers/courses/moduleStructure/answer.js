@@ -18,7 +18,7 @@ const { notifyGradersOfSubmission } = require('../../../utils/submissionNotify')
 // server/services/codeJudge.js for the loop, driverInjector.js for the
 // LeetCode-style bare-function auto-driver, and questionResolver.js for the
 // authoritative testCases lookup.
-const { judge: judgeCode } = require('../../../services/codeJudge');
+const { judge: judgeCode, versionFor } = require('../../../services/codeJudge');
 const { loadForJudge } = require('../../../services/questionResolver');
 
 // Does the server-side test-case judge run for this exercise?
@@ -600,6 +600,7 @@ exports.submitAnswer = async (req, res) => {
             testCases: q.testCases,
             functionName: q.functionName,
             maxMarks: q.maxMarks,
+            version: versionFor(q.languageVersions, selectedProgrammingLanguage || language),
           });
           score = judged.score;
           status = judged.status;
@@ -1920,6 +1921,7 @@ exports.submitMultipleFiles = async (req, res) => {
             testCases: q.testCases,
             functionName: q.functionName,
             maxMarks: q.maxMarks,
+            version: versionFor(q.languageVersions, selectedProgrammingLanguage),
           });
           score = judged.score;
           status = judged.status;

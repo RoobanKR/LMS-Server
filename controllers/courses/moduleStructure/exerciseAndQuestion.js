@@ -40,6 +40,7 @@ const {
 } = require("../../../utils/pedagogyScope");
 const { scopeNodePedagogy, resolveViewerBatchId } = require("../../../utils/batchResources");
 const { stripHiddenOnQuestion } = require("../../../services/testCaseVisibility");
+const { cleanLanguageVersions } = require("../../../services/codeJudge");
 const { isStaffUser } = require("../../../utils/staffAccess");
 
 // Code Setup (Starter/Solution) — Programming and Database questions store a
@@ -1372,6 +1373,7 @@ exports.addExercise = async (req, res) => {
       newExercise.programmingSettings = {
         selectedModule: progSettings.selectedModule || null,
         selectedLanguages: progSettings.selectedLanguages || [],
+        languageVersions: cleanLanguageVersions(progSettings.languageVersions),
       };
     }
 
@@ -1846,6 +1848,9 @@ exports.updateExercise = async (req, res) => {
       updatedExercise.programmingSettings = {
         selectedModule: parsedProgSettings.selectedModule || existingExercise.programmingSettings?.selectedModule,
         selectedLanguages: parsedProgSettings.selectedLanguages || existingExercise.programmingSettings?.selectedLanguages || [],
+        languageVersions: parsedProgSettings.languageVersions !== undefined
+          ? cleanLanguageVersions(parsedProgSettings.languageVersions)
+          : existingExercise.programmingSettings?.languageVersions,
       };
     }
 
@@ -9549,6 +9554,7 @@ exports.addYouDoExercise = async (req, res) => {
       newExercise.programmingSettings = {
         selectedModule: exerciseInfo.selectedModule || null,
         selectedLanguages: exerciseInfo.selectedLanguages || [],
+        languageVersions: cleanLanguageVersions(exerciseInfo.languageVersions),
       };
     }
 
@@ -10042,6 +10048,9 @@ exports.updateYouDoExercise = async (req, res) => {
       updatedExercise.programmingSettings = {
         selectedModule: parsedProgSettings.selectedModule || existingExercise.programmingSettings?.selectedModule,
         selectedLanguages: parsedProgSettings.selectedLanguages || existingExercise.programmingSettings?.selectedLanguages || [],
+        languageVersions: parsedProgSettings.languageVersions !== undefined
+          ? cleanLanguageVersions(parsedProgSettings.languageVersions)
+          : existingExercise.programmingSettings?.languageVersions,
       };
     }
 
