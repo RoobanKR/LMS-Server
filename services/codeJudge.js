@@ -35,8 +35,8 @@ const { decide } = require('./driverInjector');
 // Match pistonClient.ts's pinned runtime versions so a submission judged on
 // the server behaves identically to what the "Run" button did previously.
 const PISTON_RUNTIMES = {
-  python:     { language: 'python',     version: '3.10.0' },
-  javascript: { language: 'javascript', version: '18.15.0' },
+  python:     { language: 'python',     version: '3.11.0' },
+  javascript: { language: 'javascript', version: '20.11.1' },
   typescript: { language: 'typescript', version: '5.0.3' },
   java:       { language: 'java',       version: '15.0.2' },
   cpp:        { language: 'cpp',        version: '10.2.0' },
