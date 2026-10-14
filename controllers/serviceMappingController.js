@@ -1245,6 +1245,7 @@ const normalizeCourseConfigurations = (configs, existing) =>
               clientId: String((ph && ph._id) || (ph && ph.id) || ""),
               name: str(ph && ph.name),
               order: i,
+              hidden: Boolean(ph && ph.hidden),
             }))
         : [];
 

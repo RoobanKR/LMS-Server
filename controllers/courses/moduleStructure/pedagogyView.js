@@ -69,6 +69,7 @@ const { isStudentRequester, isExerciseStudentVisible } = require('../../../utils
 // Called after pedagogy filtering (approval + batch scoping) so its counts
 // match exactly what the client renders.
 const { computeCourseTopicProgress, findStudentAnswers } = require('../../../utils/topicCompletion');
+const { coursePhaseInfo } = require('../../../utils/coursePhases');
 
 const SLIDE_CONVERTIBLE_MIMES = [
   'application/vnd.ms-powerpoint',
@@ -927,6 +928,10 @@ exports.getAllCoursesData = async (req, res) => {
       structuredCourse.topicProgress = {};
     }
 
+    // The course's phases, for the sidebar's phase dropdowns — hidden phases
+    // (Service Mapping's "Hide" box) are left out of the student's sidebar.
+    Object.assign(structuredCourse, await coursePhaseInfo(course));
+
     res.status(200).json({
       success: true,
       data: structuredCourse
@@ -1316,14 +1321,14 @@ exports.getAllCoursesDataLight = async (req, res) => {
       req.user,
       req.query.batchId || req.query.batchName,
     );
-    // The phases the course's batches run in, for the sidebar's phase
-    // dropdowns: a module built before phases sits under the FIRST phase, and
-    // a phase with no module yet is named only by its batches.
-    structuredCourse.phaseNames = [...new Set(
-      ((batchSource || {}).batchAndParticipants || [])
-        .map((b) => String(b?.phase || "").trim())
-        .filter(Boolean),
-    )];
+    // The course's phases, for the sidebar's phase dropdowns: a module built
+    // before phases sits under the FIRST phase, and hidden phases (Service
+    // Mapping's "Hide" box) are left out of the sidebar.
+    Object.assign(structuredCourse, await coursePhaseInfo({
+      mappingId: course.mappingId,
+      courseName: course.courseName,
+      batchAndParticipants: (batchSource || {}).batchAndParticipants,
+    }));
 
     return res.status(200).json({
       success: true,

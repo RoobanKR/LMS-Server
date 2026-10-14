@@ -80,6 +80,9 @@ const mappingPhaseSchema = new mongoose.Schema(
     // array position so a reorder is a data change, not an accident of how the
     // client happened to send the array.
     order: { type: Number, default: 0 },
+    // Hidden from the course sidebars (student course page and Upload
+    // Resources), modules and all. The phase stays configured everywhere else.
+    hidden: { type: Boolean, default: false },
   },
   { _id: true }
 );
