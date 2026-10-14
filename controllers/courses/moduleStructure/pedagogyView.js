@@ -1316,6 +1316,14 @@ exports.getAllCoursesDataLight = async (req, res) => {
       req.user,
       req.query.batchId || req.query.batchName,
     );
+    // The phases the course's batches run in, for the sidebar's phase
+    // dropdowns: a module built before phases sits under the FIRST phase, and
+    // a phase with no module yet is named only by its batches.
+    structuredCourse.phaseNames = [...new Set(
+      ((batchSource || {}).batchAndParticipants || [])
+        .map((b) => String(b?.phase || "").trim())
+        .filter(Boolean),
+    )];
 
     return res.status(200).json({
       success: true,
