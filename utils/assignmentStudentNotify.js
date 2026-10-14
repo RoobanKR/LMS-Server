@@ -122,7 +122,16 @@ const clientBaseUrl = () => {
 };
 
 /** Everything a student is told, for one batch. */
-const buildDetails = ({ exercise, courseName, batchName, courseId, section = "We_Do" }) => ({
+const buildDetails = ({ exercise, courseName, batchName, courseId, section = "We_Do", entityId, subcategory }) => {
+  // Opens the course on the assignment's own topic, tab and list - the course
+  // page restores ?restoreNodeId / method / activity - so the student lands
+  // next to the assignment's Start button, not on the course overview.
+  const method = section === "You_Do" ? "you-do" : section === "I_Do" ? "i-do" : "we-do";
+  const path = `/lms/pages/courses/coursesdetailedview/${courseId}` + (entityId
+    ? `?${new URLSearchParams({ restoreNodeId: String(entityId), method, ...(subcategory ? { activity: String(subcategory) } : {}) })}`
+    : "");
+  const startDate = new Date(exercise.availabilityPeriod?.startDate);
+  return {
   noun: nounOf(section),
   assignmentName: exercise.exerciseInformation?.exerciseName || (section === "You_Do" ? "Assessment" : "Assignment"),
   courseName: courseName || "your course",
@@ -131,8 +140,18 @@ const buildDetails = ({ exercise, courseName, batchName, courseId, section = "We
   end: formatWhen(exercise.availabilityPeriod?.endDate),
   marks: totalMarksOf(exercise),
   questions: String(activeQuestions(exercise).length),
-  link: `${clientBaseUrl()}/lms/pages/courses/coursesdetailedview/${courseId}`,
-});
+  opensLater: !Number.isNaN(startDate.getTime()) && startDate.getTime() > Date.now(),
+  path,
+  link: `${clientBaseUrl()}${path}`,
+  };
+};
+
+// The in-app notification says only what a student acts on: which assignment
+// (the title), which course, and until when - plus when it opens if that is
+// still ahead. Batch, marks and question count are on its start page.
+const dashboardTitle = (d) => `New ${d.noun}: ${d.assignmentName}`;
+const dashboardMessage = (d) =>
+  [d.courseName, d.opensLater ? `Opens ${d.start}` : "", `Due ${d.end}`].filter(Boolean).join(" · ");
 
 const detailLines = (d) => [
   `Course: ${d.courseName}`,
@@ -160,7 +179,7 @@ const emailHtml = (d) => {
         ${row("Questions", d.questions)}
       </table>
       <p style="margin:20px 0 0">
-        <a href="${escapeHtml(d.link)}" style="background:#e8640c;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600">Open course</a>
+        <a href="${escapeHtml(d.link)}" style="background:#e8640c;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;font-weight:600">Open ${d.noun}</a>
       </p>
     </div>`;
 };
@@ -254,7 +273,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
   }
 
   for (const [bId, { batchName, users }] of byBatch) {
-    const d = buildDetails({ exercise, courseName, batchName, courseId, section });
+    const d = buildDetails({ exercise, courseName, batchName, courseId, section, entityId, subcategory });
     const title = `${d.assignmentName} is now available`;
     const lines = detailLines(d);
 
@@ -262,8 +281,8 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
       const User = require("../models/UserModel");
       const now = new Date();
       const notification = {
-        title,
-        message: lines.join("\n"),
+        title: dashboardTitle(d),
+        message: dashboardMessage(d),
         type: "info",
         relatedEntity: "assignment",
         relatedEntityId: exercise._id,
@@ -273,7 +292,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
           courseId: String(courseId),
           exerciseId: String(exercise._id),
           batchId: bId,
-          redirectUrl: `/lms/pages/courses/coursesdetailedview/${courseId}`,
+          redirectUrl: d.path,
         },
         createdAt: now,
         updatedAt: now,
@@ -385,4 +404,6 @@ module.exports = {
   resolveRecipients,
   buildDetails,
   detailLines,
+  dashboardTitle,
+  dashboardMessage,
 };
