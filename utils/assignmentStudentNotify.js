@@ -51,7 +51,9 @@ const coveredByHook = (section, ex) => {
   return at(ex?.createdAt) >= YOU_DO_SINCE || at(ex?.approvalWorkflow?.completedAt) >= YOU_DO_SINCE;
 };
 
-const nounOf = (section) => (section === "You_Do" ? "assessment" : "assignment");
+const { isPractice } = require("./activityKind");
+const nounOf = (section, subcategory) =>
+  (isPractice(section, subcategory) ? "practice" : section === "You_Do" ? "assessment" : "assignment");
 
 /** The student channels actually ticked, or null when none is. */
 const studentChannels = (ex) => {
@@ -132,8 +134,9 @@ const buildDetails = ({ exercise, courseName, batchName, courseId, section = "We
     : "");
   const startDate = new Date(exercise.availabilityPeriod?.startDate);
   return {
-  noun: nounOf(section),
-  assignmentName: exercise.exerciseInformation?.exerciseName || (section === "You_Do" ? "Assessment" : "Assignment"),
+  noun: nounOf(section, subcategory),
+  assignmentName: exercise.exerciseInformation?.exerciseName
+    || (isPractice(section, subcategory) ? "Practice" : section === "You_Do" ? "Assessment" : "Assignment"),
   courseName: courseName || "your course",
   batchName: batchName || "—",
   start: formatWhen(exercise.availabilityPeriod?.startDate),
@@ -288,7 +291,7 @@ async function sendAssignmentAvailable({ courseId, entityType, entityId, subcate
         relatedEntityId: exercise._id,
         isRead: false,
         metadata: {
-          kind: section === "You_Do" ? "assessment_available" : "assignment_available",
+          kind: section === "You_Do" && !isPractice(section, subcategory) ? "assessment_available" : "assignment_available",
           courseId: String(courseId),
           exerciseId: String(exercise._id),
           batchId: bId,

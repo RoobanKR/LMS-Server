@@ -1,4 +1,5 @@
 const User = require('../../../models/UserModel');
+const { isPractice } = require('../../../utils/activityKind');
 const mongoose = require('mongoose');
 const ActivityLog = require('../../../models/ActivityLog');
 // Server-authoritative timer for assessment attempts. Loaded lazily inside
@@ -378,12 +379,13 @@ async function findExerciseForSubmit({ nodeId, nodeType, category, subcategory, 
 
 // Final submissions (Finish) an exercise allows: Attempt limit ON → its
 // "Attempts allowed"; OFF → once, as Exercise Settings says. You Do Mock
-// tests are retaken fresh, so they have no cap. Fails open (no cap) when the
-// exercise can't be read — a lookup miss must never block a student.
-function attemptsAllowedFor(exercise, category) {
+// tests are retaken fresh, so they have no cap - but You Do > Practice is an
+// assignment in all but name and keeps its limit. Fails open (no cap) when
+// the exercise can't be read — a lookup miss must never block a student.
+function attemptsAllowedFor(exercise, category, subcategory) {
   if (!exercise) return Infinity;
   const testType = (exercise.exerciseInformation && exercise.exerciseInformation.testType) || 'mock';
-  if (category === 'You_Do' && testType === 'mock') return Infinity;
+  if (category === 'You_Do' && testType === 'mock' && !isPractice(category, subcategory)) return Infinity;
   const qc = exercise.questionConfiguration || {};
   const cfg = qc.programmingQuestionConfiguration || qc.mcqQuestionConfiguration || qc.othersQuestionConfiguration || {};
   if (!cfg.attemptLimitEnabled) return 1;
@@ -402,7 +404,7 @@ async function attemptLimitExceeded(entry, lookup, category) {
   if (Date.now() - lastAt <= 10000) return null;
   let exercise = null;
   try { exercise = await findExerciseForSubmit(lookup); } catch (e) { console.warn('[attemptLimit] lookup failed:', e && e.message); }
-  const allowed = attemptsAllowedFor(exercise, category);
+  const allowed = attemptsAllowedFor(exercise, category, lookup && lookup.subcategory);
   return used >= allowed ? { used, allowed } : null;
 }
 

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { isAssignmentStyle } = require("../../../utils/activityKind");
 
 const Module1 = require("../../../models/Courses/moduleStructure/moduleModal");
 const SubModule1 = require("../../../models/Courses/moduleStructure/subModuleModal");
@@ -293,6 +294,8 @@ exports.getLiveDashboard = async (req, res) => {
     // The section the exercise ACTUALLY lives in — trust the lookup over the
     // query string, which can be stale or absent on a hand-typed deep link.
     const resolvedCategory = resolved?.category || requestedCategory || "You_Do";
+    // We Do, or You Do > Practice (an assignment in all but name).
+    const assignmentStyle = isAssignmentStyle(resolvedCategory, resolved?.subcategory);
     const totalQuestions = totalQuestionsOf(exercise);
     const assessmentName = exercise?.exerciseInformation?.exerciseName || "Assessment";
     const startDate = exercise?.availabilityPeriod?.startDate || null;
@@ -515,7 +518,7 @@ exports.getLiveDashboard = async (req, res) => {
     // Only the finished case is set. Leaving `attemptStatus` off otherwise
     // lets the client's existing fallbacks decide between Started (some
     // questions answered) and Not Started, which is already correct here.
-    ...(resolvedCategory === "We_Do" && isAssignmentFinished(entry, exercise)
+    ...(assignmentStyle && isAssignmentFinished(entry, exercise)
       ? { attemptStatus: "submitted" }
       : {}),
   };
@@ -524,7 +527,7 @@ exports.getLiveDashboard = async (req, res) => {
     // We Do — a learner with the assignment editor open right now is
     // attending, whatever their stored answers say. The client reads
     // `inProgress` as "Started" ahead of any stored completion.
-    if (resolvedCategory === "We_Do") {
+    if (assignmentStyle) {
       for (const row of students) {
         if (assignmentPresence.isAttending(assessmentId, row.id)) {
           row.inProgress = true;
@@ -559,10 +562,10 @@ exports.getLiveDashboard = async (req, res) => {
 // in progress, or the finished assignment — without the trainer refreshing.
 exports.assignmentRowState = async ({ assessmentId, studentId, courseId, nodeId, nodeType }) => {
   if (!assessmentId || !studentId || !courseId) return null;
-  const resolved = await resolveExercise(assessmentId, nodeType, nodeId, "We_Do");
-  if (!resolved || resolved.category !== "We_Do") return null;
+  const resolved = await resolveExercise(assessmentId, nodeType, nodeId);
+  if (!resolved || !isAssignmentStyle(resolved.category, resolved.subcategory)) return null;
   const user = await User.findById(studentId).select("courses").lean();
-  const entry = user ? findPersistedExerciseEntry(user, courseId, assessmentId, "We_Do") : null;
+  const entry = user ? findPersistedExerciseEntry(user, courseId, assessmentId, resolved.category) : null;
   const seed = seedProgressFromAnswers(entry, totalQuestionsOf(resolved.exercise));
   return {
     completed: seed.completed,
