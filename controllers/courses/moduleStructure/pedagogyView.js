@@ -693,6 +693,9 @@ function cleanEmptyHierarchyArrays(hierarchy) {
   }
 }
 
+// Course Structure's ordering rule, applied in place (Array#sort is stable).
+const sortByIndex = (arr) => arr.sort((a, b) => (Number(a && a.index) || 0) - (Number(b && b.index) || 0));
+
 exports.getAllCoursesData = async (req, res) => {
   try {
     const { courseId } = req.params;
@@ -785,6 +788,11 @@ exports.getAllCoursesData = async (req, res) => {
     const subTopics = await SubTopic1.find({
       topicId: { $in: topics.map(t => t._id) }
     }).lean();
+
+    // Same order as Course Structure: each level by its `index` (missing = 0),
+    // ties in stored order. Without it the sidebar lists by creation time, so a
+    // topic inserted between two others later shows up at the end.
+    [modules, subModules, topics, subTopics].forEach(sortByIndex);
 
 
     const structuredCourse = {
@@ -1258,6 +1266,11 @@ exports.getAllCoursesDataLight = async (req, res) => {
     })
       .select("-pedagogy -batchPedagogy")
       .lean();
+
+    // Same order as Course Structure: each level by its `index` (missing = 0),
+    // ties in stored order. Without it the sidebar lists by creation time, so a
+    // topic inserted between two others later shows up at the end.
+    [modules, subModules, topics, subTopics].forEach(sortByIndex);
 
     // Same nesting shape as the heavy endpoint so the existing client-side
     // `transformToCourseNodes` walker keeps working unchanged. The node
