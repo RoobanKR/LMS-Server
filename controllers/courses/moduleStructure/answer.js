@@ -19,7 +19,7 @@ const { notifyGradersOfSubmission } = require('../../../utils/submissionNotify')
 // server/services/codeJudge.js for the loop, driverInjector.js for the
 // LeetCode-style bare-function auto-driver, and questionResolver.js for the
 // authoritative testCases lookup.
-const { judge: judgeCode, versionFor } = require('../../../services/codeJudge');
+const { judge: judgeCode, versionFor, isRunnableLanguage, runOnce } = require('../../../services/codeJudge');
 const { loadForJudge } = require('../../../services/questionResolver');
 
 // Does the server-side test-case judge run for this exercise?
@@ -377,6 +377,83 @@ async function findExerciseForSubmit({ nodeId, nodeType, category, subcategory, 
   return null;
 }
 
+// ── The program's output, kept with the submission ──────────────────────────
+// Review Submission shows what the student's program printed instead of making
+// the trainer run it again. The editor sends its last Run's console lines as
+// `runOutput`; when it has none for the submitted code (never ran, or edited
+// since), the server runs the code once with the question's sample input and
+// keeps that instead. Test Case grading already stores each case's output in
+// evaluationBreakdown, so no extra run is made for it.
+const RUN_LINE_KINDS = new Set(['stdout', 'stderr', 'stdin', 'system', 'error', 'success', 'info', 'warning']);
+function sanitizeRunOutput(raw) {
+  let v = raw;
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return null; } }
+  if (!v || typeof v !== 'object' || !Array.isArray(v.lines)) return null;
+  let budget = 24000; // characters - well under the JSON body limit
+  const lines = [];
+  for (const l of v.lines.slice(0, 500)) {
+    if (!l || typeof l.text !== 'string' || budget <= 0) continue;
+    const text = l.text.slice(0, Math.min(4000, budget));
+    budget -= text.length;
+    lines.push({ kind: RUN_LINE_KINDS.has(l.kind) ? l.kind : 'stdout', text, ...(l.inline ? { inline: true } : {}) });
+  }
+  if (!lines.length) return null;
+  const ranAt = v.ranAt && !Number.isNaN(Date.parse(v.ranAt)) ? new Date(v.ranAt) : new Date();
+  return {
+    source: 'student',
+    lines,
+    stdin: typeof v.stdin === 'string' ? v.stdin.slice(0, 4000) : '',
+    stale: v.stale === true,
+    truncated: lines.length < v.lines.length || budget <= 0,
+    ranAt,
+  };
+}
+
+/** The input a question's sample run uses: its Sample Input, else its first visible test case. */
+function sampleStdinOf(q) {
+  const raw = (q && q.raw) || {};
+  if (typeof raw.sampleInput === 'string' && raw.sampleInput.trim()) return raw.sampleInput;
+  const tc = ((q && q.testCases) || []).find((t) => t && !t.isHidden && String(t.input ?? '').trim());
+  return tc ? String(tc.input) : '';
+}
+
+async function autoRunOutput({ language, files, version, stdin }) {
+  const r = await runOnce({ language, files, stdin, version, runTimeoutMs: 4000 });
+  const lines = [];
+  if (r.compileError) lines.push({ kind: 'error', text: String(r.compileError).slice(0, 4000) });
+  if (r.stdout) lines.push({ kind: 'stdout', text: String(r.stdout).slice(0, 12000) });
+  if (r.stderr) lines.push({ kind: 'stderr', text: String(r.stderr).slice(0, 4000) });
+  if (r.networkError || r.httpError) lines.push({ kind: 'error', text: `Could not run the code: ${r.networkError || r.httpError}` });
+  if (!lines.length) lines.push({ kind: 'info', text: '(The program printed nothing.)' });
+  return {
+    source: 'auto',
+    lines,
+    stdin: String(stdin || '').slice(0, 4000),
+    exitCode: typeof r.exitCode === 'number' ? r.exitCode : null,
+    runtimeMs: typeof r.timeMs === 'number' ? r.timeMs : null,
+    stale: false,
+    truncated: false,
+    ranAt: new Date(),
+  };
+}
+
+/** runOutput for a submission: the student's fresh output, else one server run, else null. */
+async function resolveRunOutput({ rawRunOutput, realSubmit, judgedTestcase, language, files, lookup }) {
+  const fromStudent = sanitizeRunOutput(rawRunOutput);
+  if (fromStudent && !fromStudent.stale) return fromStudent;
+  if (!realSubmit || judgedTestcase || !files.length || !isRunnableLanguage(language)) return fromStudent;
+  try {
+    const q = await loadForJudge(lookup);
+    return await autoRunOutput({
+      language, files, stdin: sampleStdinOf(q),
+      version: versionFor(q && q.languageVersions, language),
+    });
+  } catch (e) {
+    console.warn('[runOutput] auto-run failed:', e && e.message);
+    return fromStudent;
+  }
+}
+
 // Final submissions (Finish) an exercise allows: Attempt limit ON → its
 // "Attempts allowed"; OFF → once, as Exercise Settings says. You Do Mock
 // tests are retaken fresh, so they have no cap - but You Do > Practice is an
@@ -437,6 +514,7 @@ exports.submitAnswer = async (req, res) => {
       // Not set for 'manual' submissions.
       evaluationBreakdown: rawEvaluationBreakdown,
       questionStartedAt, // ISO time the student first opened this question (editor-stamped)
+      runOutput: rawRunOutput, // the editor's last Run output (JSON string in FormData)
     } = req.body;
 
     // Parse isTestSubmission properly from FormData string
@@ -644,11 +722,14 @@ exports.submitAnswer = async (req, res) => {
     // If the question can't be resolved (deleted from tree, wrong
     // nodeType, etc.) we fall through and keep the client values so we
     // don't lose the submission — a log line surfaces the gap.
+    // The single-file editor sends its language as `language` only, so fall
+    // back to it whenever it names a language Piston can run.
+    const judgeLanguage = selectedProgrammingLanguage || (isRunnableLanguage(language) ? language : '');
     const canJudge =
       !!code &&
       typeof code === 'string' &&
       !notionPages &&
-      !!selectedProgrammingLanguage;
+      !!judgeLanguage;
     if (canJudge) {
       try {
         const q = await loadForJudge({
@@ -657,12 +738,12 @@ exports.submitAnswer = async (req, res) => {
         const judgeThis = q && shouldServerJudge(q.evaluationMethod, category);
         if (judgeThis && Array.isArray(q.testCases) && q.testCases.length > 0) {
           const judged = await judgeCode({
-            language: selectedProgrammingLanguage || language,
+            language: judgeLanguage,
             files: [{ path: 'main', content: code, isEntryPoint: true }],
             testCases: q.testCases,
             functionName: q.functionName,
             maxMarks: q.maxMarks,
-            version: versionFor(q.languageVersions, selectedProgrammingLanguage || language),
+            version: versionFor(q.languageVersions, judgeLanguage),
           });
           score = judged.score;
           status = judged.status;
@@ -731,6 +812,15 @@ exports.submitAnswer = async (req, res) => {
       }
     }
 
+    const runOutput = await resolveRunOutput({
+      rawRunOutput,
+      realSubmit: isTestSubmit || !['attempted', 'skipped'].includes(String(status)),
+      judgedTestcase: !!(evaluationBreakdown && evaluationBreakdown.method === 'testcase'),
+      language: judgeLanguage,
+      files: code && typeof code === 'string' && !notionPages ? [{ path: 'main', content: code, isEntryPoint: true }] : [],
+      lookup: { nodeType, nodeId, category, subcategory, exerciseId, questionId },
+    });
+
     const startedAt = earliestStart(questionStartedAt);
     const questionAnswer = {
       questionId: new mongoose.Types.ObjectId(questionId),
@@ -749,6 +839,7 @@ exports.submitAnswer = async (req, res) => {
       // Only include when the client actually provided a breakdown, so Manual
       // submissions don't stamp an empty object onto the answer.
       ...(evaluationBreakdown ? { evaluationBreakdown } : {}),
+      ...(runOutput ? { runOutput } : {}),
     };
 
     // ── Late submission detection (server-authoritative) ──
@@ -821,6 +912,11 @@ exports.submitAnswer = async (req, res) => {
           // the last one so a Manual "moved to next question" nav doesn't
           // clobber the AI or Test Case breakdown from an earlier real Submit.
           evaluationBreakdown: evaluationBreakdown || existingQuestion.evaluationBreakdown || null,
+          // A nav-save brings no new output - keep the last one, flagged stale
+          // when the code has changed since it was produced.
+          runOutput: runOutput || (existingQuestion.runOutput
+            ? { ...existingQuestion.runOutput, stale: !!existingQuestion.runOutput.stale || existingQuestion.codeAnswer !== code }
+            : null),
         };
       }
 
@@ -1898,6 +1994,7 @@ exports.submitMultipleFiles = async (req, res) => {
       // payload, not multipart), so no JSON.parse needed — sanitise only.
       evaluationBreakdown: rawEvaluationBreakdown,
       questionStartedAt, // ISO time the student first opened this question (editor-stamped)
+      runOutput: rawRunOutput, // the editor's last Run output for this code
     } = req.body;
 
     // Sanitise breakdown the same way submitAnswer does, so the multi-file
@@ -2043,6 +2140,18 @@ exports.submitMultipleFiles = async (req, res) => {
     const finalAutoSubmitReason = finalSubmitType === 'AUTO'
       ? String(autoSubmitReason || '').slice(0, 300)
       : '';
+
+    // What the program printed, for the trainer's review (see resolveRunOutput).
+    const runOutput = await resolveRunOutput({
+      rawRunOutput,
+      realSubmit: true,
+      judgedTestcase: !!(evaluationBreakdown && evaluationBreakdown.method === 'testcase'),
+      language: selectedProgrammingLanguage || '',
+      files: (Array.isArray(files) ? files : []).map((f) => ({
+        path: f.path || `/${f.filename}`, content: f.content || '', isEntryPoint: !!f.isEntryPoint,
+      })),
+      lookup: { nodeType, nodeId, category, subcategory, exerciseId, questionId },
+    });
 
     // Validate required fields
     if (!courseId || !exerciseId || !questionId) {
@@ -2199,6 +2308,8 @@ exports.submitMultipleFiles = async (req, res) => {
       // Only include when the client actually produced a breakdown, so Manual
       // submissions don't stamp an empty object onto the answer.
       ...(evaluationBreakdown ? { evaluationBreakdown } : {}),
+      // Always set: a submission without output clears the previous one.
+      runOutput: runOutput || null,
     };
  
     // Helper function to build folder tree for DB storage

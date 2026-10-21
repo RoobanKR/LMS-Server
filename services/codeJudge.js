@@ -407,7 +407,29 @@ async function judge(opts) {
   };
 }
 
+/** True when Piston can run `language` (a PISTON_RUNTIMES language). */
+function isRunnableLanguage(language) {
+  return !!PISTON_RUNTIMES[normalizeLanguage(language)];
+}
+
+/**
+ * Run a submission once, exactly as written (no test-case driver), and return
+ * what it printed: { stdout, stderr, exitCode, compileError, timeMs } - or
+ * { networkError | httpError } when Piston couldn't be reached.
+ */
+async function runOnce({ language, files = [], stdin = '', version = null, runTimeoutMs = 5000 }) {
+  if (!files.length) return { stdout: '', stderr: '', exitCode: null, compileError: '', timeMs: 0 };
+  const entryIdx = pickEntryIndex(files, language);
+  const ordered = [files[entryIdx], ...files.filter((_, i) => i !== entryIdx)];
+  const pistonFiles = ordered.map((f) => ({
+    name: pistonFilename(language, f.path || f.filename, f.content || ''),
+    content: f.content || '',
+  }));
+  return callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
+}
+
 module.exports = {
   judge, callPiston, pickEntryIndex, pistonFilename, PISTON_URL,
   normalizeLanguage, versionFor, cleanLanguageVersions, listInstalledRuntimes,
+  isRunnableLanguage, runOnce,
 };
