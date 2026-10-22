@@ -1427,11 +1427,52 @@ exports.UpdateMyProfile = async (req, res) => {
 
     const { currentPassword, newPassword } = req.body;
     const imageFile = req.files?.profile;
+    // A person may also keep their own contact details current. Name, email,
+    // role, status and placement stay with User Management.
+    const removePhoto = String(req.body.removePhoto || "") === "true";
+    const hasPhone = typeof req.body.phone === "string";
+    const hasGender = typeof req.body.gender === "string";
 
-    if (!imageFile && !newPassword) {
+    if (!imageFile && !newPassword && !removePhoto && !hasPhone && !hasGender) {
       return res.status(400).json({
         message: [{ key: "error", value: "Nothing to update" }],
       });
+    }
+
+    // ── Contact details ──
+    const details = {};
+    if (hasPhone) {
+      const phone = req.body.phone.trim();
+      const digits = phone.replace(/\D/g, "");
+      if (!/^\+?[0-9\s-]+$/.test(phone) || digits.length < 7 || digits.length > 15) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Enter a valid phone number (7 to 15 digits)" }],
+        });
+      }
+      details.phone = phone;
+    }
+    if (hasGender) {
+      const gender = req.body.gender.trim();
+      if (!["Male", "Female", "Other"].includes(gender)) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Gender must be Male, Female or Other" }],
+        });
+      }
+      details.gender = gender;
+    }
+
+    // ── Photo checks ── (the browser checks the same; this is the one that counts)
+    if (imageFile) {
+      if (!/^image\/(jpe?g|png|webp)$/i.test(String(imageFile.mimetype || ""))) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Profile photo must be a JPG, PNG or WebP image" }],
+        });
+      }
+      if (Number(imageFile.size || 0) > 5 * 1024 * 1024) {
+        return res.status(400).json({
+          message: [{ key: "error", value: "Profile photo must be 5 MB or smaller" }],
+        });
+      }
     }
 
     // ── Password ──
@@ -1464,9 +1505,10 @@ exports.UpdateMyProfile = async (req, res) => {
       hashedPassword = await bcrypt.hash(String(newPassword), 12);
     }
 
-    // ── Photo ── (same upload + old-image cleanup as UpdateUser)
+    // ── Photo ── (same upload + old-image cleanup as UpdateUser). Removing
+    // the photo puts the default avatar back.
     let imageUrl;
-    if (imageFile) {
+    if (imageFile || removePhoto) {
       if (user.profile && !user.profile.includes("default_profile_image")) {
         try {
           const oldImagePath = user.profile.split("/").pop();
@@ -1479,18 +1521,22 @@ exports.UpdateMyProfile = async (req, res) => {
         }
       }
 
-      const uniqueFileName = `${Date.now()}_${imageFile.name}`;
-      const { error } = await storage
-        .from("smartlms")
-        .upload(`users/profile/${uniqueFileName}`, imageFile.data);
+      if (imageFile) {
+        const uniqueFileName = `${Date.now()}_${imageFile.name}`;
+        const { error } = await storage
+          .from("smartlms")
+          .upload(`users/profile/${uniqueFileName}`, imageFile.data);
 
-      if (error) {
-        console.error("Error uploading image to Supabase:", error);
-        return res.status(500).json({
-          message: [{ key: "error", value: "Error uploading image to Supabase" }],
-        });
+        if (error) {
+          console.error("Error uploading image to Supabase:", error);
+          return res.status(500).json({
+            message: [{ key: "error", value: "Error uploading image to Supabase" }],
+          });
+        }
+        imageUrl = publicUrlFor(`users/profile/${uniqueFileName}`);
+      } else {
+        imageUrl = await getDefaultProfileImageUrl();
       }
-      imageUrl = publicUrlFor(`users/profile/${uniqueFileName}`);
     }
 
     const updatedUser = await User.findByIdAndUpdate(
@@ -1498,20 +1544,30 @@ exports.UpdateMyProfile = async (req, res) => {
       {
         ...(hashedPassword && { password: hashedPassword }),
         ...(imageUrl && { profile: imageUrl }),
+        ...details,
         updatedBy: req.user.email,
         updatedAt: new Date(),
       },
       { new: true, runValidators: true }
     ).select("_id email firstName lastName phone gender profile updatedAt");
 
+    const changed = [
+      (details.phone !== undefined || details.gender !== undefined) && "details",
+      imageFile && "photo",
+      removePhoto && !imageFile && "photo removed",
+      hashedPassword && "password",
+    ].filter(Boolean);
+    const successText =
+      changed.length > 1 ? "Profile updated"
+        : changed[0] === "password" ? "Password updated"
+          : changed[0] === "photo" ? "Profile photo updated"
+            : changed[0] === "photo removed" ? "Profile photo removed"
+              : "Profile details updated";
+
     return res.status(200).json({
       message: [{
         key: "success",
-        value: hashedPassword && imageUrl
-          ? "Photo and password updated"
-          : hashedPassword
-            ? "Password updated"
-            : "Profile photo updated",
+        value: successText,
       }],
       user: updatedUser,
     });
