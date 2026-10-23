@@ -733,7 +733,8 @@ exports.getAllCoursesData = async (req, res) => {
         .populate({
           path: 'batchAndParticipants.users.user',
           // Exactly the fields the roster consumers read off a user.
-          select: 'firstName lastName email userId employeeId role',
+          // phone / rollNumber: the attendance workbook's Contact Number and Reg No.
+          select: 'firstName lastName email userId employeeId role phone rollNumber',
           populate: { path: 'role', model: 'Role', select: 'renameRole originalRole roleValue name' },
         })
         .lean();
