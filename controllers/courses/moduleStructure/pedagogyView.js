@@ -2632,17 +2632,15 @@ exports.staffStudentAnalytics = async (req, res) => {
         const { pedagogyStructure, exerciseCountByCategory, totalExercisesInCourse } =
           denominatorsFor(getUserBatchId(course, student._id));
 
-        // Find user from studentUsers
+        // The student's own course record (answers, last access). It is
+        // written the first time they open the course, so a student in the
+        // batch without one has simply not started: they are still enrolled
+        // and count, at 0% — leaving them out made "Enrolments" read 4 for a
+        // 59-student course and averaged progress over only those who began.
         const userData = studentUserById.get(student._id.toString());
-        if (!userData) return null;
-
-        // Get student's course data. If the user's own `courses[]` array does not
-        // contain this course, they were added to a batch by staff but
-        // are not actually enrolled — skip so they don't pollute every course at 0%.
-        const studentCourse = userData.courses?.find(c =>
+        const studentCourse = userData?.courses?.find(c =>
           c.courseId && c.courseId.toString() === courseIdStr
         );
-        if (!studentCourse) return null;
 
         const studentAnswers = studentCourse?.answers || {};
 
@@ -2717,6 +2715,8 @@ exports.staffStudentAnalytics = async (req, res) => {
               pedagogyStructure
             }
           },
+          // Has opened the course (has a course record).
+          started: Boolean(studentCourse),
           lastActivity: studentCourse?.lastAccessed || null
         };
       }).filter(student => student !== null);
@@ -2724,6 +2724,8 @@ exports.staffStudentAnalytics = async (req, res) => {
       // Calculate course-level statistics
       const courseStats = {
         totalStudents: studentsAnalytics.length,
+        // Of the enrolled, those who have opened the course.
+        startedStudents: studentsAnalytics.filter(s => s.started).length,
         averageProgress: studentsAnalytics.length > 0
           ? Math.round(studentsAnalytics.reduce((sum, s) => sum + s.progress.overall, 0) / studentsAnalytics.length)
           : 0,
