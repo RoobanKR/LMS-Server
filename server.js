@@ -312,6 +312,8 @@ app.use("/", glossaryRoutes);
 // Read-only proxies over public coding-platform profile data (LeetCode,
 // CodeChef, HackerRank, AtCoder) for the Coding Analytics dashboard.
 app.use("/", require("./routes/codingAnalyticsRoutes"));
+// AI code review a student can ask for when submitting a programming answer.
+app.use("/", require("./routes/aiCodeReviewRoutes"));
 
 // ─── Piston proxy (auth-gated; replaces the direct browser→Piston path) ──────
 app.use("/api", require("./routes/executionRoutes"));
