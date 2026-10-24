@@ -102,6 +102,7 @@ async function findExerciseOnNode({ exerciseId, nodeId, nodeType, subcategory, c
 async function resolveExerciseDuration(args) {
   const found = await findExerciseOnNode(args);
   if (!found) return null;
+  if (found?.exerciseInformation?.isTimeBased === false) return null;
   const raw = found?.exerciseInformation?.totalDuration;
   const mins = Number(raw);
   if (Number.isFinite(mins) && mins > 0 && mins <= MAX_DURATION_MINUTES) return mins;

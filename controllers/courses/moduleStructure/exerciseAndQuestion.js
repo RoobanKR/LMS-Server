@@ -1315,7 +1315,8 @@ exports.addExercise = async (req, res) => {
         exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
         exerciseType: exerciseInfo.exerciseType || exerciseTypeParsed || '',
         testType: exerciseInfo.testType || 'mock',
-        totalDuration: exerciseInfo.totalDuration || 1,
+        totalDuration: exerciseInfo.isTimeBased === false ? 0 : (exerciseInfo.totalDuration || 1),
+        isTimeBased: exerciseInfo.isTimeBased !== false,
         totalMarksMCQ: exerciseTypeParsed === 'MCQ' || exerciseTypeParsed === 'Combined'
           ? (exerciseInfo.totalMarksMCQ !== undefined ? exerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
         totalMarksProgramming: exerciseTypeParsed === 'Programming' || exerciseTypeParsed === 'Other' || exerciseTypeParsed === 'Combined'
@@ -1831,6 +1832,7 @@ exports.updateExercise = async (req, res) => {
         exerciseType: parsedExerciseInfo.exerciseType || existingExercise.exerciseInformation?.exerciseType || '',
         testType: parsedExerciseInfo.testType || existingExercise.exerciseInformation?.testType || 'mock',
         totalDuration: parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
+        isTimeBased: parsedExerciseInfo.isTimeBased !== undefined ? parsedExerciseInfo.isTimeBased !== false : existingExercise.exerciseInformation?.isTimeBased,
         totalMarksMCQ: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
           ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
         totalMarksProgramming: finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'
@@ -9509,7 +9511,8 @@ exports.addYouDoExercise = async (req, res) => {
         description: exerciseInfo.description || '',
         exerciseLevel: exerciseInfo.exerciseLevel || 'intermediate',
         exerciseType: exerciseInfo.exerciseType || exerciseTypeParsed || '',
-        totalDuration: exerciseInfo.totalDuration || 1,
+        totalDuration: exerciseInfo.isTimeBased === false ? 0 : (exerciseInfo.totalDuration || 1),
+        isTimeBased: exerciseInfo.isTimeBased !== false,
         totalMarksMCQ: totalMarksForMCQ,
         totalMarksProgramming: totalMarksForProg,
         totalMarks: totalMarksForInfo,
@@ -10031,6 +10034,7 @@ exports.updateYouDoExercise = async (req, res) => {
         description: parsedExerciseInfo.description !== undefined ? parsedExerciseInfo.description : existingExercise.exerciseInformation?.description,
         exerciseLevel: parsedExerciseInfo.exerciseLevel || existingExercise.exerciseInformation?.exerciseLevel,
         totalDuration: parsedExerciseInfo.totalDuration !== undefined ? parsedExerciseInfo.totalDuration : existingExercise.exerciseInformation?.totalDuration,
+        isTimeBased: parsedExerciseInfo.isTimeBased !== undefined ? parsedExerciseInfo.isTimeBased !== false : existingExercise.exerciseInformation?.isTimeBased,
         totalMarksMCQ: finalExerciseType === 'MCQ' || finalExerciseType === 'Combined'
           ? (parsedExerciseInfo.totalMarksMCQ !== undefined ? parsedExerciseInfo.totalMarksMCQ : mcqTotalMarks) : 0,
         totalMarksProgramming: finalExerciseType === 'Programming' || finalExerciseType === 'Other' || finalExerciseType === 'Combined'

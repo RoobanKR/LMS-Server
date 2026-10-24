@@ -1,0 +1,1941 @@
+[
+ {
+  "exerciseId": "6acf43a36476075d4b6dbf2c",
+  "fromTopicId": "6ace2cb06cdb4a50a78c93a3",
+  "toTopicId": "6ad0a7926da30f1d3f0fe975",
+  "fromTitle": "Greedy Algorithms",
+  "toTitle": "Problem Solving Exercise - I",
+  "exercise": {
+   "exerciseType": "Programming",
+   "isGraded": false,
+   "stepsSaved": [
+    "Exercise Details",
+    "Question Configuration",
+    "Add Questions",
+    "Schedule",
+    "Notifications"
+   ],
+   "configurationType": {
+    "mcqMode": false,
+    "programmingMode": true,
+    "combinedMode": false,
+    "otherMode": false,
+    "_id": "6acf43a36476075d4b6dbf2e"
+   },
+   "programmingSettings": {
+    "selectedModule": "Core Programming",
+    "selectedLanguages": [
+     "java"
+    ],
+    "_id": "6acf43a36476075d4b6dbf2f"
+   },
+   "exerciseInformation": {
+    "exerciseId": "EX290",
+    "exerciseName": "Problem Solving Exercise - I  (Backtracking & Greedy Algorithms)",
+    "description": "",
+    "exerciseLevel": "intermediate",
+    "exerciseType": "Programming",
+    "testType": "mock",
+    "totalDuration": 60,
+    "totalMarksMCQ": 0,
+    "totalMarksProgramming": 0,
+    "totalMarks": 0,
+    "selectedModule": "",
+    "selectedLanguages": [],
+    "isSectionBased": false,
+    "sectionBasedDuration": false
+   },
+   "questionConfiguration": {
+    "programmingQuestionConfiguration": {
+     "levelBasedCounts": {
+      "easy": 0,
+      "medium": 0,
+      "hard": 0
+     },
+     "selectionLevelCounts": {
+      "easy": 0,
+      "medium": 4,
+      "hard": 2
+     },
+     "questionConfigType": "selectionLevel",
+     "generalQuestionCount": 0,
+     "patternTotal": 0,
+     "scoreSettings": {
+      "separateMarks": {
+       "levelBased": {
+        "easy": [],
+        "medium": [],
+        "hard": []
+       },
+       "general": []
+      },
+      "levelBasedMarks": {
+       "easy": 0,
+       "medium": 10,
+       "hard": 10
+      },
+      "levelScoringConfiguration": {
+       "easy": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 0,
+        "totalMarks": 0
+       },
+       "medium": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 4,
+        "totalMarks": 0
+       },
+       "hard": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 2,
+        "totalMarks": 0
+       }
+      },
+      "scoreType": "levelBasedMarks",
+      "evenMarks": 0,
+      "totalMarks": 0
+     },
+     "attemptLimitEnabled": false,
+     "submissionAttempts": 1,
+     "questionFlow": "freeFlow",
+     "compilerFileMode": "multiple",
+     "allowCodeExecution": true,
+     "enableTestCases": true,
+     "showSampleCases": true
+    }
+   },
+   "questionSource": "scratch",
+   "customDistribution": null,
+   "customSources": [],
+   "saveToBank": false,
+   "evaluationMethod": {
+    "ai": {
+     "criteria": [
+      "correctness"
+     ],
+     "testCasesCountMode": "common",
+     "testCasesCount": 20
+    },
+    "method": "testcase",
+    "liveInteraction": true
+   },
+   "availabilityPeriod": {
+    "startDate": "2026-10-14T03:30:00.000Z",
+    "endDate": "2026-10-21T18:29:00.000Z",
+    "cutOffEnabled": false,
+    "remindGradeByEnabled": false,
+    "gracePeriodAllowed": false,
+    "gracePeriodEnabled": false,
+    "extendedDays": 0,
+    "requiresAdminApproval": false,
+    "approvalScope": "settings",
+    "_id": "6acf43a36476075d4b6dbf30"
+   },
+   "approvalWorkflow": null,
+   "notificationSettings": {
+    "notifyStudentChannels": {
+     "dashboard": true,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyGradersSubmissionsChannels": {
+     "dashboard": false,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyGradersLateSubmissionsChannels": {
+     "dashboard": false,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyUsers": true,
+    "notifyGmail": false,
+    "notifyWhatsApp": false,
+    "gradeSheet": true,
+    "notifyGradersSubmissions": false,
+    "notifyGradersLateSubmissions": false,
+    "notifyStudent": true
+   },
+   "gradeSettings": {
+    "mcqGrade": null,
+    "mcqGradeToPass": null,
+    "programmingGrade": 0,
+    "programmingGradeToPass": 25,
+    "combinedGrade": null,
+    "combinedGradeToPass": null,
+    "separateMarks": false,
+    "difficultyPassEnabled": false,
+    "easyPassMark": null,
+    "mediumPassMark": null,
+    "hardPassMark": null,
+    "overallMarkToPassEnabled": false,
+    "overallMarkToPass": null
+   },
+   "additionalOptions": {
+    "anonymousSubmissions": false,
+    "hideGraderIdentity": false
+   },
+   "questions": [
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 0,
+     "title": "Permutations (Leetcode : 46)",
+     "description": {
+      "text": "<p><b>Problem Statement:</b> Given an array “nums” of distinct integers, return all the possible permutations. You can return the answer in any order.</p><p><b>Input Format</b></p><ul><li>The first line contains an integer N.</li><li>The second line contains N space-separated integers representing ‘nums’.</li></ul><p><b>Output Format:</b> Print all possible permutations of ‘nums’ in any order.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/permutations/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/permutations/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "3\n1 2 3",
+     "sampleOutput": "1 2 3\n1 3 2\n2 1 3\n2 3 1\n3 1 2\n3 2 1",
+     "score": 10,
+     "constraints": [
+      "1 <= nums.length <= 6",
+      "-10 <= nums[i] <= 10",
+      "All the integers of ‘nums’ are unique."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "3\n1 2 3",
+       "expectedOutput": "1 2 3\n1 3 2\n2 1 3\n2 3 1\n3 1 2\n3 2 1",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 1",
+       "_id": "6acf52706476075d4b6ddc1a"
+      },
+      {
+       "input": "2\n0 1",
+       "expectedOutput": "0 1\n1 0",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 2",
+       "_id": "6acf52706476075d4b6ddc1b"
+      },
+      {
+       "input": "1\n1",
+       "expectedOutput": "1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf52706476075d4b6ddc1c"
+      },
+      {
+       "input": "4\n1 2 3 4",
+       "expectedOutput": "1 2 3 4\n1 2 4 3\n1 3 2 4\n1 3 4 2\n1 4 2 3\n1 4 3 2\n2 1 3 4\n2 1 4 3\n2 3 1 4\n2 3 4 1\n2 4 1 3\n2 4 3 1\n3 1 2 4\n3 1 4 2\n3 2 1 4\n3 2 4 1\n3 4 1 2\n3 4 2 1\n4 1 2 3\n4 1 3 2\n4 2 1 3\n4 2 3 1\n4 3 1 2\n4 3 2 1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf52706476075d4b6ddc1d"
+      },
+      {
+       "input": "3\n-1 0 2",
+       "expectedOutput": "-1 0 2\n-1 2 0\n0 -1 2\n0 2 -1\n2 -1 0\n2 0 -1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf52706476075d4b6ddc1e"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf52706476075d4b6ddc25"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf52706476075d4b6ddc19",
+     "createdAt": "2026-10-14T09:59:12.315Z",
+     "updatedAt": "2026-10-14T09:59:12.315Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 1,
+     "title": "Combination Sum [Leetcode 39]",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>Given an array of “distinct” integers “candidates” and a target integer “target”, return all unique combinations where the chosen numbers sum to target.</p><p>You may use the same number unlimited times.</p><p>The combinations can be returned in any order.</p><p><b>Input Format</b></p><ul><li>The first line contains an integer N, representing the number of candidates.</li><li>The second line contains N space-separated integers representing candidates.</li><li>The third line contains an integer target.</li></ul><p><b>Output Format</b></p><ul><li>Print all unique combinations of candidates whose sum equals target.</li><li>Each candidate can be used any number of times.</li></ul><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/combination-sum/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/combination-sum/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "4\n2 3 6 7\n7",
+     "sampleOutput": "2 2 3\n7",
+     "score": 10,
+     "constraints": [
+      "1 <= candidates.length <= 30",
+      "2 <= candidates[i] <= 40",
+      "All elements of candidates are distinct.",
+      "1 <= target <= 40"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "4\n2 3 6 7\n7",
+       "expectedOutput": "2 2 3\n7",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "2 and 3 are candidates, and 2 + 2 + 3 = 7. Note that 2 can be used multiple times. 7 is a candidate, and 7 = 7. These are the only two combinations.",
+       "_id": "6acf52736476075d4b6ddc77"
+      },
+      {
+       "input": "3\n2 3 5\n8",
+       "expectedOutput": "2 2 2 2\n2 3 3\n3 5",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 2",
+       "_id": "6acf52736476075d4b6ddc78"
+      },
+      {
+       "input": "1\n2\n1",
+       "expectedOutput": "",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf52736476075d4b6ddc79"
+      },
+      {
+       "input": "4\n2 3 6 7\n7",
+       "expectedOutput": "2 2 3\n7",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf52736476075d4b6ddc7a"
+      },
+      {
+       "input": "4\n2 4 5 9\n10",
+       "expectedOutput": "2 2 2 2 2\n2 4 4\n5 5",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf52736476075d4b6ddc7b"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf52736476075d4b6ddc82"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf52736476075d4b6ddc76",
+     "createdAt": "2026-10-14T09:59:15.177Z",
+     "updatedAt": "2026-10-14T09:59:15.177Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 2,
+     "title": "Check Knight Tour Configuration [Leetcode : 2596]",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>There is a knight on an n x n chessboard. In a valid configuration, the knight starts at the top-left cell of the board and visits every cell on the board exactly once.</p><p>You are given an n x n integer matrix grid consisting of distinct integers from the range [0, n * n - 1] where grid[row][col] indicates that the cell (row, col) is the grid[row][col]th cell that the knight visited. The moves are 0-indexed.</p><p>Return “true” if grid represents a valid configuration of the knight's movements or “false” otherwise.</p><p>Note that a valid knight move consists of moving two squares vertically and one square horizontally, or two squares horizontally and one square vertically. The figure below illustrates all the possible eight moves of a knight from some cell.</p><p><b>Input Format</b></p><ul><li>An n × n integer matrix grid.</li><li>grid[i][j] represents the step number at which the knight visits that cell.</li><li>The values range from 0 to n² − 1.</li><li>The knight must start from the top-left cell, so grid[0][0] = 0.</li></ul><p><b>Output Format:</b> Return a boolean value “true” if the given sequence represents a valid knight's tour; Otherwise “false”.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/check-knight-tour-configuration/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/check-knight-tour-configuration/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "hard",
+     "sampleInput": "0 11 16 5 20\n17 4 19 10 15\n12 1 8 21 6\n3 18 23 14 9\n24 13 2 7 22",
+     "sampleOutput": "true",
+     "score": 10,
+     "constraints": [
+      "n == grid.length == grid[i].length",
+      "3 <= n <= 7",
+      "0 <= grid[row][col] < n * n",
+      "All integers in grid are unique."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "0 11 16 5 20\n17 4 19 10 15\n12 1 8 21 6\n3 18 23 14 9\n24 13 2 7 22",
+       "expectedOutput": "true",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The above diagram represents the grid. It can be shown that it is a valid configuration.",
+       "_id": "6acf52786476075d4b6ddcdf"
+      },
+      {
+       "input": "0 3 6\n5 8 1\n2 7 4",
+       "expectedOutput": "false",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The above diagram represents the grid. The 8th move of the knight is not valid considering its position after the 7th move.",
+       "_id": "6acf52786476075d4b6ddce0"
+      },
+      {
+       "input": "0",
+       "expectedOutput": "true",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf52786476075d4b6ddce1"
+      },
+      {
+       "input": "0 1\n2 3",
+       "expectedOutput": "false",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "A knight cannot make a valid move on a 2×2 board.",
+       "_id": "6acf52786476075d4b6ddce2"
+      },
+      {
+       "input": "1 0\n2 3",
+       "expectedOutput": "false",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The problem requires the knight to start at: grid[0][0] = 0 But here: grid[0][0] = 1 So immediately it is invalid.",
+       "_id": "6acf52786476075d4b6ddce3"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf52786476075d4b6ddcea"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf52786476075d4b6ddcde",
+     "createdAt": "2026-10-14T09:59:20.179Z",
+     "updatedAt": "2026-10-14T09:59:20.179Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 3,
+     "title": "The Highland Fitness Challenge",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>Every morning, Jamie, a software engineer from Edinburgh, Scotland, follows a strict workout routine at his local gym before heading to work.</p><p>Today, Jamie arrives at the gym with ‘E’ units of energy. The gym offers ‘N’ different exercises, each with a different level of intensity. The i-th exercise consumes A[i] units of Jamie's energy every time it is performed.</p><p>To avoid overtraining, each exercise can be performed at most twice. After every exercise, Jamie's remaining energy decreases by the corresponding amount. Jamie continues exercising until becoming completely exhausted, which happens when the remaining energy becomes 0 or less.</p><p>Your task is to determine the minimum number of exercises Jamie must perform to become exhausted. If Jamie cannot reduce the energy to 0 or below, return -1.</p><p><b>Input Format</b></p><ul><li>The first line contains an integer ‘E’ — initial energy</li><li>The second line contains an integer ‘N’ — number of exercises</li><li>The next ‘N’ lines each contain an integer ‘A[i]’, representing energy drained by the i-th exercise</li></ul><p><b>Output Format</b></p><ul><li>Print a single integer — the minimum number of exercises</li><li>Print -1 if it is not possible</li></ul>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "20\n8\n5\n4\n3\n2\n6\n2\n1\n1",
+     "sampleOutput": "4",
+     "score": 10,
+     "constraints": [
+      "1 ≤ E ≤ 10^5",
+      "1 ≤ N ≤ 10^5",
+      "1 ≤ A[i] ≤ 10^5"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "20\n8\n5\n4\n3\n2\n6\n2\n1\n1",
+       "expectedOutput": "4",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Perform Exercise with energy drain 6 → Remaining energy = 14 Perform exercise with energy drain 6 (second time) → Remaining energy = 8 Perform exercise with energy drain 5 → Remaining energy = 3 Perform exercise with energy drain 5 (second time) → Remaining energy = -2 Jamie becomes exhausted after 4 exercises. Thus Output is 4.",
+       "_id": "6acf528a6476075d4b6ddd66"
+      },
+      {
+       "input": "10\n2\n2\n2",
+       "expectedOutput": "-1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Perform exercise with energy drain 2 → Remaining energy = 8 Perform exercise with energy drain 2(second time) → Remaining energy = 6 Perform exercise with energy drain 2 → Remaining energy = 4 Perform exercise with energy drain 2 (second time) → Remaining energy = 2 Therefore, Jamie cannot become exhausted. Thus output is -1.",
+       "_id": "6acf528a6476075d4b6ddd67"
+      },
+      {
+       "input": "7\n3\n4\n3\n2",
+       "expectedOutput": "2",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf528a6476075d4b6ddd68"
+      },
+      {
+       "input": "6\n2\n1\n2",
+       "expectedOutput": "4",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf528a6476075d4b6ddd69"
+      },
+      {
+       "input": "50\n8\n3\n3\n2\n2\n2\n1\n1\n1",
+       "expectedOutput": "-1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf528a6476075d4b6ddd6a"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf528a6476075d4b6ddd71"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf528a6476075d4b6ddd65",
+     "createdAt": "2026-10-14T09:59:38.080Z",
+     "updatedAt": "2026-10-14T09:59:38.080Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 4,
+     "title": "Minimum Number of Arrows to Burst Balloons (Leetcode : 452)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>There are some spherical balloons taped onto a flat wall that represents the XY-plane. The balloons are represented as a 2D integer ‘array’ points where points[i] = [xStart, xEnd] denotes a balloon whose horizontal diameter stretches between xStart and xEnd. You do not know the exact y-coordinates of the balloons.</p><p>Arrows can be shot up directly vertically (in the positive y-direction) from different points along the x-axis. A balloon with xstart and xend is burst by an arrow shot at x if xstart &lt;= x &lt;= xend. There is no limit to the number of arrows that can be shot. A shot arrow keeps traveling up infinitely, bursting any balloons in its path.</p><p>Given the array points, return the minimum number of arrows that must be shot to burst all balloons.</p><p><b>Input Format</b></p><ul><li>In the first line, an integer ‘N’, representing the number of balloons.</li><li>The next input is a 2D array points of size ‘N × 2’.</li><li>Each row contains exactly two integers:</li><li>points[i][0] → Starting x-coordinate (xstart) of the i-th balloon.</li><li>points[i][1] → Ending x-coordinate (xend) of the i-th balloon.</li></ul><p><b>Output Format:</b> Print an integer, the minimum number of arrows required.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/minimum-number-of-arrows-to-burst-balloons/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/minimum-number-of-arrows-to-burst-balloons/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "4\n10 16\n2 8\n1 6\n7 12",
+     "sampleOutput": "2",
+     "score": 10,
+     "constraints": [
+      "1 <= points.length <= 10^5",
+      "points[i].length == 2",
+      "-2^31 <= xstart < xend <= 2^31 - 1"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "4\n10 16\n2 8\n1 6\n7 12",
+       "expectedOutput": "2",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The balloons can be burst by 2 arrows: - Shoot an arrow at x = 6, bursting the balloons [2,8] and [1,6]. any point from 2 to 6 (inclusive) would work - Shoot an arrow at x = 11, bursting the balloons [10,16] and [7,12]. Any point from 10 to 12 (inclusive) would work, such as 10, 11, or 12.",
+       "_id": "6acf528b6476075d4b6ddde6"
+      },
+      {
+       "input": "4\n1 2\n3 4\n5 6\n7 8",
+       "expectedOutput": "4",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "One arrow needs to be shot for each balloon for a total of 4 arrows.",
+       "_id": "6acf528b6476075d4b6ddde7"
+      },
+      {
+       "input": "4\n1 2\n2 3\n3 4\n4 5",
+       "expectedOutput": "2",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The balloons can be burst by 2 arrows: - Shoot an arrow at x = 2, bursting the balloons [1,2] and [2,3]. - Shoot an arrow at x = 4, bursting the balloons [3,4] and [4,5].",
+       "_id": "6acf528b6476075d4b6ddde8"
+      },
+      {
+       "input": "5\n1 10\n2 9\n3 8\n4 7\n5 6",
+       "expectedOutput": "1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf528b6476075d4b6ddde9"
+      },
+      {
+       "input": "3\n1 2\n2 4\n5 6",
+       "expectedOutput": "2",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf528b6476075d4b6dddea"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf528b6476075d4b6dddf1"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf528b6476075d4b6ddde5",
+     "createdAt": "2026-10-14T09:59:39.916Z",
+     "updatedAt": "2026-10-14T09:59:39.916Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 5,
+     "title": "Jump Game – II (Leetcode 45)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>You are given a 0-indexed array of integers ‘nums’ of length ‘n’. You are initially positioned at index 0. Each element ‘nums[i]’ represents the maximum length of a forward jump from index ‘i’. In other words, if you are at index ‘i', you can jump to any index (i + j) where:</p><p>0 &lt; j &lt;= nums[i] and i + j &lt; n Return the minimum number of jumps to reach index ‘n–1’. The test cases are generated such that you can reach index ‘n–1’.</p><p><b>Input Format</b></p><ul><li>The first line contains an integer ‘N’, representing the size of the array.</li><li>The second line contains ‘N’ space-separated integers, where ‘nums[i]’ represents the maximum number of steps that can be jumped forward from index ‘i'.</li></ul><p><b>Output Format:</b> Print an integer representing the minimum number of jumps required to reach the last index.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/jump-game-ii/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/jump-game-ii/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "hard",
+     "sampleInput": "5\n2 3 1 1 4",
+     "sampleOutput": "2",
+     "score": 10,
+     "constraints": [
+      "1 <= nums.length <= 10^4",
+      "0 <= nums[i] <= 10^5",
+      "It's guaranteed that you can reach nums[n - 1]."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "5\n2 3 1 1 4",
+       "expectedOutput": "2",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The minimum number of jumps to reach the last index is 2. Jump 1 step from index 0 to 1, then 3 steps to the last index.",
+       "_id": "6acf528c6476075d4b6dde72"
+      },
+      {
+       "input": "5\n2 3 0 1 4",
+       "expectedOutput": "2",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 2",
+       "_id": "6acf528c6476075d4b6dde73"
+      },
+      {
+       "input": "5\n1 2 1 1 1",
+       "expectedOutput": "3",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf528c6476075d4b6dde74"
+      },
+      {
+       "input": "6\n2 3 0 1 4 1",
+       "expectedOutput": "3",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf528c6476075d4b6dde75"
+      },
+      {
+       "input": "7\n3 4 2 1 2 1 1",
+       "expectedOutput": "2",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf528c6476075d4b6dde76"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf528c6476075d4b6dde7d"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf528c6476075d4b6dde71",
+     "createdAt": "2026-10-14T09:59:40.793Z",
+     "updatedAt": "2026-10-14T09:59:40.793Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    }
+   ],
+   "createdAt": "2026-10-14T08:56:03.948Z",
+   "createdBy": "batch1@gmail.com",
+   "version": 1,
+   "_id": "6acf43a36476075d4b6dbf2c",
+   "questionSourceMcq": null,
+   "customSourcesMcq": [],
+   "customDistributionMcq": null,
+   "notificatonandGradeSettings": {
+    "notifyUsers": true,
+    "notifyGmail": false,
+    "notifyWhatsApp": false,
+    "gradeSheet": true
+   },
+   "questionBehavior": {
+    "allQuestionsRequired": false
+   },
+   "selectedTopics": [],
+   "instructions": "",
+   "sections": [],
+   "updatedAt": "2026-10-14T09:59:40.814Z",
+   "studentNotification": {
+    "sentAt": "2026-10-14T08:56:34.379Z",
+    "batchId": ""
+   }
+  },
+  "oldUrl": "/lms/pages/courses/coursesdetailedview/6ac878fa82f86c20f025618d?restoreNodeId=6ace2cb06cdb4a50a78c93a3&method=we-do&activity=assignment",
+  "newUrl": "/lms/pages/courses/coursesdetailedview/6ac878fa82f86c20f025618d?restoreNodeId=6ad0a7926da30f1d3f0fe975&method=we-do&activity=assignment"
+ },
+ {
+  "exerciseId": "6acf55d76476075d4b6de2f3",
+  "fromTopicId": "6ace2cbc6cdb4a50a78c96c2",
+  "toTopicId": "6ad0a8006da30f1d3f1030a4",
+  "fromTitle": "Dynamic Programming\n",
+  "toTitle": "Problem Solving Exercise - II",
+  "exercise": {
+   "exerciseType": "Programming",
+   "isGraded": false,
+   "stepsSaved": [
+    "Exercise Details",
+    "Question Configuration",
+    "Add Questions",
+    "Schedule",
+    "Notifications"
+   ],
+   "configurationType": {
+    "mcqMode": false,
+    "programmingMode": true,
+    "combinedMode": false,
+    "otherMode": false,
+    "_id": "6acf55d76476075d4b6de2f5"
+   },
+   "programmingSettings": {
+    "selectedModule": "Core Programming",
+    "selectedLanguages": [
+     "java"
+    ],
+    "_id": "6acf55d76476075d4b6de2f6"
+   },
+   "exerciseInformation": {
+    "exerciseId": "EX339",
+    "exerciseName": "Problem Solving Exercise - II  (Dynamic Programming)",
+    "description": "",
+    "exerciseLevel": "intermediate",
+    "exerciseType": "Programming",
+    "testType": "mock",
+    "totalDuration": 60,
+    "totalMarksMCQ": 0,
+    "totalMarksProgramming": 0,
+    "totalMarks": 0,
+    "selectedModule": "",
+    "selectedLanguages": [],
+    "isSectionBased": false,
+    "sectionBasedDuration": false
+   },
+   "questionConfiguration": {
+    "programmingQuestionConfiguration": {
+     "levelBasedCounts": {
+      "easy": 0,
+      "medium": 0,
+      "hard": 0
+     },
+     "selectionLevelCounts": {
+      "easy": 0,
+      "medium": 6,
+      "hard": 0
+     },
+     "questionConfigType": "selectionLevel",
+     "generalQuestionCount": 0,
+     "patternTotal": 0,
+     "scoreSettings": {
+      "separateMarks": {
+       "levelBased": {
+        "easy": [],
+        "medium": [],
+        "hard": []
+       },
+       "general": []
+      },
+      "levelBasedMarks": {
+       "easy": 0,
+       "medium": 10,
+       "hard": 0
+      },
+      "levelScoringConfiguration": {
+       "easy": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 0,
+        "totalMarks": 0
+       },
+       "medium": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 6,
+        "totalMarks": 0
+       },
+       "hard": {
+        "type": "level_specific",
+        "marksPerQuestion": 10,
+        "questionCount": 0,
+        "totalMarks": 0
+       }
+      },
+      "scoreType": "levelBasedMarks",
+      "evenMarks": 0,
+      "totalMarks": 0
+     },
+     "attemptLimitEnabled": false,
+     "submissionAttempts": 1,
+     "questionFlow": "freeFlow",
+     "compilerFileMode": "multiple",
+     "allowCodeExecution": true,
+     "enableTestCases": true,
+     "showSampleCases": true
+    }
+   },
+   "questionSource": "scratch",
+   "customDistribution": null,
+   "customSources": [],
+   "saveToBank": false,
+   "evaluationMethod": {
+    "ai": {
+     "criteria": [
+      "correctness"
+     ],
+     "testCasesCountMode": "common",
+     "testCasesCount": 20
+    },
+    "method": "testcase",
+    "liveInteraction": true
+   },
+   "availabilityPeriod": {
+    "startDate": "2026-10-14T03:30:00.000Z",
+    "endDate": "2026-10-21T18:29:00.000Z",
+    "cutOffEnabled": false,
+    "remindGradeByEnabled": false,
+    "gracePeriodAllowed": false,
+    "gracePeriodEnabled": false,
+    "extendedDays": 0,
+    "requiresAdminApproval": false,
+    "approvalScope": "settings",
+    "_id": "6acf55d76476075d4b6de2f7"
+   },
+   "approvalWorkflow": null,
+   "notificationSettings": {
+    "notifyStudentChannels": {
+     "dashboard": true,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyGradersSubmissionsChannels": {
+     "dashboard": false,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyGradersLateSubmissionsChannels": {
+     "dashboard": false,
+     "gmail": false,
+     "whatsapp": false
+    },
+    "notifyUsers": true,
+    "notifyGmail": false,
+    "notifyWhatsApp": false,
+    "gradeSheet": true,
+    "notifyGradersSubmissions": false,
+    "notifyGradersLateSubmissions": false,
+    "notifyStudent": true
+   },
+   "gradeSettings": {
+    "mcqGrade": null,
+    "mcqGradeToPass": null,
+    "programmingGrade": 0,
+    "programmingGradeToPass": 25,
+    "combinedGrade": null,
+    "combinedGradeToPass": null,
+    "separateMarks": false,
+    "difficultyPassEnabled": false,
+    "easyPassMark": null,
+    "mediumPassMark": null,
+    "hardPassMark": null,
+    "overallMarkToPassEnabled": false,
+    "overallMarkToPass": null
+   },
+   "additionalOptions": {
+    "anonymousSubmissions": false,
+    "hideGraderIdentity": false
+   },
+   "questions": [
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 0,
+     "title": "Maximum Subarray(leetcode 53)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>Given an integer array ‘nums’, find the contiguous subarray that has the largest sum and return its sum.</p><p>A subarray is a continuous portion of the array, containing elements from consecutive positions. You cannot skip any element between the selected positions.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/maximum-subarray/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/maximum-subarray/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "5\n5 4 -1 7 8",
+     "sampleOutput": "23",
+     "score": 10,
+     "constraints": [
+      "1 <= nums.length <= 10^5",
+      "-10^4 <= nums[i] <= 10^4"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "5\n5 4 -1 7 8",
+       "expectedOutput": "23",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The feasible subarrays are { [5], [4], [-1], [7], [8], [5,4], [5,4,-1], [5,4,-1,7], [5,4,-1,7,8], [4,-1], [4,-1,7], [4,-1,7,8], [-1,7], [-1,7,8], [7,8] } The subarray [5,4,-1,7,8] has the largest sum 23.",
+       "_id": "6acf59776476075d4b6de555"
+      },
+      {
+       "input": "9\n-2 1 -3 4 -1 2 1 -5 4",
+       "expectedOutput": "6",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The subarray [4,-1,2,1] has the largest sum 6.",
+       "_id": "6acf59776476075d4b6de556"
+      },
+      {
+       "input": "1\n1",
+       "expectedOutput": "1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The subarray [1] has the largest sum 1.",
+       "_id": "6acf59776476075d4b6de557"
+      },
+      {
+       "input": "7\n3 -2 5 -1 6 -3 2",
+       "expectedOutput": "10",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The subarray [3,-2,5,-1,6,-3,2] has the maximum sum 10.",
+       "_id": "6acf59776476075d4b6de558"
+      },
+      {
+       "input": "6\n-2 5 -1 2 -3 4",
+       "expectedOutput": "7",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The subarray [5, -1, 2, -3, 4] has the maximum sum 7.",
+       "_id": "6acf59776476075d4b6de559"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf59776476075d4b6de560"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf59776476075d4b6de554",
+     "createdAt": "2026-10-14T10:29:11.579Z",
+     "updatedAt": "2026-10-14T10:29:11.579Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 1,
+     "title": "Partition Equal Subset Sum (Leetcode - 416)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>You are given an integer array ‘nums’. Determine whether the array can be divided into two groups such that:</p><p>Every element belongs to exactly one group.</p><p>The sum of elements in both groups is equal.</p><p>Return true if such a partition is possible; otherwise, return false.</p><p><b>Notes:</b> You cannot split an individual element. You can only choose which group each complete element belongs to.</p><p><b>Input Format</b></p><ul><li>The first line contains an integer ‘n’, representing the number of elements.</li><li>The second line contains n space-separated integers representing the array ‘nums’.</li></ul><p><b>Output Format</b></p><ul><li>Print true if the array can be divided into two groups with equal sums.</li><li>Otherwise, print false.</li></ul><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/partition-equal-subset-sum/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/partition-equal-subset-sum/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "4\n1 5 11 5",
+     "sampleOutput": "true",
+     "score": 10,
+     "constraints": [
+      "1 <= nums.length <= 200",
+      "1 <= nums[i] <= 100"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "4\n1 5 11 5",
+       "expectedOutput": "true",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The array can be divided as: [1, 5, 5] → Sum = 11 [11]       → Sum = 11",
+       "_id": "6acf59796476075d4b6de5b1"
+      },
+      {
+       "input": "4\n1 2 3 5",
+       "expectedOutput": "false",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The total sum is 11, which is odd. An odd total cannot be divided into two equal integer sums.",
+       "_id": "6acf59796476075d4b6de5b2"
+      },
+      {
+       "input": "4\n2 2 1 1",
+       "expectedOutput": "true",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "[2, 1] → Sum = 3 [2, 1] → Sum = 3",
+       "_id": "6acf59796476075d4b6de5b3"
+      },
+      {
+       "input": "5\n3 3 3 4 5 2",
+       "expectedOutput": "false",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf59796476075d4b6de5b4"
+      },
+      {
+       "input": "6\n1 1 1 1 2 2",
+       "expectedOutput": "true",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf59796476075d4b6de5b5"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf59796476075d4b6de5bc"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf59796476075d4b6de5b0",
+     "createdAt": "2026-10-14T10:29:13.045Z",
+     "updatedAt": "2026-10-14T10:29:13.045Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 2,
+     "title": "Longest Common Subsequence(leetcode 1143)",
+     "description": {
+      "text": "<p>Given two strings ‘text1’ and ‘text2’, return the length of their longest common subsequence. If there is no common subsequence, return 0.</p><p>A subsequence of a string is a new string generated from the original string with some characters (can be none) deleted without changing the relative order of the remaining characters.</p><p>For example, \"ace\" is a subsequence of \"abcde\".</p><p>A common subsequence of two strings is a subsequence that is common to both strings.</p><p><b>Input Format</b></p><ul><li>The first line contains the string text1.</li><li>The second line contains the string text2.</li></ul><p><b>Output Format:</b> Print a single integer representing the length of the longest common subsequence shared by text1 and text2.</p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "abcde\nace",
+     "sampleOutput": "3",
+     "score": 10,
+     "constraints": [
+      "1 <= text1.length, text2.length <= 1000",
+      "text1 and text2 consist of only lowercase English characters."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "abcde\nace",
+       "expectedOutput": "3",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "The longest common subsequence is: “ace”",
+       "_id": "6acf597a6476075d4b6de619"
+      },
+      {
+       "input": "abc\nabc",
+       "expectedOutput": "3",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Both strings are identical, so the entire string is the common subsequence.",
+       "_id": "6acf597a6476075d4b6de61a"
+      },
+      {
+       "input": "abc\ndef",
+       "expectedOutput": "0",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "There is no common character between the two strings.",
+       "_id": "6acf597a6476075d4b6de61b"
+      },
+      {
+       "input": "abcba\nabcbc",
+       "expectedOutput": "4",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "One longest common subsequence is: “abcd”.",
+       "_id": "6acf597a6476075d4b6de61c"
+      },
+      {
+       "input": "AGGTAB\nGXTXAYB",
+       "expectedOutput": "4",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "One longest common subsequence is: “GTAB” For LCS, remember: Subsequence → characters need NOT be consecutive but their order must be maintained.",
+       "_id": "6acf597a6476075d4b6de61d"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf597a6476075d4b6de624"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf597a6476075d4b6de618",
+     "createdAt": "2026-10-14T10:29:14.447Z",
+     "updatedAt": "2026-10-14T10:29:14.447Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 3,
+     "title": "Longest Palindromic Substring(leetcode 5)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>You are given a string “s” consisting of English letters, digits, and/or special characters. Your task is to find the longest substring that is also a palindrome.</p><p>A substring is a contiguous sequence of characters in a string.</p><p>A palindrome is a sequence that reads the same forward and backward.</p><p>For example:</p><p>\"aba\" → Palindrome \"racecar\" → Palindrome \"abba\" → Palindrome \"abc\" → Not a palindrome If there are multiple longest palindromic substrings with the same maximum length, you may return any one of them.</p><p><b>Input Format</b></p><ul><li>The input contains a string ‘s’.</li><li>Find the longest substring of ‘s’ that is a palindrome.</li></ul><p><b>Output Format:</b> Return the longest palindromic substring.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/longest-palindromic-substring/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/longest-palindromic-substring/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "babad",
+     "sampleOutput": "bab",
+     "score": 10,
+     "constraints": [
+      "1 <= s.length <= 1000",
+      "s consist of only digits and English letters."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "babad",
+       "expectedOutput": "bab",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "\"aba\" is also a valid answer.",
+       "_id": "6acf597b6476075d4b6de68e"
+      },
+      {
+       "input": "cbbd",
+       "expectedOutput": "bb",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 2",
+       "_id": "6acf597b6476075d4b6de68f"
+      },
+      {
+       "input": "a",
+       "expectedOutput": "a",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf597b6476075d4b6de690"
+      },
+      {
+       "input": "ac",
+       "expectedOutput": "a",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "‘c’ is also a valid answer.",
+       "_id": "6acf597b6476075d4b6de691"
+      },
+      {
+       "input": "racecar",
+       "expectedOutput": "racecar",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf597b6476075d4b6de692"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf597b6476075d4b6de699"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf597b6476075d4b6de68d",
+     "createdAt": "2026-10-14T10:29:15.509Z",
+     "updatedAt": "2026-10-14T10:29:15.509Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 4,
+     "title": "Unique Paths (Leetcode 62)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>There is a robot on an m x n grid. The robot is initially located at the top-left corner (i.e., grid[0][0]). The robot tries to move to the bottom-right corner (i.e., grid[m - 1][n - 1]). The robot can only move either down or right at any point in time.</p><p>Given the two integers m and n, return the number of possible unique paths that the robot can take to reach the bottom-right corner.</p><p>The test cases are generated so that the answer will be less than or equal to 2 * 10^9.</p><p><b>Input Format</b></p><ul><li>‘m’ represents the number of rows in the grid.</li><li>‘n’ represents the number of columns in the grid.</li></ul><p><b>Output Format:</b> Return the number of unique paths from the top-left corner to the bottom-right corner.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/unique-paths/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/unique-paths/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "3\n7",
+     "sampleOutput": "28",
+     "score": 10,
+     "constraints": [
+      "1 <= m, n <= 100"
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "3\n7",
+       "expectedOutput": "28",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 1",
+       "_id": "6acf597d6476075d4b6de70e"
+      },
+      {
+       "input": "3\n2",
+       "expectedOutput": "3",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "From the top-left corner, there are a total of 3 ways to reach the bottom-right corner: 1. Right -> Down -> Down 2. Down -> Down -> Right 3. Down -> Right -> Down",
+       "_id": "6acf597d6476075d4b6de70f"
+      },
+      {
+       "input": "1\n5",
+       "expectedOutput": "1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf597d6476075d4b6de710"
+      },
+      {
+       "input": "3\n4",
+       "expectedOutput": "10",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf597d6476075d4b6de711"
+      },
+      {
+       "input": "5\n5",
+       "expectedOutput": "70",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf597d6476075d4b6de712"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf597d6476075d4b6de719"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf597d6476075d4b6de70d",
+     "createdAt": "2026-10-14T10:29:17.188Z",
+     "updatedAt": "2026-10-14T10:29:17.188Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    },
+    {
+     "questionType": "programming",
+     "createdBy": "6ac8b9704b0fbf73622cc3aa",
+     "createdByEmail": "batch1@gmail.com",
+     "approval": {
+      "status": "pending",
+      "currentStepOrder": null,
+      "decidedBy": null,
+      "decidedAt": null,
+      "rejectionMessage": "",
+      "editedSinceReject": false,
+      "queries": []
+     },
+     "source": "scratch-manual",
+     "bankQuestionId": null,
+     "sectionId": null,
+     "mcqQuestionDescription": "",
+     "isActive": true,
+     "hasOtherOption": false,
+     "hasExplanation": false,
+     "mcqQuestionCorrectAnswers": [],
+     "mcqQuestionImageUrl": null,
+     "trueFalseAnswer": null,
+     "shortAnswer": "",
+     "essayAnswer": "",
+     "numericAnswer": null,
+     "numericTolerance": null,
+     "sequence": 5,
+     "title": "Unique Paths with Obstacle (Leetcode 63)",
+     "description": {
+      "text": "<p><b>Problem Statement</b></p><p>You are given an m x n integer array grid. There is a robot initially located at the top-left corner (i.e., grid[0][0]). The robot tries to move to the bottom-right corner (i.e., grid[m - 1][n - 1]). The robot can only move either down or right at any point in time.</p><p>An obstacle and space are marked as 1 or 0 respectively in grid. A path that the robot takes cannot include any square that is an obstacle.</p><p>Return the number of possible unique paths that the robot can take to reach the bottom-right corner.</p><p>The testcases are generated so that the answer will be less than or equal to 2 * 10^9.</p><p><b>Input Format</b></p><ul><li>‘m’ represents the number of rows.</li><li>‘n’ represents the number of columns.</li><li>The next m rows contain n integers representing the grid.</li><li>‘0’ represents an empty cell.</li><li>‘1’ represents an obstacle.</li></ul><p><b>Output Format:</b> Return the number of unique paths from the top-left cell to the bottom-right cell, avoiding all obstacles.</p><p><b>LeetCode:</b> <a href=\"https://leetcode.com/problems/unique-paths-ii/description/\" target=\"_blank\" rel=\"noopener noreferrer\">https://leetcode.com/problems/unique-paths-ii/description/</a></p>",
+      "imageUrl": null,
+      "imageAlignment": "left",
+      "imageSizePercent": 100
+     },
+     "difficulty": "medium",
+     "sampleInput": "3 3\n0 0 0\n0 1 0\n0 0 0",
+     "sampleOutput": "2",
+     "score": 10,
+     "constraints": [
+      "m == obstacleGrid.length",
+      "n == obstacleGrid[i].length",
+      "1 <= m, n <= 100",
+      "obstacleGrid[i][j] is 0 or 1."
+     ],
+     "hints": [],
+     "testCases": [
+      {
+       "input": "3 3\n0 0 0\n0 1 0\n0 0 0",
+       "expectedOutput": "2",
+       "isSample": true,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "There is one obstacle in the middle of the 3x3 grid above. There are two ways to reach the bottom-right corner: 1. Right -> Right -> Down -> Down 2. Down -> Down -> Right -> Right",
+       "_id": "6acf597f6476075d4b6de79a"
+      },
+      {
+       "input": "2 2\n0 1\n0 0",
+       "expectedOutput": "1",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 2",
+       "_id": "6acf597f6476075d4b6de79b"
+      },
+      {
+       "input": "3 3\n0 1 0\n0 0 0\n0 0 0",
+       "expectedOutput": "3",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 3",
+       "_id": "6acf597f6476075d4b6de79c"
+      },
+      {
+       "input": "3 4\n0 0 0 0\n0 1 0 0\n0 0 0 0",
+       "expectedOutput": "4",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 4",
+       "_id": "6acf597f6476075d4b6de79d"
+      },
+      {
+       "input": "2 2\n0 0\n1 1",
+       "expectedOutput": "0",
+       "isSample": false,
+       "isHidden": false,
+       "points": 1,
+       "explanation": "Test Case 5",
+       "_id": "6acf597f6476075d4b6de79e"
+      }
+     ],
+     "aiTestCasesCount": null,
+     "aiGeneratedTestCasesModel": "",
+     "aiGeneratedTestCasesAt": null,
+     "solutions": {
+      "startedCode": "",
+      "functionName": "main",
+      "language": "java",
+      "_id": "6acf597f6476075d4b6de7a5"
+     },
+     "timeLimit": 2000,
+     "memoryLimit": 256,
+     "isLinkQuestion": false,
+     "questionLink": "",
+     "starterCode": "",
+     "solutionCode": "",
+     "codeSetupLanguage": "java",
+     "executionType": "fullProgram",
+     "functionContract": {
+      "functionName": "",
+      "returnType": "integer",
+      "params": []
+     },
+     "startingExperience": "blank",
+     "sampleQuery": "",
+     "isDatabase": false,
+     "lastEditedAfterSubmissionAt": null,
+     "_id": "6acf597f6476075d4b6de799",
+     "createdAt": "2026-10-14T10:29:19.334Z",
+     "updatedAt": "2026-10-14T10:29:19.334Z",
+     "mcqQuestionOptions": [],
+     "matchingPairs": [],
+     "orderingItems": [],
+     "aiGeneratedTestCases": [],
+     "sampleResult": []
+    }
+   ],
+   "createdAt": "2026-10-14T10:13:43.890Z",
+   "createdBy": "batch1@gmail.com",
+   "version": 1,
+   "_id": "6acf55d76476075d4b6de2f3",
+   "questionSourceMcq": null,
+   "customSourcesMcq": [],
+   "customDistributionMcq": null,
+   "notificatonandGradeSettings": {
+    "notifyUsers": true,
+    "notifyGmail": false,
+    "notifyWhatsApp": false,
+    "gradeSheet": true
+   },
+   "questionBehavior": {
+    "allQuestionsRequired": false
+   },
+   "selectedTopics": [],
+   "instructions": "",
+   "sections": [],
+   "updatedAt": "2026-10-14T10:29:19.354Z",
+   "studentNotification": {
+    "sentAt": "2026-10-14T10:14:17.447Z",
+    "batchId": ""
+   }
+  },
+  "oldUrl": "/lms/pages/courses/coursesdetailedview/6ac878fa82f86c20f025618d?restoreNodeId=6ace2cbc6cdb4a50a78c96c2&method=we-do&activity=assignment",
+  "newUrl": "/lms/pages/courses/coursesdetailedview/6ac878fa82f86c20f025618d?restoreNodeId=6ad0a8006da30f1d3f1030a4&method=we-do&activity=assignment"
+ }
+]
