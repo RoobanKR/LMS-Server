@@ -805,6 +805,9 @@ const evaluationMethodSchema = new mongoose.Schema(
     // Live interactive compiler: the student editor gets a Run button with a
     // live terminal (program waits for typed input). Run Testcase unchanged.
     liveInteraction: { type: Boolean, default: false },
+    // AI code review on Submit: the student editor asks "Evaluate your code
+    // with AI?" and a Yes adds an AI review to the results. Off = no question.
+    aiReview: { type: Boolean, default: false },
   },
   { _id: false }
 );
