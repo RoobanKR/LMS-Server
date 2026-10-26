@@ -26,4 +26,4 @@ const roleNameOf = async (user) => {
 const hiddenCourseFilter = async (user) =>
   HIDDEN_FOR.includes(await roleNameOf(user)) ? { hiddenFromLearners: { $ne: true } } : {};
 
-module.exports = { hiddenCourseFilter };
+module.exports = { hiddenCourseFilter, roleNameOf };

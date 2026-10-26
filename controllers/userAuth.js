@@ -1404,19 +1404,48 @@ exports.getUserAccessById = async (req, res) => {
   }
 };
 
-/**
- * Self-service profile update — photo and password ONLY.
- *
- * Deliberately separate from UpdateUser above rather than folded into it.
- * UpdateUser is the admin path: it takes a :userId and writes role, status,
- * permissions and placement. Teaching it to set passwords would hand anyone
- * who can reach it the ability to set SOMEONE ELSE'S password without knowing
- * it. This one ignores any id in the request and acts on req.user._id, and it
- * writes exactly two fields.
- *
- * The password change verifies the current one first, so an unattended logged-in
- * session cannot be used to lock the real owner out.
- */
+// Coding Analytics: each user connects their own platform handles. Public
+// usernames only — the page fetches the public stats for them.
+const CODING_PLATFORMS = ["leetcode", "codeforces", "codechef", "hackerrank", "atcoder"];
+
+exports.GetMyCodingPlatforms = async (req, res) => {
+  try {
+    const user = await User.findById(req.user?._id).select("codingPlatforms").lean();
+    const platforms = {};
+    CODING_PLATFORMS.forEach((p) => { if (user?.codingPlatforms?.[p]) platforms[p] = user.codingPlatforms[p]; });
+    return res.status(200).json({ platforms });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal Server Error" }] });
+  }
+};
+
+// { platform, username } — an empty username disconnects that platform.
+exports.SetMyCodingPlatform = async (req, res) => {
+  try {
+    const platform = String(req.body?.platform || "");
+    const username = String(req.body?.username || "").trim();
+    if (!CODING_PLATFORMS.includes(platform)) {
+      return res.status(400).json({ message: [{ key: "error", value: "Unknown platform" }] });
+    }
+    if (username && (username.length > 60 || !/^[A-Za-z0-9_.-]+$/.test(username))) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Enter your username only — letters, numbers, _ . - (no links or spaces)" }],
+      });
+    }
+    const update = username
+      ? { $set: { [`codingPlatforms.${platform}`]: username } }
+      : { $unset: { [`codingPlatforms.${platform}`]: "" } };
+    const user = await User.findByIdAndUpdate(req.user?._id, update, { new: true }).select("codingPlatforms").lean();
+    const platforms = {};
+    CODING_PLATFORMS.forEach((p) => { if (user?.codingPlatforms?.[p]) platforms[p] = user.codingPlatforms[p]; });
+    return res.status(200).json({ platforms });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ message: [{ key: "error", value: "Internal Server Error" }] });
+  }
+};
+
 // First login (see UserSignIn): the student replaces the password they were
 // sent with their own. Only while the account still carries mustSetPassword —
 // any later change goes through UpdateMyProfile, which asks for the current one.
@@ -1461,6 +1490,19 @@ exports.SetFirstPassword = async (req, res) => {
   }
 };
 
+/**
+ * Self-service profile update — photo and password ONLY.
+ *
+ * Deliberately separate from UpdateUser above rather than folded into it.
+ * UpdateUser is the admin path: it takes a :userId and writes role, status,
+ * permissions and placement. Teaching it to set passwords would hand anyone
+ * who can reach it the ability to set SOMEONE ELSE'S password without knowing
+ * it. This one ignores any id in the request and acts on req.user._id, and it
+ * writes exactly two fields.
+ *
+ * The password change verifies the current one first, so an unattended logged-in
+ * session cannot be used to lock the real owner out.
+ */
 exports.UpdateMyProfile = async (req, res) => {
   try {
     const userId = req.user?._id;

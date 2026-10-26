@@ -11,6 +11,8 @@ const {
   UpdateUser,
   UpdateMyProfile,
   SetFirstPassword,
+  GetMyCodingPlatforms,
+  SetMyCodingPlatform,
   DeleteUser,
   UserLogout,
   UserLogoutAll,
@@ -51,6 +53,9 @@ router.put('/update/users/:userId',userAuth, UpdateUser);
 router.put('/user/me/profile', userAuth, UpdateMyProfile);
 // First login: the student sets their own password (only while mustSetPassword).
 router.put('/user/me/first-password', userAuth, SetFirstPassword);
+// Coding Analytics: the caller's own platform handles.
+router.get('/user/coding-platforms', userAuth, GetMyCodingPlatforms);
+router.put('/user/coding-platforms', userAuth, SetMyCodingPlatform);
 router.delete('/delete/users/:userId',userAuth, DeleteUser)
 
 

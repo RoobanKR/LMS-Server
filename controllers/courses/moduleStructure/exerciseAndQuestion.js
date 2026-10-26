@@ -7186,6 +7186,12 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         (student.role && student.role.toLowerCase().includes(searchLower))
       );
     }
+    // A student opening the grade book sees only their own row — before
+    // pagination, so their row can't fall on a page they never get.
+    const callerIsStudent = (await require('../../../utils/courseVisibility').roleNameOf(req.user)) === 'student';
+    if (callerIsStudent) {
+      filteredStudents = filteredStudents.filter((s) => String(s._id) === String(req.user._id));
+    }
 
     // 6. Apply sorting
     filteredStudents.sort((a, b) => {
@@ -7333,7 +7339,8 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
 
         students: paginatedStudents,
 
-        statistics: exerciseStatistics,
+        // Class-wide pass/fail and score figures are for staff only.
+        statistics: callerIsStudent ? null : exerciseStatistics,
 
         pagination: {
           page: parseInt(page),
@@ -7401,6 +7408,14 @@ exports.getStudentExerciseQuestions = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "courseId, studentId, and exerciseId are required"
+      });
+    }
+    // A student may open only their own answers and marks.
+    if ((await require('../../../utils/courseVisibility').roleNameOf(req.user)) === 'student'
+      && String(studentId) !== String(req.user?._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only view your own grades"
       });
     }
 

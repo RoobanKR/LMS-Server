@@ -703,6 +703,16 @@ const userSchema = new mongoose.Schema({
   mustSetPassword: {
     type: Boolean,
   },
+  // Coding Analytics: the user's own public handles on each coding platform
+  // (set from the Coding Analytics page — GetMyCodingPlatforms /
+  // SetMyCodingPlatform). Public usernames only, no keys.
+  codingPlatforms: {
+    leetcode: { type: String, trim: true },
+    codeforces: { type: String, trim: true },
+    codechef: { type: String, trim: true },
+    hackerrank: { type: String, trim: true },
+    atcoder: { type: String, trim: true },
+  },
   profile: {
     type: String,
   },
