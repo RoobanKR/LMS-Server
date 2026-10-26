@@ -26,4 +26,9 @@ const roleNameOf = async (user) => {
 const hiddenCourseFilter = async (user) =>
   HIDDEN_FOR.includes(await roleNameOf(user)) ? { hiddenFromLearners: { $ne: true } } : {};
 
-module.exports = { hiddenCourseFilter, roleNameOf };
+// The roles that teach batches — the same set the client gives the trainer
+// shell (usesTrainerShellRole).
+const isTrainerRoleName = (name) =>
+  ["trainer", "staff", "teacher"].includes(String(name || "").toLowerCase().replace(/[\s_-]/g, ""));
+
+module.exports = { hiddenCourseFilter, roleNameOf, isTrainerRoleName };

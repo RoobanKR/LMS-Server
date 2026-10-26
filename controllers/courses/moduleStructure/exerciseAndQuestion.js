@@ -38,7 +38,8 @@ const {
   locateExerciseContainer,
   COURSE_BATCH_FIELDS,
 } = require("../../../utils/pedagogyScope");
-const { scopeNodePedagogy, resolveViewerBatchId } = require("../../../utils/batchResources");
+const { scopeNodePedagogy, resolveViewerBatchId, batchMatesOf } = require("../../../utils/batchResources");
+const { roleNameOf, isTrainerRoleName } = require("../../../utils/courseVisibility");
 const { stripHiddenOnQuestion } = require("../../../services/testCaseVisibility");
 const { cleanLanguageVersions } = require("../../../services/codeJudge");
 const { isStaffUser } = require("../../../utils/staffAccess");
@@ -6988,11 +6989,20 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     // in JS afterward. Scoping the query itself to the array-element match
     // returns the identical final set (the JS filter below checks exactly
     // this condition) without paying for every other tenant's users.
-    const enrolledInCourse = await User.find({
+    let enrolledInCourse = await User.find({
       'courses.courseId': courseId
     })
       .select('_id firstName lastName email profile phone status createdAt role courses')
       .lean();
+
+    // A trainer sees only the students of the batches they teach on this
+    // course — narrowed here, so the rows, statistics and totals below all
+    // cover just those batches.
+    const callerRole = await roleNameOf(req.user);
+    if (isTrainerRoleName(callerRole)) {
+      const myBatches = batchMatesOf(course, req.user._id);
+      enrolledInCourse = enrolledInCourse.filter((u) => myBatches.has(String(u._id)));
+    }
 
     console.log(`👥 ${enrolledInCourse.length} users enrolled in course ${courseId}`);
 
@@ -7188,7 +7198,7 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     }
     // A student opening the grade book sees only their own row — before
     // pagination, so their row can't fall on a page they never get.
-    const callerIsStudent = (await require('../../../utils/courseVisibility').roleNameOf(req.user)) === 'student';
+    const callerIsStudent = callerRole === 'student';
     if (callerIsStudent) {
       filteredStudents = filteredStudents.filter((s) => String(s._id) === String(req.user._id));
     }
@@ -7410,13 +7420,23 @@ exports.getStudentExerciseQuestions = async (req, res) => {
         message: "courseId, studentId, and exerciseId are required"
       });
     }
-    // A student may open only their own answers and marks.
-    if ((await require('../../../utils/courseVisibility').roleNameOf(req.user)) === 'student'
-      && String(studentId) !== String(req.user?._id)) {
+    // A student may open only their own answers and marks, and a trainer only
+    // those of a student in one of their batches on this course.
+    const callerRole = await roleNameOf(req.user);
+    if (callerRole === 'student' && String(studentId) !== String(req.user?._id)) {
       return res.status(403).json({
         success: false,
         message: "You can only view your own grades"
       });
+    }
+    if (isTrainerRoleName(callerRole)) {
+      const rosterCourse = await CourseStructure.findById(courseId).select('batchAndParticipants').lean();
+      if (!batchMatesOf(rosterCourse, req.user._id).has(String(studentId))) {
+        return res.status(403).json({
+          success: false,
+          message: "This student is not in your batch"
+        });
+      }
     }
 
     // 2. Get student details. This handler used to run THREE separate

@@ -382,6 +382,22 @@ const getUserBatchId = (course, userId) => {
   return "";
 };
 
+/**
+ * Everyone who shares a batch with this user on the course, the user included
+ * — for a trainer, the students they teach. A trainer on several batches gets
+ * all of them; someone in no batch gets an empty set.
+ */
+const batchMatesOf = (course, userId) => {
+  const target = String(userId || "");
+  const ids = new Set();
+  if (!target) return ids;
+  for (const batch of course?.batchAndParticipants || []) {
+    const members = (batch.users || []).map((u) => String(u?.user?._id || u?.user || ""));
+    if (members.includes(target)) members.forEach((id) => id && ids.add(id));
+  }
+  return ids;
+};
+
 // The Role model stores `originalRole` (the platform role) and `renameRole`
 // (the institution's own label for it), and different call sites have
 // historically written `roleName`/`roleValue` too. Check them all — a missed
@@ -613,6 +629,7 @@ module.exports = {
   resolveBatchId,
   getBatchName,
   getUserBatchId,
+  batchMatesOf,
   isStudentUser,
   resolveViewerBatchId,
   resolvePedagogyTarget,
