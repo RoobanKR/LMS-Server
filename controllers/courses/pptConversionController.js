@@ -1,7 +1,7 @@
 const path = require('path')
 const fs = require('fs-extra')
 const axios = require('axios')
-const { execFile } = require('child_process')
+const { execFile, spawn } = require('child_process')
 const { promisify } = require('util')
 const os = require('os')
 const crypto = require('crypto')
@@ -189,6 +189,25 @@ const SHOW_CONTROLLER = `<script type="text/ecmascript"><![CDATA[
 
 const SHOW_PROFILE_TEMPLATE = path.join(os.tmpdir(), 'lms-libreoffice-profile')
 
+// LibreOffice gets this long per deck. Heavy decks (dozens of image-filled
+// slides) can take far longer; those are given up and remembered below.
+const SHOW_TIMEOUT_MS = 180000
+// Requests answer well inside nginx's 60 s proxy timeout: a deck still
+// converting gets { pending: true } and the viewer asks again, joining the run.
+const SHOW_WAIT_MS = 20000
+
+const VIEWER_HINT = 'Choose Microsoft Office Online viewer or Default for PPT in Course Setup › Resource Type.'
+const SHOW_FAILURE_MESSAGES = {
+  unreadable: `This PowerPoint file is damaged or incomplete, so it can't be opened. Re-upload a complete copy of the file.`,
+  timeout: `This presentation is too large for the LibreOffice viewer — converting it took longer than ${SHOW_TIMEOUT_MS / 60000} minutes. ${VIEWER_HINT}`,
+  failed: `LibreOffice couldn't convert this presentation. ${VIEWER_HINT}`,
+}
+
+// A failure that comes from the deck itself (damaged, too heavy, or one
+// LibreOffice can't convert). These are remembered; the raw detail is logged.
+const showError = (reason, detail) =>
+  Object.assign(new Error(SHOW_FAILURE_MESSAGES[reason]), { showReason: reason, detail })
+
 // One stored show per deck URL — the path is derived from it, so a cache
 // check is a file-exists check and needs no DB field.
 function showPathFor(pptUrl) {
@@ -196,55 +215,132 @@ function showPathFor(pptUrl) {
   return `ppt-shows/show_${hash}.svg`
 }
 
-async function convertDocumentToShow({ buffer, ext, cacheKey }) {
-  const objectPath = cacheKey ? showPathFor(cacheKey) : `ppt-shows/show_${Date.now()}.svg`
+// A failed deck leaves this marker where its show would be, so reopening it
+// answers with the failure instead of running LibreOffice again. A re-upload
+// is a new URL, so it gets a fresh try.
+const showFailurePathFor = (pptUrl) => showPathFor(pptUrl).replace(/\.svg$/, '.failed.json')
+
+async function readShowFailure(pptUrl) {
+  try { return await fs.readJson(diskPathFor(showFailurePathFor(pptUrl))) } catch { return null }
+}
+
+async function rememberShowFailure(pptUrl, err) {
+  console.error(`❌ PPT slideshow failed (${err.showReason}), remembered for ${pptUrl}:`, err.detail)
+  await storage.from('smartlms').upload(
+    showFailurePathFor(pptUrl),
+    JSON.stringify({ reason: err.showReason, failedAt: new Date().toISOString() })
+  )
+}
+
+// Runs LibreOffice and, on timeout, kills its whole process tree: `soffice`
+// is only a launcher, and killing just that (as execFile's timeout does)
+// leaves the real LibreOffice running — and using CPU — after the run was
+// given up. Resolves with LibreOffice's console output.
+function runSoffice(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveSoffice(), args, {
+      detached: process.platform !== 'win32', // own process group, killed as one
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let output = ''
+    let settled = false
+    let timedOut = false
+    child.stdout.on('data', chunk => { output += chunk })
+    child.stderr.on('data', chunk => { output += chunk })
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']).on('error', () => {})
+        else process.kill(-child.pid, 'SIGKILL')
+      } catch {}
+    }, SHOW_TIMEOUT_MS)
+    const settle = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn(value)
+    }
+    child.on('error', err => settle(reject, err.code === 'ENOENT' ? new Error(LIBREOFFICE_MISSING) : err))
+    child.on('close', () => timedOut
+      ? settle(reject, showError('timeout', `LibreOffice stopped after ${SHOW_TIMEOUT_MS / 1000} s`))
+      : settle(resolve, output))
+  })
+}
+
+// The deck's bytes: from local storage when the link points there (old
+// Supabase / Cloudinary links whose file was moved in included), else downloaded.
+async function loadDeck(pptUrl) {
+  let buffer = await readStoredFile(pptUrl).catch(() => null)
+  if (!buffer) {
+    const legacyPath = storagePathFromUrl(pptUrl)
+    try { if (legacyPath) buffer = await fs.readFile(diskPathFor(legacyPath)) } catch {}
+  }
+  if (buffer) return buffer
+  try {
+    const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
+    return Buffer.from(response.data)
+  } catch (err) {
+    throw new Error(`The presentation file could not be downloaded${err.response ? ` (HTTP ${err.response.status})` : ''}. Re-upload it and try again.`)
+  }
+}
+
+// Deck bytes → LibreOffice SVG slideshow (with the Prev / Next controller) in storage.
+async function convertDocumentToShow({ buffer, ext, objectPath }) {
+  // .pptx / .ppsx / .odp are ZIPs ("PK\3\4"), .ppt is an OLE file. Anything
+  // else (an error page from a dead link, say) would only reach LibreOffice
+  // as "source file could not be loaded".
+  const signature = buffer.subarray(0, 4).toString('hex')
+  if (signature !== '504b0304' && signature !== 'd0cf11e0') {
+    throw showError('unreadable', `${buffer.length} bytes that are not a PowerPoint file`)
+  }
+
+  const tempDir = path.join(os.tmpdir(), `pptshow_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
+  try {
+    await fs.ensureDir(tempDir)
+    const inputPath = path.join(tempDir, `presentation.${ext}`)
+    await fs.writeFile(inputPath, buffer)
+    // A LibreOffice profile of its own per run: with the shared profile, a
+    // LibreOffice that is already running (the upload-time slide-image
+    // conversion, or one left behind by a timed-out run) takes the job over
+    // and fails it with "source file could not be loaded". Building a profile
+    // takes LibreOffice a long first start, so the first one is kept as a
+    // template and copied in for every later run.
+    const profileDir = path.join(tempDir, 'lo-profile')
+    if (await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(SHOW_PROFILE_TEMPLATE, profileDir).catch(() => {})
+    const output = await runSoffice(
+      [`-env:UserInstallation=${pathToFileURL(profileDir).href}`, '--headless', '--norestore', '--convert-to', 'svg', '--outdir', tempDir, inputPath]
+    )
+    if (!await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(profileDir, SHOW_PROFILE_TEMPLATE).catch(() => {})
+
+    const svg = await fs.readFile(path.join(tempDir, 'presentation.svg'), 'utf8').catch(() => '')
+    const end = svg.lastIndexOf('</svg>')
+    if (end < 0) {
+      throw showError(/source file could not be loaded/i.test(output) ? 'unreadable' : 'failed', output.trim() || 'LibreOffice made no slideshow file')
+    }
+    const { error } = await storage.from('smartlms').upload(objectPath, svg.slice(0, end) + SHOW_CONTROLLER + svg.slice(end))
+    if (error) throw error
+    return { showUrl: publicUrlFor(objectPath) }
+  } finally {
+    await fs.remove(tempDir).catch(() => {})
+  }
+}
+
+// One LibreOffice run per deck at a time; a request for a deck that is already
+// converting joins that run. A failure that comes from the deck is remembered
+// before the run counts as finished.
+function startShowConversion(pptUrl) {
+  const objectPath = showPathFor(pptUrl)
   const flightKey = `show:${objectPath}`
   if (inFlightConversions.has(flightKey)) return inFlightConversions.get(flightKey)
 
   const promise = (async () => {
-    // .pptx / .ppsx / .odp are ZIPs ("PK\3\4"), .ppt is an OLE file. Anything
-    // else (an error page from a dead link, say) would only reach LibreOffice
-    // as "source file could not be loaded".
-    const signature = buffer.subarray(0, 4).toString('hex')
-    if (signature !== '504b0304' && signature !== 'd0cf11e0') {
-      throw new Error(`The presentation file could not be read — the server got ${buffer.length} bytes that are not a PowerPoint file. Re-upload the PPT and try again.`)
-    }
-
-    const tempDir = path.join(os.tmpdir(), `pptshow_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
+    const buffer = await loadDeck(pptUrl)
+    const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
     try {
-      await fs.ensureDir(tempDir)
-      const inputPath = path.join(tempDir, `presentation.${ext}`)
-      await fs.writeFile(inputPath, buffer)
-      // A LibreOffice profile of its own per run: with the shared profile, a
-      // LibreOffice that is already running (the upload-time slide-image
-      // conversion, or one left behind by a timed-out run) takes the job over
-      // and fails it with "source file could not be loaded". Building a profile
-      // takes LibreOffice a long first start, so the first one is kept as a
-      // template and copied in for every later run.
-      const profileDir = path.join(tempDir, 'lo-profile')
-      if (await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(SHOW_PROFILE_TEMPLATE, profileDir).catch(() => {})
-      try {
-        await execFileAsync(
-          resolveSoffice(),
-          [`-env:UserInstallation=${pathToFileURL(profileDir).href}`, '--headless', '--norestore', '--convert-to', 'svg', '--outdir', tempDir, inputPath],
-          { timeout: 180000 }
-        )
-      } catch (err) {
-        if (err && err.code === 'ENOENT') throw new Error(LIBREOFFICE_MISSING)
-        throw err
-      }
-      if (!await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(profileDir, SHOW_PROFILE_TEMPLATE).catch(() => {})
-      const svgPath = path.join(tempDir, 'presentation.svg')
-      if (!await fs.pathExists(svgPath)) throw new Error('LibreOffice slideshow conversion failed')
-
-      const svg = await fs.readFile(svgPath, 'utf8')
-      const end = svg.lastIndexOf('</svg>')
-      if (end < 0) throw new Error('LibreOffice slideshow conversion failed')
-      const { error } = await storage.from('smartlms').upload(objectPath, svg.slice(0, end) + SHOW_CONTROLLER + svg.slice(end))
-      if (error) throw error
-      return { showUrl: publicUrlFor(objectPath) }
-    } finally {
-      await fs.remove(tempDir).catch(() => {})
+      return await convertDocumentToShow({ buffer, ext: m ? m[1].toLowerCase() : 'pptx', objectPath })
+    } catch (err) {
+      if (err.showReason) await rememberShowFailure(pptUrl, err).catch(() => {})
+      throw err
     }
   })()
 
@@ -253,7 +349,10 @@ async function convertDocumentToShow({ buffer, ext, cacheKey }) {
   return promise
 }
 
-// POST /api/ppt/convert-show { pptUrl } → { success, showUrl }
+// POST /api/ppt/convert-show { pptUrl }
+//   200 { success: true, showUrl }   the slideshow is ready
+//   202 { pending: true }            still converting — ask again
+//   422 { failed: true, error }      this deck can't be shown (remembered)
 async function convertPptToShow(req, res) {
   const pptUrl = req.body?.pptUrl
   if (!pptUrl) return res.status(400).json({ success: false, error: 'pptUrl is required' })
@@ -263,25 +362,21 @@ async function convertPptToShow(req, res) {
     if (await fs.pathExists(diskPathFor(objectPath))) {
       return res.json({ success: true, showUrl: publicUrlFor(objectPath), fromCache: true })
     }
-
-    const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
-    const ext = m ? m[1].toLowerCase() : 'pptx'
-    let buffer = await readStoredFile(pptUrl).catch(() => null)
-    if (!buffer) {
-      // Old Supabase / Cloudinary links whose file was moved into local storage
-      const legacyPath = storagePathFromUrl(pptUrl)
-      if (legacyPath) buffer = await fs.readFile(diskPathFor(legacyPath)).catch(() => null)
-    }
-    if (!buffer) {
-      const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
-      buffer = Buffer.from(response.data)
+    const failure = await readShowFailure(pptUrl)
+    if (failure) {
+      return res.status(422).json({ success: false, failed: true, error: SHOW_FAILURE_MESSAGES[failure.reason] || SHOW_FAILURE_MESSAGES.failed })
     }
 
-    const { showUrl } = await convertDocumentToShow({ buffer, ext, cacheKey: pptUrl })
-    res.json({ success: true, showUrl })
+    let timer
+    const result = await Promise.race([
+      startShowConversion(pptUrl),
+      new Promise(resolve => { timer = setTimeout(resolve, SHOW_WAIT_MS) }),
+    ]).finally(() => clearTimeout(timer))
+    if (!result) return res.status(202).json({ success: false, pending: true })
+    res.json({ success: true, showUrl: result.showUrl })
   } catch (err) {
-    console.error('❌ PPT slideshow conversion error:', err.message)
-    res.status(500).json({ success: false, error: err.message })
+    if (!err.showReason) console.error('❌ PPT slideshow conversion error:', err.message)
+    res.status(err.showReason ? 422 : 500).json({ success: false, failed: !!err.showReason, error: err.message })
   }
 }
 
@@ -289,7 +384,7 @@ async function convertPptToShow(req, res) {
 // pile up. Safe to fire-and-forget.
 async function cleanupConvertedSlides(pptUrl) {
   if (!pptUrl) return
-  storage.from('smartlms').remove([showPathFor(pptUrl)]).catch(() => {})
+  storage.from('smartlms').remove([showPathFor(pptUrl), showFailurePathFor(pptUrl)]).catch(() => {})
   const cached = await PptCache.findOneAndDelete({ pptUrl })
   if (!cached || !Array.isArray(cached.slideImages)) return
   await Promise.all(
@@ -357,4 +452,4 @@ async function convertPptToImages(req, res) {
   }
 }
 
-module.exports = { convertPptToImages, convertDocumentToSlides, cleanupConvertedSlides, convertPptToShow, convertDocumentToShow }
+module.exports = { convertPptToImages, convertDocumentToSlides, cleanupConvertedSlides, convertPptToShow }
