@@ -703,6 +703,12 @@ const userSchema = new mongoose.Schema({
   mustSetPassword: {
     type: Boolean,
   },
+  // When the user first signed in. Set at sign-in (UserSignIn) and, for
+  // accounts that signed in before this field existed, filled from their
+  // earliest `login` activity record (utils/firstLogin). Missing = never yet.
+  firstLoginAt: {
+    type: Date,
+  },
   // Coding Analytics: the user's own public handles on each coding platform
   // (set from the Coding Analytics page — GetMyCodingPlatforms /
   // SetMyCodingPlatform). Public usernames only, no keys.

@@ -74,8 +74,12 @@ const degreeAndDepartmentRoutes = require("./routes/dynamicContent/degreeAndDepa
 const attendanceRoutes = require("./routes/courses/attendanceRoutes");
 const glossaryRoutes = require("./routes/courses/glossaryRoutes");
 // Use progress routes
-// Connect Database
-connectDB();
+// Connect Database. Once connected, fill `firstLoginAt` for users who signed
+// in before that field existed (utils/firstLogin) — a no-op after the first run.
+connectDB()
+  .then(() => require("./utils/firstLogin").backfillFirstLoginAt())
+  .then((n) => { if (n) console.log(`First login recorded for ${n} existing user(s) from their sign-in history`); })
+  .catch((err) => console.error("First-login backfill failed:", err.message));
 app.use('/Developers Backup/LMS', express.static('\\\\192.168.1.4\\Developers Backup\\LMS'));
 
 // User content lives at STORAGE_DIR, which can be mounted outside the deployed

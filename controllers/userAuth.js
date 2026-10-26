@@ -443,6 +443,12 @@ module.exports.UserSignIn = async (req, res) => {
     });
     await newToken.save();
 
+    // First sign-in time, kept on the account for User Management (see
+    // utils/firstLogin). Fire-and-forget, like the activity log below.
+    if (!user.firstLoginAt) {
+      require("../utils/firstLogin").recordFirstLogin(user._id).catch(() => {});
+    }
+
     // Fire-and-forget login activity log — never blocks the login response
     const clientInfo = req.body.clientInfo || {};
     const rawIp = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
@@ -673,6 +679,8 @@ async function getUserAccessPaginated(req, res, baseFilter) {
     // Multi-select filters added for the User Management filter bar. Each is a
     // comma-separated list; absent means "no filter" as everywhere else here.
     clients, services, serviceModels, statuses,
+    // 'yes' = has signed in at least once, 'no' = never; absent = both.
+    firstLogin,
   } = req.query;
 
   // Export mode. The page's "Export all" writes a CSV of every row matching the
@@ -793,6 +801,10 @@ async function getUserAccessPaginated(req, res, baseFilter) {
     andClauses.push({ status: { $in: wanted } });
   }
 
+  // First login — set means they have signed in (see utils/firstLogin).
+  if (firstLogin === 'yes') andClauses.push({ firstLoginAt: { $ne: null } });
+  if (firstLogin === 'no') andClauses.push({ firstLoginAt: null });
+
   if (andClauses.length) filter.$and = andClauses;
 
   // Sort. The page's default (no sortKey) is newest-first, which is what the
@@ -822,6 +834,8 @@ async function getUserAccessPaginated(req, res, baseFilter) {
   const SORTABLE = {
     name: { firstName: dir, lastName: dir, ...tie },
     phone: { phone: dir, ...tie },
+    // Never-signed-in users (no value) sort first ascending, last descending.
+    firstLogin: { firstLoginAt: dir, ...tie },
   };
   const sort = SORTABLE[sortKey] || { createdAt: -1, _id: -1 };
 
@@ -838,7 +852,7 @@ async function getUserAccessPaginated(req, res, baseFilter) {
     // the legacy first enrolment; `services[]` holds any later ones, and
     // `clientId`/`serviceMappingId` are what the populates below resolve.
     projection = 'firstName lastName email phone gender role batch degree '
-      + 'department semester section clientName clientId status '
+      + 'department semester section clientName clientId status firstLoginAt '
       + 'serviceModel serviceMappingId services';
   }
 
