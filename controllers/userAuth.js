@@ -427,6 +427,15 @@ module.exports.UserSignIn = async (req, res) => {
       await User.updateOne({ _id: user._id }, { firstTimeLoginDone: false });
     }
 
+    // First login: a student who has never logged in (no login in the activity
+    // log) sets their own password before anything else. Decided once and kept
+    // on the account, so leaving the set-password page doesn't skip it.
+    let mustSetPassword = user.mustSetPassword === true;
+    if (user.mustSetPassword === undefined && String(user.role?.originalRole || "").toLowerCase() === "student") {
+      mustSetPassword = !(await ActivityLog.exists({ userId: user._id, action: "login" }));
+      await User.updateOne({ _id: user._id }, { mustSetPassword });
+    }
+
     const token = createSecretToken(user._id, "2d");
 
     const newToken = new tokenModal({
@@ -465,6 +474,7 @@ module.exports.UserSignIn = async (req, res) => {
       lastName: user.lastName,
       role: user.role,
       firstTimeLoginDone: isFirstTimeLogin,
+      mustSetPassword,
       institution: user.institution._id,
       status: user.status,
       permissions:user.permissions,
@@ -1407,6 +1417,50 @@ exports.getUserAccessById = async (req, res) => {
  * The password change verifies the current one first, so an unattended logged-in
  * session cannot be used to lock the real owner out.
  */
+// First login (see UserSignIn): the student replaces the password they were
+// sent with their own. Only while the account still carries mustSetPassword —
+// any later change goes through UpdateMyProfile, which asks for the current one.
+exports.SetFirstPassword = async (req, res) => {
+  try {
+    const user = await User.findById(req.user?._id).select("password mustSetPassword");
+    if (!user) {
+      return res.status(404).json({
+        message: [{ key: "error", value: "User not found" }],
+      });
+    }
+    if (user.mustSetPassword !== true) {
+      return res.status(409).json({
+        message: [{ key: "error", value: "Your password is already set. Change it from your profile." }],
+      });
+    }
+    const newPassword = String(req.body?.newPassword || "");
+    if (newPassword.length < 8) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "New password must be at least 8 characters" }],
+      });
+    }
+    if (await bcrypt.compare(newPassword, user.password)) {
+      return res.status(400).json({
+        message: [{ key: "error", value: "Choose a password different from the one you were sent" }],
+      });
+    }
+    // findByIdAndUpdate skips the schema's hash-on-save hook, so hash here with
+    // the same cost factor (see UpdateMyProfile).
+    await User.findByIdAndUpdate(user._id, {
+      password: await bcrypt.hash(newPassword, 12),
+      mustSetPassword: false,
+    });
+    return res.status(200).json({
+      message: [{ key: "success", value: "Your password is set" }],
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      message: [{ key: "error", value: "Internal Server Error" }],
+    });
+  }
+};
+
 exports.UpdateMyProfile = async (req, res) => {
   try {
     const userId = req.user?._id;

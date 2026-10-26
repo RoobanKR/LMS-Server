@@ -696,6 +696,13 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: [true, "Your password is required"],
   },
+  // First login: true while a student still has the password they were sent
+  // and must set their own (client /set-password). Decided at their first
+  // login with this field in place (see UserSignIn) and cleared only by
+  // SetFirstPassword. No default on purpose — missing means "not decided yet".
+  mustSetPassword: {
+    type: Boolean,
+  },
   profile: {
     type: String,
   },

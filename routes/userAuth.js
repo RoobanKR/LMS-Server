@@ -10,6 +10,7 @@ const {
   verifyToken,
   UpdateUser,
   UpdateMyProfile,
+  SetFirstPassword,
   DeleteUser,
   UserLogout,
   UserLogoutAll,
@@ -48,6 +49,8 @@ router.put('/update/users/:userId',userAuth, UpdateUser);
 // Self-service: photo + password for the CALLER only. Takes no :userId —
 // see UpdateMyProfile for why that separation matters.
 router.put('/user/me/profile', userAuth, UpdateMyProfile);
+// First login: the student sets their own password (only while mustSetPassword).
+router.put('/user/me/first-password', userAuth, SetFirstPassword);
 router.delete('/delete/users/:userId',userAuth, DeleteUser)
 
 
