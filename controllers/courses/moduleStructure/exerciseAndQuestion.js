@@ -6995,6 +6995,27 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
       .select('_id firstName lastName email profile phone status createdAt role courses')
       .lean();
 
+    // Students put into a batch who haven't opened the course yet have no
+    // `courses` entry, so the query above misses them. Add them from the
+    // roster (students only — trainers sit in the batches too) so the grade
+    // book lists the whole class, the newcomers as Not Started.
+    const listedIds = new Set(enrolledInCourse.map((u) => String(u._id)));
+    const rosterOnlyIds = [...new Set((course.batchAndParticipants || [])
+      .filter((b) => !b?.archivedBySync)
+      .flatMap((b) => (b.users || []).map((m) => String(m?.user?._id || m?.user || ''))))]
+      .filter((id) => id && !listedIds.has(id));
+    if (rosterOnlyIds.length) {
+      const rosterOnly = await User.find({ _id: { $in: rosterOnlyIds } })
+        .select('_id firstName lastName email profile phone status createdAt role courses')
+        .lean();
+      const roleNames = new Map();
+      for (const u of rosterOnly) {
+        const key = String(u.role || '');
+        if (!roleNames.has(key)) roleNames.set(key, await roleNameOf(u));
+        if (roleNames.get(key) === 'student') enrolledInCourse.push(u);
+      }
+    }
+
     // A trainer sees only the students of the batches they teach on this
     // course — narrowed here, so the rows, statistics and totals below all
     // cover just those batches.
@@ -7005,6 +7026,11 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
     }
 
     console.log(`👥 ${enrolledInCourse.length} users enrolled in course ${courseId}`);
+
+    // One Role read per distinct role, not per user — the roster can be large
+    // and the Overall report asks for every exercise at once. The promise is
+    // cached, so users processed in parallel share the same read.
+    const roleDocCache = new Map();
 
     // 4. Process each user to find their exercise progress with Pass/Fail
     const studentsWithProgress = await Promise.all(
@@ -7123,7 +7149,9 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
         let roleName = 'Student';
         if (user.role) {
           if (mongoose.Types.ObjectId.isValid(user.role)) {
-            const roleDoc = await mongoose.model('Role').findById(user.role).lean();
+            const roleKey = String(user.role);
+            if (!roleDocCache.has(roleKey)) roleDocCache.set(roleKey, mongoose.model('Role').findById(user.role).lean().exec());
+            const roleDoc = await roleDocCache.get(roleKey);
             roleName = roleDoc?.renameRole || roleDoc?.originalRole || 'Student';
           } else if (typeof user.role === 'string') {
             roleName = user.role;
@@ -7488,10 +7516,12 @@ exports.getStudentExerciseQuestions = async (req, res) => {
     }
     const batchCourseForScan = course;
 
-    // 4. Check if student is enrolled
+    // 4. Check if student is enrolled — a progress entry (they have opened the
+    // course) or a place on its roster (put into a batch but not started yet;
+    // their questions then all come back unattempted).
     const isEnrolled = student.courses?.some(c =>
       c.courseId && c.courseId.toString() === courseId
-    );
+    ) || batchMatesOf(course, studentId).has(String(studentId));
 
     if (!isEnrolled) {
       return res.status(404).json({
