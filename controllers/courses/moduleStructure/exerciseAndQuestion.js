@@ -7401,6 +7401,18 @@ exports.getEnrolledStudentsForExercise = async (req, res) => {
 
 
 // Get exercise questions with student's answers for admin/coordinator view
+// A stored evaluation breakdown as this viewer may see it: for a student, a
+// hidden test case keeps its pass / fail but not its input or expected output.
+const breakdownForViewer = (bd, viewerIsStudent) => {
+  if (!bd || !viewerIsStudent) return bd || null;
+  const hideCase = (c) => (c && c.hidden ? { index: c.index, passed: !!c.passed, hidden: true } : c);
+  return {
+    ...bd,
+    ...(bd.testcase && { testcase: { ...bd.testcase, cases: (bd.testcase.cases || []).map(hideCase) } }),
+    ...(bd.ai && { ai: { ...bd.ai, testCases: (bd.ai.testCases || []).map(hideCase) } }),
+  };
+};
+
 exports.getStudentExerciseQuestions = async (req, res) => {
   try {
     const { courseId, studentId, exerciseId } = req.params;
@@ -7438,6 +7450,12 @@ exports.getStudentExerciseQuestions = async (req, res) => {
         });
       }
     }
+    // A student gets their own answers and marks — never the model solutions,
+    // hints or test cases of an exercise that may still be open.
+    const viewerIsStudent = callerRole === 'student';
+    const showAnswerKey = includeCorrectAnswers === 'true' && !viewerIsStudent;
+    const showHints = includeHints === 'true' && !viewerIsStudent;
+    const showTestCases = includeTestCases === 'true' && !viewerIsStudent;
 
     // 2. Get student details. This handler used to run THREE separate
     // User.findById(studentId) queries for the same document (display
@@ -7719,6 +7737,10 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           status: studentAnswer.status || 'attempted',
           attempts: studentAnswer.attempts || 1,
           feedback: studentAnswer.feedback || '',
+          // Uploads (Others questions) and the test-case / AI evaluation —
+          // shown under the answer in the grade book's answer view.
+          othersFiles: studentAnswer.othersFiles || [],
+          evaluationBreakdown: breakdownForViewer(studentAnswer.evaluationBreakdown, viewerIsStudent),
 
           // Submission details
           submittedAt: studentAnswer.submittedAt,
@@ -7728,19 +7750,26 @@ exports.getStudentExerciseQuestions = async (req, res) => {
           updatedAt: studentAnswer.updatedAt
         } : null,
 
+        // MCQ choices, so the answer view can mark the one picked. Which is
+        // correct is for staff only.
+        options: (question.mcqQuestionOptions || []).map((o) => ({
+          text: o.text || '',
+          ...(!viewerIsStudent && { isCorrect: !!o.isCorrect }),
+        })),
+
         // Question details (conditionally included)
-        ...(includeCorrectAnswers === 'true' && {
+        ...(showAnswerKey && {
           sampleInput: question.sampleInput || '',
           sampleOutput: question.sampleOutput || '',
           constraints: question.constraints || [],
           solutions: question.solutions || {}
         }),
 
-        ...(includeHints === 'true' && {
+        ...(showHints && {
           hints: question.hints || []
         }),
 
-        ...(includeTestCases === 'true' && {
+        ...(showTestCases && {
           testCases: question.testCases || []
         })
       };
