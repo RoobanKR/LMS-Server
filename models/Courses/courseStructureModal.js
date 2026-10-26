@@ -411,6 +411,13 @@ const courseStructureSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  // Hidden from trainers and students: kept off every course list they read
+  // (utils/courseVisibility.js), enrollments untouched. Admins, POC and L&D
+  // still see the course.
+  hiddenFromLearners: {
+    type: Boolean,
+    default: false,
+  },
   courseDescription: {
     type: String,
   },

@@ -1463,9 +1463,11 @@ exports.getCourseStructure = async (req, res) => {
     const scopeMatch = req.query.scope === 'enrolled'
       ? require('../../utils/enrolledCourseScope').enrolledCourseScope(req.user._id, pocMatch)
       : pocMatch;
+    // Courses hidden from trainers and students stay off their lists.
+    const visibility = await require('../../utils/courseVisibility').hiddenCourseFilter(req.user);
 
     const courseStructures = summary
-      ? await CourseStructure.find({ institution: req.user.institution, ...scopeMatch })
+      ? await CourseStructure.find({ institution: req.user.institution, ...scopeMatch, ...visibility })
           .select(
             "courseName courseCode courseImage clientId clientName mappingId coursePath " +
             "serviceType serviceModal category courseLevel courseDuration " +
@@ -1483,6 +1485,7 @@ exports.getCourseStructure = async (req, res) => {
       : await CourseStructure.find({
           institution: req.user.institution,
           ...scopeMatch,
+          ...visibility,
         })
           .populate({
             path: 'batchAndParticipants.users.user',

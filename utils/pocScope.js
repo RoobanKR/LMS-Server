@@ -79,7 +79,9 @@ const resolvePocScope = async (user) => {
 // so its client list holds only the clients of the courses it is enrolled in.
 // Returned with `isPoc: true` because that flag is what every filter builder
 // and by-id check below keys on ("this request is scoped").
-const resolveEnrolmentScope = async (user) => {
+// `excludeHidden` (the scope=enrolled reads) also drops courses hidden from
+// trainers and students (utils/courseVisibility); a POC's scope keeps them.
+const resolveEnrolmentScope = async (user, { excludeHidden = false } = {}) => {
   const institution = user.institution;
   if (!institution) return { ...EMPTY_SCOPE, isPoc: true };
 
@@ -89,6 +91,7 @@ const resolveEnrolmentScope = async (user) => {
   const courses = await CourseStructure.find({
     institution,
     "batchAndParticipants.users.user": user._id,
+    ...(excludeHidden ? await require("./courseVisibility").hiddenCourseFilter(user) : {}),
   })
     .select("_id clientId")
     .lean();

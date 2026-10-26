@@ -1941,7 +1941,8 @@ exports.studentDashboardAnalyticsOptimized = async (req, res) => {
     // client's own `status === 'active'` check is what decides, exactly as
     // before.
     const mine = req.query.mine === '1' || req.query.mine === 'true';
-    const courseMatch = { institution };
+    // Courses hidden from trainers and students stay off their dashboard.
+    const courseMatch = { institution, ...(await require('../../../utils/courseVisibility').hiddenCourseFilter(req.user)) };
     if (mine) {
       const enrolled = await CourseStructure.find({
         institution,

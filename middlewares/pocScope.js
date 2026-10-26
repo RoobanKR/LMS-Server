@@ -29,7 +29,7 @@ const attachPocScope = async (req, res, next) => {
 const attachEnrolledScope = async (req, res, next) => {
   if (req.method !== "GET" || req.query.scope !== "enrolled" || req.pocScope?.isPoc) return next();
   try {
-    req.pocScope = await resolveEnrolmentScope(req.user);
+    req.pocScope = await resolveEnrolmentScope(req.user, { excludeHidden: true });
     return next();
   } catch (error) {
     console.error("attachEnrolledScope: refusing request —", error.message);
