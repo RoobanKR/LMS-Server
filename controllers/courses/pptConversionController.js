@@ -5,6 +5,7 @@ const { execFile } = require('child_process')
 const { promisify } = require('util')
 const os = require('os')
 const crypto = require('crypto')
+const { pathToFileURL } = require('url')
 const PptCache = require('../../models/Courses/PptCacheModel')
 const { storage, publicUrlFor, storagePathFromUrl, readStoredFile, diskPathFor } = require('../../utils/storage')
 
@@ -186,6 +187,8 @@ const SHOW_CONTROLLER = `<script type="text/ecmascript"><![CDATA[
 })();
 ]]></script>`
 
+const SHOW_PROFILE_TEMPLATE = path.join(os.tmpdir(), 'lms-libreoffice-profile')
+
 // One stored show per deck URL — the path is derived from it, so a cache
 // check is a file-exists check and needs no DB field.
 function showPathFor(pptUrl) {
@@ -199,17 +202,38 @@ async function convertDocumentToShow({ buffer, ext, cacheKey }) {
   if (inFlightConversions.has(flightKey)) return inFlightConversions.get(flightKey)
 
   const promise = (async () => {
+    // .pptx / .ppsx / .odp are ZIPs ("PK\3\4"), .ppt is an OLE file. Anything
+    // else (an error page from a dead link, say) would only reach LibreOffice
+    // as "source file could not be loaded".
+    const signature = buffer.subarray(0, 4).toString('hex')
+    if (signature !== '504b0304' && signature !== 'd0cf11e0') {
+      throw new Error(`The presentation file could not be read — the server got ${buffer.length} bytes that are not a PowerPoint file. Re-upload the PPT and try again.`)
+    }
+
     const tempDir = path.join(os.tmpdir(), `pptshow_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
     try {
       await fs.ensureDir(tempDir)
       const inputPath = path.join(tempDir, `presentation.${ext}`)
       await fs.writeFile(inputPath, buffer)
+      // A LibreOffice profile of its own per run: with the shared profile, a
+      // LibreOffice that is already running (the upload-time slide-image
+      // conversion, or one left behind by a timed-out run) takes the job over
+      // and fails it with "source file could not be loaded". Building a profile
+      // takes LibreOffice a long first start, so the first one is kept as a
+      // template and copied in for every later run.
+      const profileDir = path.join(tempDir, 'lo-profile')
+      if (await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(SHOW_PROFILE_TEMPLATE, profileDir).catch(() => {})
       try {
-        await execFileAsync(resolveSoffice(), ['--headless', '--convert-to', 'svg', '--outdir', tempDir, inputPath], { timeout: 120000 })
+        await execFileAsync(
+          resolveSoffice(),
+          [`-env:UserInstallation=${pathToFileURL(profileDir).href}`, '--headless', '--norestore', '--convert-to', 'svg', '--outdir', tempDir, inputPath],
+          { timeout: 180000 }
+        )
       } catch (err) {
         if (err && err.code === 'ENOENT') throw new Error(LIBREOFFICE_MISSING)
         throw err
       }
+      if (!await fs.pathExists(SHOW_PROFILE_TEMPLATE)) await fs.copy(profileDir, SHOW_PROFILE_TEMPLATE).catch(() => {})
       const svgPath = path.join(tempDir, 'presentation.svg')
       if (!await fs.pathExists(svgPath)) throw new Error('LibreOffice slideshow conversion failed')
 
@@ -243,6 +267,11 @@ async function convertPptToShow(req, res) {
     const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
     const ext = m ? m[1].toLowerCase() : 'pptx'
     let buffer = await readStoredFile(pptUrl).catch(() => null)
+    if (!buffer) {
+      // Old Supabase / Cloudinary links whose file was moved into local storage
+      const legacyPath = storagePathFromUrl(pptUrl)
+      if (legacyPath) buffer = await fs.readFile(diskPathFor(legacyPath)).catch(() => null)
+    }
     if (!buffer) {
       const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
       buffer = Buffer.from(response.data)
