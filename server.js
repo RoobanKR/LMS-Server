@@ -86,9 +86,15 @@ app.use('/uploads/storage', express.static(require('./utils/storage').STORAGE_DI
   dotfiles: 'deny',
   index: false,
   maxAge: 0,
-  setHeaders(res) {
+  setHeaders(res, filePath) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    // LibreOffice PPT slideshows load in an iframe on the client, whose pages
+    // send COEP (for the Python terminal) — a cross-origin frame must opt in.
+    if (/[\\/]ppt-shows[\\/]/.test(filePath)) {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+    }
   },
 }));
 // Legacy client-logo uploads remain under Server/uploads/client-logos.

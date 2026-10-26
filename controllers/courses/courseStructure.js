@@ -327,6 +327,11 @@ exports.createCourseStructure = async (req, res) => {
       if (req.body[`${prefix}[ppt][notes]`] !== undefined) {
         result.ppt.notes = req.body[`${prefix}[ppt][notes]`] === 'true';
       }
+      // Parse ppt viewer (Default slide images / LibreOffice slideshow / Office Online)
+      if (req.body[`${prefix}[ppt][viewer]`] !== undefined) {
+        const viewer = req.body[`${prefix}[ppt][viewer]`];
+        result.ppt.viewer = viewer === 'libreoffice' || viewer === 'office' ? viewer : 'default';
+      }
 
       // Parse pdf fields
       if (req.body[`${prefix}[pdf][enabled]`] !== undefined) {
@@ -876,6 +881,11 @@ exports.updateCourseStructure = async (req, res) => {
       }
       if (req.body[`${prefix}[ppt][notes]`] !== undefined) {
         result.ppt.notes = req.body[`${prefix}[ppt][notes]`] === 'true';
+      }
+      // Parse ppt viewer (Default slide images / LibreOffice slideshow / Office Online)
+      if (req.body[`${prefix}[ppt][viewer]`] !== undefined) {
+        const viewer = req.body[`${prefix}[ppt][viewer]`];
+        result.ppt.viewer = viewer === 'libreoffice' || viewer === 'office' ? viewer : 'default';
       }
 
       // Parse pdf fields

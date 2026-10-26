@@ -4,8 +4,9 @@ const axios = require('axios')
 const { execFile } = require('child_process')
 const { promisify } = require('util')
 const os = require('os')
+const crypto = require('crypto')
 const PptCache = require('../../models/Courses/PptCacheModel')
-const { storage, publicUrlFor, storagePathFromUrl, readStoredFile } = require('../../utils/storage')
+const { storage, publicUrlFor, storagePathFromUrl, readStoredFile, diskPathFor } = require('../../utils/storage')
 
 const execFileAsync = promisify(execFile)
 
@@ -141,10 +142,125 @@ async function performConversion({ buffer, ext, cacheKey }) {
   }
 }
 
+// ─── LibreOffice slideshow (Course Setup › PPT viewer = "LibreOffice") ──────
+// LibreOffice's SVG export is one self-contained slideshow file: its built-in
+// player runs the slide transitions and click animations in the browser. The
+// listener below lets the LMS viewer's own Prev / Next buttons drive that
+// player over postMessage (the SVG is served from the API origin, the viewer
+// runs on the client origin) and reports the slide back, so slide numbers,
+// slide MCQs and progress keep working. Next plays the next click animation,
+// then moves to the next slide once the slide has none left — like a clicker.
+// Bump SHOW_VERSION when this script changes so cached shows are rebuilt.
+const SHOW_VERSION = 1
+const SHOW_CONTROLLER = `<script type="text/ecmascript"><![CDATA[
+(function () {
+  function state() {
+    try {
+      var total = theMetaDoc ? theMetaDoc.nNumberOfSlides : 0;
+      var cur = typeof nCurSlide === 'number' ? nCurSlide : 0;
+      var s = aSlideShow;
+      var more = !!(s && s.aNextEffectEventArray && s.nCurrentEffect < s.aNextEffectEventArray.size());
+      return { type: 'lms-ppt-state', slide: cur + 1, total: total,
+        canNext: cur < total - 1 || more,
+        canPrev: cur > 0 || !!(s && s.hasAnyEffectStarted && s.hasAnyEffectStarted()) };
+    } catch (e) { return null; }
+  }
+  var last = '';
+  function report() {
+    var st = state();
+    if (!st || !st.total) return;
+    var key = JSON.stringify(st);
+    if (key !== last) { last = key; parent.postMessage(st, '*'); }
+  }
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || d.type !== 'lms-ppt' || typeof aSlideShow === 'undefined' || !aSlideShow || processingEffect) return;
+    var st = state();
+    if (!st) return;
+    if (d.cmd === 'next' && st.canNext) dispatchEffects(1);
+    else if (d.cmd === 'prev' && st.canPrev) aSlideShow.rewindEffect();
+    else if (d.cmd === 'goto') aSlideShow.displaySlide(Math.max(0, Math.min(st.total - 1, (d.slide | 0) - 1)), true);
+    report();
+  });
+  setInterval(report, 250);
+})();
+]]></script>`
+
+// One stored show per deck URL — the path is derived from it, so a cache
+// check is a file-exists check and needs no DB field.
+function showPathFor(pptUrl) {
+  const hash = crypto.createHash('sha1').update(`${SHOW_VERSION}:${pptUrl}`).digest('hex')
+  return `ppt-shows/show_${hash}.svg`
+}
+
+async function convertDocumentToShow({ buffer, ext, cacheKey }) {
+  const objectPath = cacheKey ? showPathFor(cacheKey) : `ppt-shows/show_${Date.now()}.svg`
+  const flightKey = `show:${objectPath}`
+  if (inFlightConversions.has(flightKey)) return inFlightConversions.get(flightKey)
+
+  const promise = (async () => {
+    const tempDir = path.join(os.tmpdir(), `pptshow_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
+    try {
+      await fs.ensureDir(tempDir)
+      const inputPath = path.join(tempDir, `presentation.${ext}`)
+      await fs.writeFile(inputPath, buffer)
+      try {
+        await execFileAsync(resolveSoffice(), ['--headless', '--convert-to', 'svg', '--outdir', tempDir, inputPath], { timeout: 120000 })
+      } catch (err) {
+        if (err && err.code === 'ENOENT') throw new Error(LIBREOFFICE_MISSING)
+        throw err
+      }
+      const svgPath = path.join(tempDir, 'presentation.svg')
+      if (!await fs.pathExists(svgPath)) throw new Error('LibreOffice slideshow conversion failed')
+
+      const svg = await fs.readFile(svgPath, 'utf8')
+      const end = svg.lastIndexOf('</svg>')
+      if (end < 0) throw new Error('LibreOffice slideshow conversion failed')
+      const { error } = await storage.from('smartlms').upload(objectPath, svg.slice(0, end) + SHOW_CONTROLLER + svg.slice(end))
+      if (error) throw error
+      return { showUrl: publicUrlFor(objectPath) }
+    } finally {
+      await fs.remove(tempDir).catch(() => {})
+    }
+  })()
+
+  inFlightConversions.set(flightKey, promise)
+  promise.catch(() => {}).finally(() => inFlightConversions.delete(flightKey))
+  return promise
+}
+
+// POST /api/ppt/convert-show { pptUrl } → { success, showUrl }
+async function convertPptToShow(req, res) {
+  const pptUrl = req.body?.pptUrl
+  if (!pptUrl) return res.status(400).json({ success: false, error: 'pptUrl is required' })
+
+  try {
+    const objectPath = showPathFor(pptUrl)
+    if (await fs.pathExists(diskPathFor(objectPath))) {
+      return res.json({ success: true, showUrl: publicUrlFor(objectPath), fromCache: true })
+    }
+
+    const m = pptUrl.split('?')[0].match(/\.([a-zA-Z0-9]+)$/)
+    const ext = m ? m[1].toLowerCase() : 'pptx'
+    let buffer = await readStoredFile(pptUrl).catch(() => null)
+    if (!buffer) {
+      const response = await axios.get(pptUrl, { responseType: 'arraybuffer', timeout: 30000 })
+      buffer = Buffer.from(response.data)
+    }
+
+    const { showUrl } = await convertDocumentToShow({ buffer, ext, cacheKey: pptUrl })
+    res.json({ success: true, showUrl })
+  } catch (err) {
+    console.error('❌ PPT slideshow conversion error:', err.message)
+    res.status(500).json({ success: false, error: err.message })
+  }
+}
+
 // Delete the cached conversion and its locally stored slide images. Used when a file is replaced/removed so orphaned slides don't
 // pile up. Safe to fire-and-forget.
 async function cleanupConvertedSlides(pptUrl) {
   if (!pptUrl) return
+  storage.from('smartlms').remove([showPathFor(pptUrl)]).catch(() => {})
   const cached = await PptCache.findOneAndDelete({ pptUrl })
   if (!cached || !Array.isArray(cached.slideImages)) return
   await Promise.all(
@@ -212,4 +328,4 @@ async function convertPptToImages(req, res) {
   }
 }
 
-module.exports = { convertPptToImages, convertDocumentToSlides, cleanupConvertedSlides }
+module.exports = { convertPptToImages, convertDocumentToSlides, cleanupConvertedSlides, convertPptToShow, convertDocumentToShow }

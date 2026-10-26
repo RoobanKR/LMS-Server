@@ -161,6 +161,9 @@ const fileResourceSchema = new mongoose.Schema({
   // Per-type Notes toggle — this upload also carries its own notes, separate
   // from the standalone Notes resource type below.
   notes: { type: Boolean, default: false },
+  // PPT only — how the deck is shown: "default" (slide images), "libreoffice"
+  // (SVG slideshow with animations) or "office" (Microsoft Office Online viewer).
+  viewer: { type: String, enum: ["default", "libreoffice", "office"], default: "default" },
   allowedFormats: [{ type: String }]
 }, { _id: false });
  
