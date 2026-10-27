@@ -11,6 +11,7 @@ const {
   getQuestionById,
   updateQuestion,
   deleteQuestion,
+  reorderQuestions,
   lockExercise,
   getExerciseStatus,
   getCourseExercisesWithUserScores,
@@ -90,6 +91,13 @@ router.delete(
   "/question-delete/:type/:id/:exerciseId/:questionId",
   userAuth,
   deleteQuestion,
+);
+
+// Reorder questions (Question view ↑ / ↓) — the order students get
+router.put(
+  "/questions-reorder/:type/:id/:exerciseId",
+  userAuth,
+  reorderQuestions,
 );
 
 

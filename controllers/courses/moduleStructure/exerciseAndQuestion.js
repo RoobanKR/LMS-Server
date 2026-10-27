@@ -4832,8 +4832,9 @@ exports.getQuestions = async (req, res) => {
       questions = questions.filter(q => q.isActive !== false);
     }
 
-    // Sort by sequence
-    questions.sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+    // Stored array order — the order students get in the editor (the
+    // Question view's ↑ / ↓ rewrites it). Not re-sorted by `sequence`, which
+    // older questions may not keep in step with the array.
 
     // Prepare exercise data with all settings including securitySettings
     const exerciseData = {
@@ -5401,10 +5402,72 @@ exports.deleteQuestion = async (req, res) => {
   }
 };
 
+// Reorder an exercise's questions (Question view ▸ ↑ / ↓). The stored array
+// order IS the order students get in the editor, so this rewrites the array
+// and renumbers `sequence` to match. Questions the request does not list
+// (e.g. inactive ones the view hides) keep their own slots.
+exports.reorderQuestions = async (req, res) => {
+  try {
+    const { type, id, exerciseId } = req.params;
+    const { tabType, subcategory, questionIds } = req.body;
 
+    if (!type || !modelMap[type]) {
+      return res.status(400).json({ message: [{ key: "error", value: `Invalid entity type: ${type}` }] });
+    }
+    if (!tabType || !subcategory || !Array.isArray(questionIds) || !questionIds.length) {
+      return res.status(400).json({ message: [{ key: "error", value: "tabType, subcategory and questionIds are required" }] });
+    }
 
+    const entity = await modelMap[type].model.findById(id);
+    if (!entity) {
+      return res.status(404).json({ message: [{ key: "error", value: `${type} with ID ${id} not found` }] });
+    }
+    const { container: pedagogyRoot, basePath: pedagogyPath } =
+      await resolvePedagogyScope(entity, tabType, req);
+    const section = pedagogyRoot && pedagogyRoot[tabType];
+    const exercises = section instanceof Map ? section.get(subcategory) : section && section[subcategory];
+    if (!Array.isArray(exercises)) {
+      return res.status(404).json({ message: [{ key: "error", value: `Subcategory "${subcategory}" not found in ${tabType}` }] });
+    }
+    const exerciseIndex = exercises.findIndex((ex) =>
+      (ex._id && ex._id.toString() === exerciseId) ||
+      ex.exerciseInformation?.exerciseId === exerciseId);
+    const exercise = exercises[exerciseIndex];
+    if (!exercise || !Array.isArray(exercise.questions)) {
+      return res.status(404).json({ message: [{ key: "error", value: `Exercise "${exerciseId}" not found` }] });
+    }
 
+    // The listed questions fill the slots they already occupy, in the new
+    // order; ids that are no longer in the exercise are ignored.
+    const current = [...exercise.questions];
+    const byId = new Map(current.map((q) => [String(q._id), q]));
+    const wanted = [...new Set(questionIds.map(String))].filter((qid) => byId.has(qid));
+    const listed = new Set(wanted);
+    let next = 0;
+    const reordered = current.map((q) => (listed.has(String(q._id)) ? byId.get(wanted[next++]) : q));
 
+    exercise.questions = reordered.map((q, i) => ({
+      ...(typeof q.toObject === "function" ? q.toObject() : q),
+      sequence: i + 1,
+    }));
+    exercises[exerciseIndex] = exercise;
+    if (section instanceof Map) section.set(subcategory, exercises);
+    else section[subcategory] = exercises;
+
+    entity.markModified(`${pedagogyPath}.${tabType}`);
+    entity.updatedBy = req.user?.email || "system";
+    entity.updatedAt = new Date();
+    await entity.save();
+
+    return res.status(200).json({
+      message: [{ key: "success", value: "Question order saved" }],
+      data: { questionIds: exercise.questions.map((q) => String(q._id)) },
+    });
+  } catch (err) {
+    console.error("❌ Reorder questions error:", err);
+    return res.status(500).json({ message: [{ key: "error", value: `Internal server error: ${err.message}` }] });
+  }
+};
 
 exports.getUserExerciseGradeAnalytics = async (req, res) => {
   try {
