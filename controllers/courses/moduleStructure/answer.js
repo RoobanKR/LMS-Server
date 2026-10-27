@@ -2056,6 +2056,7 @@ exports.submitMultipleFiles = async (req, res) => {
     let evaluationBreakdown = sanitizeBreakdown(rawEvaluationBreakdown);
     let score = clientScore;
     let status = clientStatus;
+    let nonGraded = false;
 
     // ─── Server-authoritative judge (Phase 1 P0, multi-file path) ────────
     // Multi-file editor's client-side testcase loop is now gone; we re-run
@@ -2067,6 +2068,7 @@ exports.submitMultipleFiles = async (req, res) => {
         const q = await loadForJudge({
           nodeType, nodeId, category, subcategory, exerciseId, questionId,
         });
+        nonGraded = !!q && q.isGraded === false;
         const judgeThis = q && shouldServerJudge(q.evaluationMethod, category);
         if (judgeThis && Array.isArray(q.testCases) && q.testCases.length > 0) {
           const judgeFiles = files.map((f) => ({
@@ -2132,6 +2134,10 @@ exports.submitMultipleFiles = async (req, res) => {
         console.error('[judge:mf] server-side judge error, keeping client score:', e?.message || e);
       }
     }
+    // Non-graded exercise: practice only, so no marks are stored — whatever
+    // the judge or the client worked out. The test-case pass/fail breakdown
+    // is kept as feedback.
+    if (nonGraded) score = 0;
 
     const isTestSubmit = isTestSubmission === 'true' || isTestSubmission === true;
 
