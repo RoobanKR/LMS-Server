@@ -100,6 +100,25 @@ const parseProgramCalendarByBatch = (value) => {
   }
 };
 
+// Course Setup's Chat section — JSON over the multipart form like the configs
+// above. undefined when absent or unparseable, so an older client's update
+// leaves the stored switches alone.
+const parseChatSettings = (value) => {
+  try {
+    if (value === undefined || value === null || value === "") return undefined;
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return {
+      enabled: parsed.enabled === true,
+      direct: parsed.direct !== false,
+      group: parsed.group !== false,
+      groupTrainerOnly: parsed.groupTrainerOnly === true,
+    };
+  } catch {
+    return undefined;
+  }
+};
+
 // Degree Program groups snapshot — [{ section, batches[] }], JSON over the
 // multipart form like the two configs above. undefined when absent or
 // unparseable, so an update from an older client leaves the stored one alone.
@@ -739,6 +758,7 @@ exports.createCourseStructure = async (req, res) => {
       courseDuration: courseDuration || "",
       courseLevel,
       aiChatGlobal: aiChatGlobal === 'true' || aiChatGlobal === true,
+      chatSettings: parseChatSettings(req.body.chatSettings) || { enabled: false, direct: true, group: true, groupTrainerOnly: false },
       studentType: studentType || "",
       batch: batch || "",
       degree: degree || "",
@@ -1347,6 +1367,8 @@ exports.updateCourseStructure = async (req, res) => {
       courseDuration: courseDuration || "",
       courseLevel,
       aiChatGlobal: aiChatGlobal === 'true' || aiChatGlobal === true,
+      // undefined when not sent → stripped below, keeping the stored switches.
+      chatSettings: parseChatSettings(req.body.chatSettings),
       studentType: studentType || "",
       batch: batch || "",
       degree: degree || "",

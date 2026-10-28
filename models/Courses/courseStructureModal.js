@@ -436,6 +436,13 @@ const courseStructureSchema = new mongoose.Schema({
     type: pedagogyResourceSchema,
   },
   aiChatGlobal: { type: Boolean, default: false },
+  // People chat (trainer ↔ student, one group per batch) — controllers/peopleChat.js.
+  chatSettings: {
+    enabled: { type: Boolean, default: false },
+    direct: { type: Boolean, default: true },
+    group: { type: Boolean, default: true },
+    groupTrainerOnly: { type: Boolean, default: false },
+  },
  
   // Skill Set Configuration
   testConfiguration: {
@@ -499,6 +506,12 @@ courseStructureSchema.index({ mappingId: 1 });
 // unindexed that is a collection scan per save. Non-unique deliberately:
 // legacy docs may share or omit codes.
 courseStructureSchema.index({ courseCode: 1 });
+// The Messages badge asks "which chat-enabled courses am I in?" for every
+// signed-in user; partial, so it holds only the few courses with chat on.
+courseStructureSchema.index(
+  { "chatSettings.enabled": 1 },
+  { partialFilterExpression: { "chatSettings.enabled": true } }
+);
 
 module.exports = mongoose.model("Course-Structure", courseStructureSchema);
  

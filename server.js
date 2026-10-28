@@ -62,6 +62,7 @@ const pptConversionRoutes = require('./routes/courses/pptConversionRoutes');
 const testYourSkillsRoutes = require('./routes/courses/moduleStructure/testYourSkillsRoutes');
 const retestRoutes = require('./routes/courses/moduleStructure/retestRoutes');
 const feedbackRoutes = require('./routes/feedbackRoutes');  // Import feedback routes
+const peopleChatRoutes = require('./routes/peopleChatRoutes');
 const { startStatusSyncCron } = require("./cron/feedbackStatusSync");
 const backupRoutes = require('./routes/backupRoutes');
 const { startBackupScheduler } = require("./cron/backupScheduler");
@@ -314,6 +315,7 @@ app.use('/', progressRoutes);
 app.use('/', activityLogRoutes);
 app.use('/you-do', testYourSkillsRoutes);
 app.use('/', feedbackRoutes);
+app.use('/', peopleChatRoutes);
 app.use("/", programCalendarRoutes);
 app.use("/", instituteHolidayCalendarRoutes);
 app.use("/", degreeAndDepartmentRoutes);
