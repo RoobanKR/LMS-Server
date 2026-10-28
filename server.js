@@ -175,9 +175,13 @@ socketIO.init(server);
 const io = socketIO.getIO();
 initCompiler(io);
 startStatusSyncCron();
-startBackupScheduler();
 startCodeFilesCleanupCron();
-startAttendanceMissingCron();
+// Staging runs on a copy of the live data: no scheduled backups or
+// attendance alerts from it, so real people aren't messaged twice.
+if (process.env.STAGING !== "true") {
+  startBackupScheduler();
+  startAttendanceMissingCron();
+}
 
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
