@@ -199,6 +199,19 @@ const emitTo = (ids, event, payload) => {
   }
 };
 
+// Who has the LMS open right now: every signed-in page holds the shared
+// socket, which joins the user's own room on connect.
+const onlineIds = (ids) => {
+  let io;
+  try {
+    io = socketIO.getIO();
+  } catch {
+    return new Set();
+  }
+  const rooms = io.sockets.adapter.rooms;
+  return new Set((ids || []).map(String).filter((id) => rooms.has(`user-${id}`)));
+};
+
 const fail = (res, status, message, extra = {}) =>
   res.status(status).json({ success: false, message, ...extra });
 
@@ -254,6 +267,7 @@ exports.getSummary = async (req, res) => {
 exports.getInbox = async (req, res) => {
   try {
     const { userId, student, scopes, convs, unread, locked } = await loadInbox(req.user);
+    const online = onlineIds(scopes.flatMap((s) => s.people.map((p) => idOf(p.user))));
     const threads = [];
     const preview = (conv) =>
       conv?.lastMessage?.text
@@ -294,6 +308,7 @@ exports.getInbox = async (req, res) => {
           title: nameOf(p.user),
           subtitle: student ? `${roleLabelOf(p.user)} · ${p.batchNames.join(", ")}` : p.batchNames.join(", "),
           email: p.user.email || "",
+          online: online.has(peerId),
           batchIds: p.batchIds,
           canPost: true,
           unread: conv ? unread.get(idOf(conv)) || 0 : 0,
