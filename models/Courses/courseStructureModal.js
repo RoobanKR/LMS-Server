@@ -442,6 +442,8 @@ const courseStructureSchema = new mongoose.Schema({
     direct: { type: Boolean, default: true },
     group: { type: Boolean, default: true },
     groupTrainerOnly: { type: Boolean, default: false },
+    // Students may message the other students of their own batch.
+    peers: { type: Boolean, default: false },
   },
  
   // Skill Set Configuration

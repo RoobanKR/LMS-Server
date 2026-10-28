@@ -113,6 +113,7 @@ const parseChatSettings = (value) => {
       direct: parsed.direct !== false,
       group: parsed.group !== false,
       groupTrainerOnly: parsed.groupTrainerOnly === true,
+      peers: parsed.peers === true,
     };
   } catch {
     return undefined;
@@ -758,7 +759,7 @@ exports.createCourseStructure = async (req, res) => {
       courseDuration: courseDuration || "",
       courseLevel,
       aiChatGlobal: aiChatGlobal === 'true' || aiChatGlobal === true,
-      chatSettings: parseChatSettings(req.body.chatSettings) || { enabled: false, direct: true, group: true, groupTrainerOnly: false },
+      chatSettings: parseChatSettings(req.body.chatSettings) || { enabled: false, direct: true, group: true, groupTrainerOnly: false, peers: false },
       studentType: studentType || "",
       batch: batch || "",
       degree: degree || "",

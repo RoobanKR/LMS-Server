@@ -4,9 +4,11 @@
 //   • a student talks to the trainers (staff) of their own batch,
 //   • a trainer talks to the students of the batches they sit in,
 //   • every batch has one group; "only trainer can post" makes it an
-//     announcement channel.
-// No student ↔ student direct chat. A student in an active assessment can
-// neither read nor send until they submit (exam lock).
+//     announcement channel,
+//   • "Student ↔ Student" (off by default) lets a student message the other
+//     students of their own batch.
+// A student in an active assessment can neither read nor send until they
+// submit (exam lock).
 
 const mongoose = require("mongoose");
 const CourseStructure = require("../models/Courses/courseStructureModal");
@@ -34,6 +36,7 @@ const settingsOf = (course) => {
     direct: s.direct !== false,
     group: s.group !== false,
     groupTrainerOnly: s.groupTrainerOnly === true,
+    peers: s.peers === true,
   };
 };
 
@@ -123,9 +126,11 @@ async function chatScope(user, courseId) {
       for (const m of members) {
         const mid = idOf(m);
         if (mid === userId) continue;
-        // Across the line only: a student sees the trainers, a trainer the students.
-        if (isStudentEntry(m) === student) continue;
-        const row = people.get(mid) || { user: m, batchIds: [], batchNames: [] };
+        // A student sees the batch's trainers (and, with Student ↔ Student, its
+        // other students); a trainer sees the students.
+        const sameSide = isStudentEntry(m) === student;
+        if (sameSide ? !(student && settings.peers) : !settings.direct) continue;
+        const row = people.get(mid) || { user: m, classmate: sameSide, batchIds: [], batchNames: [] };
         row.batchIds.push(idOf(b));
         row.batchNames.push(batchLabel(b));
         people.set(mid, row);
@@ -138,7 +143,7 @@ async function chatScope(user, courseId) {
       student,
       settings,
       groups: settings.group ? groups : [],
-      people: settings.direct ? [...people.values()] : [],
+      people: [...people.values()],
     };
   });
 }
@@ -306,7 +311,8 @@ exports.getInbox = async (req, res) => {
           courseName: s.course.courseName || "",
           peerId,
           title: nameOf(p.user),
-          subtitle: student ? `${roleLabelOf(p.user)} · ${p.batchNames.join(", ")}` : p.batchNames.join(", "),
+          subtitle: student && !p.classmate ? `${roleLabelOf(p.user)} · ${p.batchNames.join(", ")}` : p.batchNames.join(", "),
+          peerRole: p.classmate || !student ? "student" : "trainer",
           email: p.user.email || "",
           online: online.has(peerId),
           batchIds: p.batchIds,
