@@ -1,7 +1,8 @@
 // ─── People chat: trainer ↔ student, one group per batch ─────────────────────
 // Course Setup turns it on per course (chatSettings). Who may talk to whom is
 // read from the batch roster every time, never stored:
-//   • a student talks to the trainers (staff) of their own batch,
+//   • a student talks to the trainers of their own batch (trainer role only:
+//     admins, L&D, POC… in a roster are left out of chat),
 //   • a trainer talks to the students of the batches they sit in,
 //   • every batch has one group; "only trainer can post" makes it an
 //     announcement channel,
@@ -16,6 +17,7 @@ const ExamSession = require("../models/Courses/moduleStructure/ExamSessionModel"
 const { ChatConversation, ChatMessage } = require("../models/PeopleChatModel");
 const { roleNamesOf } = require("../utils/pocScope");
 const { isStudentUser } = require("../utils/batchResources");
+const { isTrainerRoleName } = require("../utils/courseVisibility");
 const socketIO = require("../utils/socket");
 
 const MAX_TEXT = 4000;
@@ -46,6 +48,14 @@ const isStudentEntry = (u) => {
   if (isStudentUser(u)) return true;
   const raw = u && u.role;
   return typeof raw === "string" && raw.trim().toLowerCase() === "student";
+};
+
+// Of the staff in a batch (admins, L&D, POC… sit in rosters too) only the
+// trainer roles chat.
+const isTrainerEntry = (u) => {
+  const r = u && u.role;
+  if (!r || typeof r !== "object") return false;
+  return [r.roleValue, r.originalRole, r.renameRole].some(isTrainerRoleName);
 };
 
 const roleLabelOf = (u) => {
@@ -91,6 +101,9 @@ async function lockedStudentIds(ids) {
 async function chatScope(user, courseId) {
   const userId = idOf(user);
   const student = await viewerIsStudent(user);
+  // Chat is for students and their trainers; any other role in a batch
+  // (admin, L&D, POC…) has none.
+  if (!student && !(await roleNamesOf(user)).some(isTrainerRoleName)) return [];
   const filter = { "batchAndParticipants.users.user": user._id, "chatSettings.enabled": true };
   if (courseId) filter._id = courseId;
   if (student) filter.hiddenFromLearners = { $ne: true };
@@ -118,7 +131,8 @@ async function chatScope(user, courseId) {
     for (const b of mine) {
       const members = (b.users || [])
         .filter((e) => e?.user?._id && !INACTIVE.has(e.status))
-        .map((e) => e.user);
+        .map((e) => e.user)
+        .filter((m) => isStudentEntry(m) || isTrainerEntry(m));
       const memberIds = [...new Set(members.map(idOf))];
       const staffIds = [...new Set(members.filter((m) => !isStudentEntry(m)).map(idOf))];
       groups.push({ batchId: idOf(b), name: batchLabel(b), memberIds, staffIds });
