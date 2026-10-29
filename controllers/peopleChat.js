@@ -19,6 +19,11 @@ const { roleNamesOf } = require("../utils/pocScope");
 const { isStudentUser } = require("../utils/batchResources");
 const { isTrainerRoleName } = require("../utils/courseVisibility");
 const socketIO = require("../utils/socket");
+const path = require("path");
+const crypto = require("crypto");
+const {
+  storage, publicUrlFor, storagePathFromUrl, isLocalStorageUrl, sanitizePath,
+} = require("../utils/storage");
 
 const MAX_TEXT = 4000;
 const PAGE_SIZE = 40;
@@ -257,16 +262,105 @@ async function conversationAccess(user, conversationId) {
   return { conv, scope, group: null, recipients: [userId, peerId], peerId };
 }
 
-const toMessage = (m, userId, staffIds) => ({
-  id: idOf(m),
-  conversationId: idOf(m.conversation),
-  text: m.text,
-  at: m.createdAt,
-  senderId: idOf(m.sender),
-  senderName: nameOf(m.sender),
-  mine: idOf(m.sender) === userId,
-  fromTrainer: staffIds ? staffIds.includes(idOf(m.sender)) : undefined,
-});
+/** Access plus the exam lock — every per-conversation call starts here. */
+async function guard(req, res, conversationId) {
+  const access = await conversationAccess(req.user, conversationId);
+  if (access.error) {
+    fail(res, ...access.error);
+    return null;
+  }
+  const userId = idOf(req.user);
+  if (access.scope.student && (await lockedStudentIds([userId])).has(userId)) {
+    fail(res, 423, "Chat is paused during your assessment", { examLock: true });
+    return null;
+  }
+  return { ...access, userId };
+}
+
+const canPostIn = (access) => !(access.group && access.scope.student && access.scope.settings.groupTrainerOnly);
+
+// Reactions offered on a message (the composer's emoji picker is free text).
+const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🎉", "✅"];
+const MAX_ATTACHMENTS = 10;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+// Files served back from the API origin: no html/svg/xml, which a browser
+// would run there.
+const FILE_TYPES = new Set([
+  "jpg", "jpeg", "png", "gif", "webp", "bmp",
+  "pdf", "doc", "docx", "xls", "xlsx", "csv", "ppt", "pptx", "txt", "md", "rtf", "odt", "ods", "odp",
+  "zip", "rar", "7z",
+  "java", "py", "c", "cpp", "h", "hpp", "cs", "js", "jsx", "ts", "tsx", "json", "sql", "css", "ipynb", "go", "kt", "rb", "php",
+  "mp3", "mp4", "webm",
+]);
+const chatFolder = (conv) => `people-chat/${idOf(conv)}/`;
+const URL_RE = /https?:\/\/[^\s<>"'`)\]]+/g;
+
+const groupReactions = (list) => {
+  const by = new Map();
+  for (const r of list || []) {
+    if (!by.has(r.emoji)) by.set(r.emoji, []);
+    by.get(r.emoji).push(idOf(r.user));
+  }
+  return [...by.entries()].map(([emoji, userIds]) => ({ emoji, userIds }));
+};
+
+const previewOf = (m) => (m.text || "").slice(0, 280) || (m.attachments?.length ? `📎 ${m.attachments[0].name}` : "");
+
+const toMessage = (m, userId, staffIds) => {
+  const deleted = Boolean(m.deletedAt);
+  return {
+    id: idOf(m),
+    conversationId: idOf(m.conversation),
+    text: deleted ? "" : m.text || "",
+    at: m.createdAt,
+    senderId: idOf(m.sender),
+    senderName: nameOf(m.sender),
+    mine: idOf(m.sender) === userId,
+    fromTrainer: staffIds ? staffIds.includes(idOf(m.sender)) : undefined,
+    attachments: deleted ? [] : (m.attachments || []).map(({ name, url, size, mime }) => ({ name, url, size, mime })),
+    replyTo: !deleted && m.replyTo?.id
+      ? { id: idOf(m.replyTo.id), senderName: m.replyTo.senderName || "", text: m.replyTo.text || "" }
+      : null,
+    mentions: deleted ? [] : (m.mentions || []).map((u) => ({ id: idOf(u), name: u?.firstName || u?.lastName ? nameOf(u) : "" })),
+    reactions: deleted ? [] : groupReactions(m.reactions),
+    edited: Boolean(m.editedAt) && !deleted,
+    deleted,
+  };
+};
+
+const populateMessage = (q) =>
+  q
+    .populate({ path: "sender", model: "LMS-User", select: "firstName lastName email" })
+    .populate({ path: "mentions", model: "LMS-User", select: "firstName lastName" });
+
+/** Tell everyone in the conversation; a student in an assessment hears that
+ *  something arrived (new messages), not what. */
+async function broadcast(access, event, message) {
+  const base = { conversationId: idOf(access.conv), courseId: idOf(access.conv.course), kind: access.conv.kind };
+  const locked = await lockedStudentIds(access.recipients);
+  emitTo(access.recipients.filter((id) => !locked.has(id)), event, { ...base, message: message && { ...message, mine: false } });
+  if (event === "chat:message") emitTo([...locked], event, { ...base, message: null });
+}
+
+/** The message `id` with the caller's access to its conversation. */
+async function messageAccess(req, res) {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    fail(res, 400, "Invalid message");
+    return null;
+  }
+  const msg = await ChatMessage.findById(req.params.id).lean();
+  if (!msg) {
+    fail(res, 404, "Message not found");
+    return null;
+  }
+  const access = await guard(req, res, idOf(msg.conversation));
+  return access ? { ...access, msg } : null;
+}
+
+async function reloadMessage(id, access) {
+  const m = await populateMessage(ChatMessage.findById(id)).lean();
+  return toMessage(m, access.userId, access.group ? access.group.staffIds : null);
+}
 
 // GET /people-chat/summary — sidebar: is chat on for me, and how many unread.
 exports.getSummary = async (req, res) => {
@@ -383,34 +477,43 @@ exports.openConversation = async (req, res) => {
   }
 };
 
-// GET /people-chat/conversations/:id/messages?before=<iso>
+// GET /people-chat/conversations/:id/messages?before=<iso>   (a page, oldest first)
+// GET /people-chat/conversations/:id/messages?q=<text>        (search, newest first)
 exports.getMessages = async (req, res) => {
   try {
-    const access = await conversationAccess(req.user, req.params.id);
-    if (access.error) return fail(res, ...access.error);
-    const { conv, scope, group, peerId } = access;
-    const userId = idOf(req.user);
-    if (scope.student && (await lockedStudentIds([userId])).has(userId)) {
-      return fail(res, 423, "Chat is paused during your assessment", { examLock: true });
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    const { conv, group, peerId, userId } = access;
+    const staffIds = group ? group.staffIds : null;
+
+    const q = String(req.query.q || "").trim().slice(0, 100);
+    if (q) {
+      const rows = await populateMessage(
+        ChatMessage.find({
+          conversation: conv._id,
+          deletedAt: null,
+          text: new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+        })
+          .sort({ createdAt: -1 })
+          .limit(50)
+      ).lean();
+      return res.json({ success: true, messages: rows.map((m) => toMessage(m, userId, staffIds)) });
     }
 
     const before = req.query.before ? new Date(String(req.query.before)) : null;
     const filter = { conversation: conv._id };
     if (before && !Number.isNaN(before.getTime())) filter.createdAt = { $lt: before };
-    const rows = await ChatMessage.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(PAGE_SIZE + 1)
-      .populate({ path: "sender", model: "LMS-User", select: "firstName lastName email" })
-      .lean();
+    const rows = await populateMessage(ChatMessage.find(filter).sort({ createdAt: -1 }).limit(PAGE_SIZE + 1)).lean();
 
     const hasMore = rows.length > PAGE_SIZE;
     const page = rows.slice(0, PAGE_SIZE).reverse();
     res.json({
       success: true,
-      messages: page.map((m) => toMessage(m, userId, group ? group.staffIds : null)),
+      messages: page.map((m) => toMessage(m, userId, staffIds)),
       hasMore,
       peerReadAt: peerId ? conv.readAt?.[peerId] || null : null,
-      canPost: !(group && scope.student && scope.settings.groupTrainerOnly),
+      canPost: canPostIn(access),
+      canModerate: Boolean(group) && !access.scope.student,
     });
   } catch (e) {
     console.error("people-chat messages:", e);
@@ -418,52 +521,73 @@ exports.getMessages = async (req, res) => {
   }
 };
 
-// POST /people-chat/conversations/:id/messages { text }
+// POST /people-chat/conversations/:id/messages
+//   { text, attachments?: [{ name, url, size, mime }], replyTo?: messageId, mentions?: [userId] }
 exports.sendMessage = async (req, res) => {
   try {
     const text = String(req.body?.text || "").replace(/\s+$/, "");
-    if (!text.trim()) return fail(res, 400, "Message is empty");
     if (text.length > MAX_TEXT) return fail(res, 400, `Message is longer than ${MAX_TEXT} characters`);
 
-    const access = await conversationAccess(req.user, req.params.id);
-    if (access.error) return fail(res, ...access.error);
-    const { conv, scope, group, recipients } = access;
-    const userId = idOf(req.user);
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    const { conv, group, userId } = access;
+    if (!canPostIn(access)) return fail(res, 403, "Only trainers can post in this group");
 
-    if (group && scope.student && scope.settings.groupTrainerOnly) {
-      return fail(res, 403, "Only trainers can post in this group");
+    // Only files uploaded to this conversation's folder; the URL is rebuilt
+    // from the stored path, never taken as sent.
+    const folder = chatFolder(conv);
+    const attachments = [];
+    for (const a of Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, MAX_ATTACHMENTS) : []) {
+      const objectPath = isLocalStorageUrl(a?.url) ? storagePathFromUrl(a.url) : "";
+      if (!objectPath.startsWith(folder)) return fail(res, 400, "A file was not uploaded to this chat");
+      attachments.push({
+        name: String(a.name || objectPath.split("/").pop()).slice(0, 200),
+        url: publicUrlFor(objectPath),
+        size: Math.max(0, Number(a.size) || 0),
+        mime: String(a.mime || "").slice(0, 120),
+      });
     }
-    if (scope.student && (await lockedStudentIds([userId])).has(userId)) {
-      return fail(res, 423, "Chat is paused during your assessment", { examLock: true });
+    if (!text.trim() && !attachments.length) return fail(res, 400, "Message is empty");
+
+    let replyTo;
+    if (req.body?.replyTo && mongoose.isValidObjectId(req.body.replyTo)) {
+      const orig = await ChatMessage.findOne({ _id: req.body.replyTo, conversation: conv._id })
+        .populate({ path: "sender", model: "LMS-User", select: "firstName lastName email" })
+        .lean();
+      if (orig && !orig.deletedAt) {
+        replyTo = { id: orig._id, senderName: nameOf(orig.sender), text: previewOf(orig).slice(0, 200) };
+      }
     }
+
+    // Mentions: only people of this conversation, never yourself.
+    const allowed = new Set(access.recipients.filter((id) => id !== userId));
+    const mentions = [...new Set((Array.isArray(req.body?.mentions) ? req.body.mentions : []).map(String))]
+      .filter((id) => allowed.has(id))
+      .slice(0, 50);
 
     const now = new Date();
-    const created = await ChatMessage.create({ conversation: conv._id, course: conv.course, sender: req.user._id, text });
+    const created = await ChatMessage.create({
+      conversation: conv._id,
+      course: conv.course,
+      sender: req.user._id,
+      text,
+      attachments,
+      ...(replyTo ? { replyTo } : {}),
+      mentions,
+    });
     await ChatConversation.updateOne(
       { _id: conv._id },
       {
         $set: {
-          lastMessage: { text: text.slice(0, 280), sender: req.user._id, at: now },
+          lastMessage: { text: previewOf(created), sender: req.user._id, at: now },
           lastMessageAt: now,
           [`readAt.${userId}`]: now,
         },
       }
     );
 
-    const message = toMessage(
-      { ...created.toObject(), sender: req.user },
-      userId,
-      group ? group.staffIds : null
-    );
-    const base = { conversationId: idOf(conv), courseId: idOf(conv.course), kind: conv.kind };
-
-    // Students inside an assessment hear that something arrived, not what.
-    const others = recipients.filter((id) => id !== userId);
-    const locked = await lockedStudentIds(others);
-    emitTo(others.filter((id) => !locked.has(id)), "chat:message", { ...base, message: { ...message, mine: false } });
-    emitTo([...locked], "chat:message", { ...base, message: null });
-    emitTo([userId], "chat:message", { ...base, message });
-
+    const message = await reloadMessage(created._id, access);
+    await broadcast(access, "chat:message", message);
     res.status(201).json({ success: true, message });
   } catch (e) {
     console.error("people-chat send:", e);
@@ -486,5 +610,223 @@ exports.markRead = async (req, res) => {
   } catch (e) {
     console.error("people-chat read:", e);
     fail(res, 500, "Could not update chat");
+  }
+};
+
+// POST /people-chat/conversations/:id/attachments  (multipart "file") — one
+// file into the conversation's folder; the send that follows carries it.
+exports.uploadAttachment = async (req, res) => {
+  try {
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    if (!canPostIn(access)) return fail(res, 403, "Only trainers can post in this group");
+    const file = req.files && req.files.file;
+    if (!file || Array.isArray(file)) return fail(res, 400, "Choose a file to share");
+    if (file.size > MAX_FILE_BYTES) return fail(res, 413, "Files up to 25 MB can be shared");
+    const ext = path.extname(file.name || "").slice(1).toLowerCase();
+    if (!FILE_TYPES.has(ext)) return fail(res, 415, `.${ext || "?"} files can't be shared here`);
+
+    const safe = sanitizePath(file.name).split("/").pop() || `file.${ext}`;
+    const objectPath = `${chatFolder(access.conv)}${Date.now().toString(36)}${crypto.randomBytes(3).toString("hex")}-${safe}`;
+    const { data, error } = await storage.from().upload(objectPath, file.data);
+    if (error) throw error;
+    res.status(201).json({
+      success: true,
+      attachment: { name: String(file.name).slice(0, 200), url: data.publicUrl, size: file.size, mime: file.mimetype || "" },
+    });
+  } catch (e) {
+    console.error("people-chat upload:", e);
+    fail(res, 500, "Could not upload the file");
+  }
+};
+
+// PATCH /people-chat/messages/:id { text } — your own message.
+exports.editMessage = async (req, res) => {
+  try {
+    const access = await messageAccess(req, res);
+    if (!access) return;
+    const { msg, userId, conv } = access;
+    if (idOf(msg.sender) !== userId) return fail(res, 403, "You can edit only your own messages");
+    if (msg.deletedAt) return fail(res, 400, "This message was deleted");
+    const text = String(req.body?.text || "").replace(/\s+$/, "");
+    if (text.length > MAX_TEXT) return fail(res, 400, `Message is longer than ${MAX_TEXT} characters`);
+    if (!text.trim() && !(msg.attachments || []).length) return fail(res, 400, "Message is empty");
+
+    await ChatMessage.updateOne({ _id: msg._id }, { $set: { text, editedAt: new Date() } });
+    if (conv.lastMessageAt && new Date(conv.lastMessageAt).getTime() === new Date(msg.createdAt).getTime()) {
+      await ChatConversation.updateOne({ _id: conv._id }, { $set: { "lastMessage.text": previewOf({ ...msg, text }) } });
+    }
+    const message = await reloadMessage(msg._id, access);
+    await broadcast(access, "chat:update", message);
+    res.json({ success: true, message });
+  } catch (e) {
+    console.error("people-chat edit:", e);
+    fail(res, 500, "Could not edit the message");
+  }
+};
+
+// DELETE /people-chat/messages/:id — your own; a trainer may remove any
+// message in their batch group.
+exports.deleteMessage = async (req, res) => {
+  try {
+    const access = await messageAccess(req, res);
+    if (!access) return;
+    const { msg, userId, conv, group, scope } = access;
+    const moderator = Boolean(group) && !scope.student;
+    if (idOf(msg.sender) !== userId && !moderator) return fail(res, 403, "You can delete only your own messages");
+    if (msg.deletedAt) return res.json({ success: true });
+
+    await ChatMessage.updateOne(
+      { _id: msg._id },
+      { $set: { deletedAt: new Date(), text: "", attachments: [], mentions: [], reactions: [] } }
+    );
+    // Its files go too.
+    const paths = (msg.attachments || []).map((a) => storagePathFromUrl(a.url)).filter((p) => p.startsWith(chatFolder(conv)));
+    if (paths.length) storage.from().remove(paths).catch(() => {});
+    if (conv.lastMessageAt && new Date(conv.lastMessageAt).getTime() === new Date(msg.createdAt).getTime()) {
+      await ChatConversation.updateOne({ _id: conv._id }, { $set: { "lastMessage.text": "Message deleted" } });
+    }
+    const message = await reloadMessage(msg._id, access);
+    await broadcast(access, "chat:update", message);
+    res.json({ success: true, message });
+  } catch (e) {
+    console.error("people-chat delete:", e);
+    fail(res, 500, "Could not delete the message");
+  }
+};
+
+// POST /people-chat/messages/:id/reactions { emoji } — toggles yours.
+exports.reactMessage = async (req, res) => {
+  try {
+    const emoji = String(req.body?.emoji || "");
+    if (!REACTIONS.includes(emoji)) return fail(res, 400, "Unknown reaction");
+    const access = await messageAccess(req, res);
+    if (!access) return;
+    const { msg, userId } = access;
+    if (msg.deletedAt) return fail(res, 400, "This message was deleted");
+    const mine = (msg.reactions || []).some((r) => r.emoji === emoji && idOf(r.user) === userId);
+    await ChatMessage.updateOne(
+      { _id: msg._id },
+      mine
+        ? { $pull: { reactions: { emoji, user: req.user._id } } }
+        : { $push: { reactions: { emoji, user: req.user._id } } }
+    );
+    const message = await reloadMessage(msg._id, access);
+    await broadcast(access, "chat:update", message);
+    res.json({ success: true, message });
+  } catch (e) {
+    console.error("people-chat react:", e);
+    fail(res, 500, "Could not react");
+  }
+};
+
+// GET /people-chat/conversations/:id/shared — the Shared tab: files and links.
+exports.getShared = async (req, res) => {
+  try {
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    const rows = await ChatMessage.find({
+      conversation: access.conv._id,
+      deletedAt: null,
+      $or: [{ "attachments.0": { $exists: true } }, { text: /https?:\/\//i }],
+    })
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .populate({ path: "sender", model: "LMS-User", select: "firstName lastName email" })
+      .lean();
+
+    const files = [];
+    const links = [];
+    for (const m of rows) {
+      const base = { messageId: idOf(m), at: m.createdAt, senderName: nameOf(m.sender) };
+      (m.attachments || []).forEach((a) => files.push({ ...base, name: a.name, url: a.url, size: a.size || 0, mime: a.mime || "" }));
+      const seen = new Set();
+      for (const url of (m.text || "").match(URL_RE) || []) {
+        const clean = url.replace(/[.,;:!?]+$/, "");
+        if (seen.has(clean)) continue;
+        seen.add(clean);
+        links.push({ ...base, url: clean });
+      }
+    }
+    res.json({ success: true, files, links });
+  } catch (e) {
+    console.error("people-chat shared:", e);
+    fail(res, 500, "Could not load shared files");
+  }
+};
+
+const notesOf = async (conv, access) => {
+  const by = conv.notes?.updatedBy
+    ? await mongoose.model("LMS-User").findById(conv.notes.updatedBy).select("firstName lastName email").lean()
+    : null;
+  return {
+    text: conv.notes?.text || "",
+    updatedAt: conv.notes?.updatedAt || null,
+    updatedBy: by ? nameOf(by) : "",
+    canEdit: conv.kind === "direct" || !access.scope.student,
+  };
+};
+
+// GET /people-chat/conversations/:id/notes
+exports.getNotes = async (req, res) => {
+  try {
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    res.json({ success: true, notes: await notesOf(access.conv, access) });
+  } catch (e) {
+    console.error("people-chat notes:", e);
+    fail(res, 500, "Could not load notes");
+  }
+};
+
+// PUT /people-chat/conversations/:id/notes { text } — trainers edit a group's
+// notes; both people edit a direct chat's.
+exports.saveNotes = async (req, res) => {
+  try {
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    if (!(access.conv.kind === "direct" || !access.scope.student)) return fail(res, 403, "Only trainers can edit these notes");
+    const text = String(req.body?.text ?? "");
+    if (text.length > 20000) return fail(res, 400, "Notes are longer than 20000 characters");
+    const conv = await ChatConversation.findByIdAndUpdate(
+      access.conv._id,
+      { $set: { notes: { text, updatedBy: req.user._id, updatedAt: new Date() } } },
+      { new: true }
+    ).lean();
+    const notes = await notesOf(conv, access);
+    emitTo(access.recipients, "chat:notes", { conversationId: idOf(conv) });
+    res.json({ success: true, notes });
+  } catch (e) {
+    console.error("people-chat notes save:", e);
+    fail(res, 500, "Could not save notes");
+  }
+};
+
+// GET /people-chat/conversations/:id/members — the People list.
+exports.getMembers = async (req, res) => {
+  try {
+    const access = await guard(req, res, req.params.id);
+    if (!access) return;
+    const ids = access.recipients;
+    const users = await mongoose
+      .model("LMS-User")
+      .find({ _id: { $in: ids } })
+      .select("firstName lastName email role")
+      .populate({ path: "role", model: "Role", select: "originalRole renameRole roleValue" })
+      .lean();
+    const online = onlineIds(ids);
+    const members = users
+      .map((u) => ({
+        id: idOf(u),
+        name: nameOf(u),
+        role: isStudentEntry(u) ? "student" : "trainer",
+        online: online.has(idOf(u)),
+        me: idOf(u) === access.userId,
+      }))
+      .sort((a, b) => (a.role === b.role ? a.name.localeCompare(b.name) : a.role === "trainer" ? -1 : 1));
+    res.json({ success: true, members });
+  } catch (e) {
+    console.error("people-chat members:", e);
+    fail(res, 500, "Could not load people");
   }
 };

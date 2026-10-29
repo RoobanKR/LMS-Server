@@ -26,6 +26,13 @@ const chatConversationSchema = new mongoose.Schema(
     // userId → when that user last opened the conversation. Unread = messages
     // from others after this; the peer's mark is what draws the seen ticks.
     readAt: { type: Map, of: Date, default: {} },
+    // The Notes tab: one shared page per conversation (trainers edit a
+    // group's; both people edit a direct chat's).
+    notes: {
+      text: { type: String, default: "", maxlength: 20000 },
+      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", default: null },
+      updatedAt: { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );
@@ -36,7 +43,29 @@ const chatMessageSchema = new mongoose.Schema(
     conversation: { type: mongoose.Schema.Types.ObjectId, ref: "PeopleChatConversation", required: true },
     course: { type: mongoose.Schema.Types.ObjectId, ref: "Course-Structure" },
     sender: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User", required: true },
-    text: { type: String, required: true, maxlength: 4000 },
+    // Empty when the message is only files.
+    text: { type: String, default: "", maxlength: 4000 },
+    // Uploaded through /people-chat/conversations/:id/attachments.
+    attachments: [
+      {
+        _id: false,
+        name: { type: String, required: true },
+        url: { type: String, required: true },
+        size: { type: Number, default: 0 },
+        mime: { type: String, default: "" },
+      },
+    ],
+    // A copy of the message answered, so the quote survives its edits.
+    replyTo: {
+      id: { type: mongoose.Schema.Types.ObjectId, default: null },
+      senderName: { type: String, default: "" },
+      text: { type: String, default: "" },
+    },
+    mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: "LMS-User" }],
+    reactions: [{ _id: false, emoji: String, user: { type: mongoose.Schema.Types.ObjectId, ref: "LMS-User" } }],
+    editedAt: { type: Date, default: null },
+    // Deleted messages keep their place ("This message was deleted").
+    deletedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
