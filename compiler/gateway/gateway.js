@@ -13,6 +13,7 @@
 
 const crypto = require('crypto')
 const { connect } = require('../queue/connections')
+const { queuePosition } = require('../queue/position')
 const { SessionRegistry } = require('./sessions')
 const { LANGUAGES, LABELS, TERMINAL, EVENTS, channels: makeChannels } = require('../protocol')
 const settings = require('../config')
@@ -164,16 +165,15 @@ class CompilerGateway {
 
     // While the run waits for a worker, tell the student where they are.
     watchQueue(session) {
-        const queue = this.conn.queues[session.language]
         let announced = false
         const check = async () => {
             if (session.status !== 'queued' || session.ending || !this.sessions.get(session.sessionId)) return
             try {
-                const waiting = await queue.getJobs(['waiting', 'prioritized'], 0, 500, true)
-                const index = waiting.findIndex((j) => j.id === session.sessionId)
-                if (index !== -1 && session.status === 'queued') {
-                    if (!announced) { announced = true; log.info('queued', { sessionId: session.sessionId, language: session.language, position: index + 1 }) }
-                    this.emit(session, EVENTS.queued, { position: index + 1, waiting: waiting.length })
+                // Two Redis calls, not every waiting job's data (queuePosition).
+                const { position, waiting } = await queuePosition(this.conn, session.language, session.sessionId)
+                if (position > 0 && session.status === 'queued') {
+                    if (!announced) { announced = true; log.info('queued', { sessionId: session.sessionId, language: session.language, position }) }
+                    this.emit(session, EVENTS.queued, { position, waiting })
                 }
             } catch (e) {
                 log.warn('queue_position_failed', { sessionId: session.sessionId, error: e.message })

@@ -17,10 +17,10 @@
 //      files ride along unchanged. When the student wrote a full program
 //      (has input()/Scanner/cin), decide() returns stdio mode and nothing
 //      is appended.
-//   3. Loop the question's testCases[] and call Piston with stdin = tc.input
-//      each time. A 300ms gap between calls matches the soft rate-limit the
-//      old client-side loop used against public emkc.org — cheap on the
-//      self-hosted container and lets us swap to emkc as fallback later.
+//   3. Run every test case with stdin = tc.input: compiled languages in one
+//      compiler-service job (compile once, CPU-time limits; see
+//      judgeOnCompilerService), Python — and anything the service can't
+//      take — one Piston call per case.
 //   4. compare(stdout, tc.expectedOutput, { type: tc.expectedType }) →
 //      per-case pass/fail. Aggregate for score + status + breakdown.
 //
@@ -29,6 +29,7 @@
 // controller's persistence path is untouched — we swap the client-computed
 // object for a server-computed one and everything downstream keeps working.
 
+const crypto = require('crypto');
 const { compare } = require('./compare');
 const { decide } = require('./driverInjector');
 
@@ -167,7 +168,70 @@ function pickEntryIndex(files, language) {
   return 0;
 }
 
-async function callPiston({ language, files, stdin, runTimeoutMs = 5000, version = null }) {
+// ─── Piston admission limiter ───────────────────────────────────────────────
+// Every Piston call (Run tests, Submit, /run/piston, runOnce) goes through
+// callPiston and so through here. Piston runs up to 64 jobs at once and its
+// limits are wall-clock time: a burst of Java compiles (~1 CPU-second each)
+// starves the 8 cores and correct programs come back SIGKILLed as false TLE.
+// So compiled languages get a few parallel slots, while Python/JavaScript
+// (cheap, bound by Piston's per-job overhead) get many. A call waits FIFO for
+// a slot of its class. The wait counts toward no timeout: Piston's limits
+// start only once it receives the job, and timeMs starts at the slot grant.
+// 0 = no limit for that class. LMS-Server is one process, so this limit is
+// server-wide; staging-server and load-test scripts each have their own.
+const PISTON_COMPILED = new Set(['java', 'c', 'cpp', 'csharp', 'go', 'typescript']);
+
+function envInt(name, fallback) {
+  const n = Number.parseInt(process.env[name] ?? '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+class FifoLimiter {
+  constructor(max) { this.max = max; this.active = 0; this.waiting = []; }
+  acquire() {
+    if (!this.max || this.active < this.max) { this.active++; return Promise.resolve(); }
+    return new Promise((resolve) => this.waiting.push(resolve));
+  }
+  release() {
+    const next = this.waiting.shift();
+    if (next) next(); // the slot passes straight to the longest waiter
+    else this.active--;
+  }
+  stats() { return { max: this.max, active: this.active, waiting: this.waiting.length }; }
+}
+
+// Created on first use so the values come from .env (dotenv) whatever the
+// require order.
+let pistonLimiters = null;
+function pistonLimiter(pistonLanguage) {
+  if (!pistonLimiters) {
+    pistonLimiters = {
+      compiled: new FifoLimiter(envInt('PISTON_MAX_PARALLEL_COMPILED', 12)),
+      light: new FifoLimiter(envInt('PISTON_MAX_PARALLEL_LIGHT', 48)),
+    };
+  }
+  return PISTON_COMPILED.has(pistonLanguage) ? pistonLimiters.compiled : pistonLimiters.light;
+}
+
+/** { compiled: { max, active, waiting }, light: { … } } — for monitoring. */
+function pistonLimiterStats() {
+  pistonLimiter('python');
+  return { compiled: pistonLimiters.compiled.stats(), light: pistonLimiters.light.stats() };
+}
+
+async function callPiston(opts) {
+  const rt = PISTON_RUNTIMES[normalizeLanguage(opts && opts.language)] || PISTON_RUNTIMES.python;
+  const limiter = pistonLimiter(rt.language);
+  await limiter.acquire();
+  try {
+    return await executeOnPiston(opts);
+  } finally {
+    limiter.release();
+  }
+}
+
+// One Piston execution; the caller holds a limiter slot.
+async function executeOnPiston({ language, files, stdin, runTimeoutMs = 5000, version = null }) {
   const rt = PISTON_RUNTIMES[normalizeLanguage(language)] || PISTON_RUNTIMES.python;
   const picked = cleanVersion(version);
   const body = {
@@ -198,7 +262,8 @@ async function callPiston({ language, files, stdin, runTimeoutMs = 5000, version
     // the default rather than failing every submission.
     if (picked && picked !== rt.version && res.status === 400 && /runtime is unknown/i.test(text)) {
       console.warn(`[codeJudge] ${rt.language} ${picked} is not installed in Piston; using ${rt.version}`);
-      return callPiston({ language, files, stdin, runTimeoutMs });
+      // Same slot: re-acquiring here could deadlock once every slot is taken.
+      return executeOnPiston({ language, files, stdin, runTimeoutMs });
     }
     return { httpError: `Piston HTTP ${res.status}: ${text.slice(0, 300)}`, timeMs: Date.now() - t0 };
   }
@@ -213,6 +278,102 @@ async function callPiston({ language, files, stdin, runTimeoutMs = 5000, version
     compileError: compile && compile.code ? (compile.stderr || compile.output || '') : '',
     timeMs: Date.now() - t0,
   };
+}
+
+// ─── Run tests on the compiler service ──────────────────────────────────────
+// Compiled languages judge on the LMS compiler service (the warm workers
+// behind Run): one compile, then one run per test case with that case's
+// stdin, each under a CPU-time limit. A busy server can no longer turn a
+// correct program into a false TLE (Piston's limits are wall-clock time),
+// and Java compiles once instead of once per case. Python stays on Piston,
+// which handles it cheaply. Whenever the service can't (offline, no workers
+// for the language, too slow, workers' memory full), the submission is
+// judged on Piston exactly as before. Languages: JUDGE_COMPILER_LANGUAGES.
+const DEFAULT_COMPILER_LANGUAGES = 'java,c,cpp,csharp,javascript,typescript,go';
+const ENTRY_EXT = { c: '.c', cpp: '.cpp', go: '.go', csharp: '.cs', javascript: '.js', typescript: '.ts' };
+
+let compilerLanguages = null;
+function judgesOnCompiler(lang) {
+  if (!compilerLanguages) {
+    compilerLanguages = new Set(String(process.env.JUDGE_COMPILER_LANGUAGES ?? DEFAULT_COMPILER_LANGUAGES)
+      .split(',').map((s) => normalizeLanguage(s)).filter(Boolean));
+  }
+  return compilerLanguages.has(lang);
+}
+
+/**
+ * Run `stdins` against the project on the compiler service. Returns one
+ * callPiston-shaped result per stdin, or null when the service can't judge
+ * it (the caller then uses Piston).
+ */
+// A Run-tests click's own id (from the browser), so it can ask for its place
+// in the queue while it waits (judgeQueuePosition).
+const QUEUE_TOKEN = /^[A-Za-z0-9-]{8,64}$/;
+const judgeJobId = (token) => `judge-${token}`;
+
+/** { position, waiting } of a Run-tests click still waiting; position 0 = not waiting. */
+async function judgeQueuePosition(language, token) {
+  const lang = normalizeLanguage(language);
+  if (!QUEUE_TOKEN.test(String(token || ''))) return { position: 0, waiting: 0 };
+  const conn = require('../compiler/queue/connections').connect();
+  if (!conn || !conn.queues[lang]) return { position: 0, waiting: 0 };
+  return require('../compiler/queue/position').queuePosition(conn, lang, judgeJobId(token));
+}
+
+async function judgeOnCompilerService({ language, files, stdins, runTimeoutMs, queueToken }) {
+  const lang = normalizeLanguage(language);
+  if (!judgesOnCompiler(lang) || !files.length) return null;
+  const conn = require('../compiler/queue/connections').connect();
+  if (!conn || !conn.queues[lang] || !conn.events[lang]) return null;
+  // Every waiting judge adds a short-lived 'closing' listener to the queue
+  // (BullMQ's waitUntilFinished); a class of students exceeds Node's default
+  // of 10 and would log a false "memory leak" warning.
+  if (conn.queues[lang].getMaxListeners() < 1000) conn.queues[lang].setMaxListeners(1000);
+  const health = JSON.parse((await conn.commands.get(`${conn.prefix}:health`)) || 'null');
+  const staleMs = require('../compiler/config').get().serviceStaleMs;
+  if (!health || Date.now() - health.ts > staleMs || !(health.languages?.[lang]?.total > 0)) return null;
+
+  // Piston's names (Java files named after their public class), with the
+  // entry file carrying its language's extension: the compilers pick their
+  // inputs by extension (Submit sends the code as a file called "main").
+  const named = files.map((f, i) => {
+    let path = String(f.name || '').replace(/^\/+/, '') || `main${ENTRY_EXT[lang] || ''}`;
+    if (i === 0 && ENTRY_EXT[lang] && !path.toLowerCase().endsWith(ENTRY_EXT[lang])) path = `main${ENTRY_EXT[lang]}`;
+    return { path, content: f.content || '' };
+  });
+  const judgeId = judgeJobId(QUEUE_TOKEN.test(String(queueToken || '')) ? queueToken : crypto.randomUUID());
+  const job = await conn.queues[lang].add('judge', {
+    judgeId, language: lang, files: named, entry: named[0].path,
+    tests: stdins.map((stdin) => ({ stdin })),
+    cpuSeconds: Math.max(1, Math.ceil(runTimeoutMs / 1000)),
+  }, { jobId: judgeId, attempts: 1, removeOnComplete: { age: 60 }, removeOnFail: { age: 60 } });
+  const waitMs = envInt('JUDGE_COMPILER_WAIT_MS', 55000);
+  let result;
+  try {
+    result = await job.waitUntilFinished(conn.events[lang], waitMs);
+  } catch (e) {
+    await job.remove().catch(() => {}); // still queued: don't run it any more
+    throw e;
+  }
+  if (!result || result.compile?.busy || !Array.isArray(result.cases)) return null;
+  const c = result.compile || {};
+  if (c.timedOut || c.exitCode !== 0) {
+    const compileError = c.timedOut
+      ? 'Compilation took too long and was stopped.'
+      : (c.output || `The compiler failed (exit code ${c.exitCode}).`);
+    return stdins.map(() => ({ stdout: '', stderr: '', exitCode: null, signal: null, compileError, timeMs: 0 }));
+  }
+  if (result.cases.length !== stdins.length || result.cases.some((r) => r.busy)) return null;
+  return result.cases.map((r) => ({
+    stdout: r.stdout || '',
+    stderr: r.stderr || '',
+    exitCode: typeof r.exitCode === 'number' ? r.exitCode : null,
+    // judge() reads SIGKILL as Time Limit Exceeded. A memory kill is a
+    // runtime error instead; its message is the last stderr line.
+    signal: r.tle ? 'SIGKILL' : (r.memory ? null : (r.signal || null)),
+    compileError: '',
+    timeMs: r.timeMs || 0,
+  }));
 }
 
 /**
@@ -246,6 +407,8 @@ async function judge(opts) {
     // leaves an intentionally-tight bound to catch student infinite loops.
     runTimeoutMs = 10000,
     version = null,
+    // Run tests: the browser's id for this click (see judgeQueuePosition).
+    queueToken = null,
   } = opts || {};
 
   const log = [];
@@ -291,21 +454,26 @@ async function judge(opts) {
 
   push('system', `🧪 Running ${testCases.length} test case${testCases.length > 1 ? 's' : ''}…`);
 
+  // Compiled languages: every case in one compiler-service job (see
+  // judgeOnCompilerService); null → each case on Piston, as before.
+  let serviceRuns = null;
+  try {
+    serviceRuns = await judgeOnCompilerService({
+      language, files: pistonFiles, stdins: testCases.map((tc) => String(tc.input ?? '')), runTimeoutMs, queueToken,
+    });
+  } catch (e) {
+    console.warn(`[codeJudge] compiler service could not judge ${normalizeLanguage(language)}, using Piston: ${e?.message || e}`);
+  }
+
   for (let i = 0; i < testCases.length; i++) {
     const tc = testCases[i];
     const label = tc.isHidden ? `Hidden test #${i + 1}` : `Test #${i + 1}`;
     const stdin = String(tc.input ?? '');
     const expected = String(tc.expectedOutput ?? '');
 
-    let r = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
-    // Piston queue-under-load can SIGKILL a Java/JVM process that would
-    // normally finish in ~1s. Retry ONCE on TLE with a fresh call — if the
-    // student's code really is looping, the second attempt SIGKILLs too and
-    // the verdict stays TLE, so an infinite loop still fails cleanly.
-    if (r.signal === 'SIGKILL' && !r.stdout) {
-      const retry = await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
-      if (retry.signal !== 'SIGKILL' || retry.stdout) r = retry;
-    }
+    // No retry on SIGKILL: Piston calls are limited per language class
+    // (pistonLimiter), so a timeout is the program's own.
+    const r = serviceRuns ? serviceRuns[i] : await callPiston({ language, files: pistonFiles, stdin, runTimeoutMs, version });
 
     let ok = false;
     let actual = '';
@@ -379,10 +547,6 @@ async function judge(opts) {
       timeMs: r.timeMs || 0,
       verdict,
     });
-
-    // Soft pacing between cases — matches the previous client-loop behaviour
-    // (300ms cheap on self-hosted, useful if we ever proxy to public emkc).
-    if (i < testCases.length - 1) await new Promise((r) => setTimeout(r, 300));
   }
 
   const score = Math.round((passed / testCases.length) * maxMarks * 100) / 100;
@@ -431,5 +595,5 @@ async function runOnce({ language, files = [], stdin = '', version = null, runTi
 module.exports = {
   judge, callPiston, pickEntryIndex, pistonFilename, PISTON_URL,
   normalizeLanguage, versionFor, cleanLanguageVersions, listInstalledRuntimes,
-  isRunnableLanguage, runOnce,
+  isRunnableLanguage, runOnce, pistonLimiterStats, judgeQueuePosition,
 };

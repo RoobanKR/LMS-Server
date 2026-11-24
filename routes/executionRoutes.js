@@ -17,7 +17,7 @@
 
 const express = require('express');
 const { userAuth } = require('../middlewares/userAuth');
-const { callPiston, judge, listInstalledRuntimes } = require('../services/codeJudge');
+const { callPiston, judge, listInstalledRuntimes, judgeQueuePosition } = require('../services/codeJudge');
 
 const router = express.Router();
 
@@ -143,6 +143,7 @@ router.post('/run/judge', userAuth, async (req, res) => {
       maxMarks = 10,
       run_timeout,
       version,
+      queue_token, // this click's id, so the browser can ask GET /run/judge/position
     } = req.body || {};
 
     if (!language || !Array.isArray(files) || files.length === 0) {
@@ -164,12 +165,26 @@ router.post('/run/judge', userAuth, async (req, res) => {
       functionName,
       runTimeoutMs,
       version,
+      queueToken: typeof queue_token === 'string' ? queue_token : null,
     });
     return res.json(result);
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Judge error.' });
   } finally {
     release(userId);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /run/judge/position?language=java&token=<queue_token> — while a Run
+// tests click waits for a free runner: { position, waiting } (position 0 =
+// running or finished). Two cheap Redis calls; not rate-limited like runs.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/run/judge/position', userAuth, async (req, res) => {
+  try {
+    return res.json(await judgeQueuePosition(String(req.query.language || ''), String(req.query.token || '')));
+  } catch (e) {
+    return res.json({ position: 0, waiting: 0 });
   }
 });
 

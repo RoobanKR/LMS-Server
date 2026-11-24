@@ -2,6 +2,11 @@
 // holds the same definitions and the full description). Two small copies so
 // the LMS server and the compiler service deploy independently: change both
 // together.
+//
+// Jobs on each language queue: 'run' (a live session, sent by the gateway)
+// and 'judge' (Run tests / Submit for compiled languages, sent by
+// services/codeJudge.js and awaited through QueueEvents; data and result are
+// described in the service copy).
 
 const LANGUAGES = ['java', 'c', 'cpp', 'csharp', 'javascript', 'typescript', 'go']
 const LABELS = { java: 'Java', c: 'C', cpp: 'C++', csharp: 'C#', javascript: 'JavaScript', typescript: 'TypeScript', go: 'Go' }
